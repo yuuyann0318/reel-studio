@@ -21,6 +21,9 @@
   },
   "higgsfield": {
     "cli_bin": "higgsfield",
+    "model": "seedance_2_0_mini",
+    "resolution": "480p",
+    "max_credits_per_shot": 10,
     "poll_interval_sec": 5,
     "poll_timeout_sec": 600
   },

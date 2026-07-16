@@ -23,7 +23,14 @@ _DEFAULTS = {
     "target_duration_sec": 30,
     "voice": "Kyoko",
     "brand_rules": {"ng_words": []},
-    "higgsfield": {"cli_bin": "higgsfield", "poll_interval_sec": 5, "poll_timeout_sec": 600},
+    "higgsfield": {
+        "cli_bin": "higgsfield",
+        "model": "seedance_2_0_mini",
+        "resolution": "480p",
+        "max_credits_per_shot": 10,
+        "poll_interval_sec": 5,
+        "poll_timeout_sec": 600,
+    },
     "cloudapi": {"base_url": "", "api_key_env": "HIGGSFIELD_API_KEY"},
 }
 

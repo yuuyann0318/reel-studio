@@ -78,24 +78,52 @@ python run.py --theme "AIで副業を始める最初の一歩" --duration 20 --b
 `drawtext`でキャプションを焼いた擬似クリップを生成する。外部API・課金・鍵が一切不要で、
 常にE2Eが通ることを保証する。本プロジェクトの自己検証はこのバックエンドで実施済み。
 
-### higgsfield（未検証・要CLI仕様確認）
+### higgsfield（実CLI仕様確認済み・2026-07-17）
 
-`pipeline/visual/higgsfield_backend.py` は Higgsfield CLI（想定: `npm i -g @higgsfield/cli`）
-をsubprocessで呼び出す実装。**本実装時点(2026-07-17)ではCLIの実サブコマンド名・
-引数・ジョブID/ステータスJSONの形式を未確認**。`_build_generate_cmd()` /
-`_build_status_cmd()` / `_build_download_cmd()` / `_parse_job_id()` / `_parse_status()`
-の5関数にコマンド構築・レスポンス解釈を隔離してあるので、実際に使う前に
+`pipeline/visual/higgsfield_backend.py` は Higgsfield CLI（`higgsfield` コマンド、
+確認時バージョン `1.1.17`）をsubprocessで呼び出す実装。実機で確認済みのフローは
+以下の3段階（コマンド構築・レスポンス解釈は `_build_*_cmd()` / `_parse_*()` に隔離）。
+
+1. コスト見積: `higgsfield generate cost <model> --prompt "..." --aspect-ratio 9:16
+   --resolution 480p --duration <int> --json` → `{"credits": N}`。
+   `config.json` の `higgsfield.max_credits_per_shot`（既定10）を超える見積の場合は
+   **ジョブを投入せず中断**する（課金安全弁。`HiggsfieldCostLimitError`）。
+2. ジョブ投入: `higgsfield generate create <model> --prompt "..." --aspect-ratio 9:16
+   --resolution 480p|720p --duration <int秒> --json` → job_idのJSON配列
+   （例 `["2296cac2-..."]`）。
+3. 完了待ち: `higgsfield generate wait <job_id> --timeout <N>s --interval <N>s --json`
+   → `status=="completed"` で `result_url` にmp4のURL。`curl` でダウンロードして
+   out_pathへ保存する。
+
+**セットアップ手順**:
 
 ```bash
-npm i -g @higgsfield/cli
-higgsfield auth login   # ユーザー本人が実行（なりすまし不可）
-higgsfield --help
-higgsfield generate --help
+# higgsfield CLIはPATHに無い場合、node同梱binを一時的に追加
+export PATH="/Users/yuuya/claude code/node-v22.11.0-darwin-arm64/bin:$PATH"
+
+higgsfield auth login       # ユーザー本人が実行（なりすまし不可・初回のみ）
+higgsfield workspace list --json   # ワークスペース(プラン/クレジット残高)を確認
+higgsfield workspace set <workspace_id>   # 未選択なら選択
 ```
 
-を実行して仕様を確認し、上記5関数だけを実際の仕様に合わせて修正すること。
-CLI未インストール時は「`npm i -g @higgsfield/cli && higgsfield auth login`を実行してください」
-という明確なエラーメッセージを返す（黙って失敗しない）。
+コード側はPATHに `higgsfield` が無くても、`shutil.which()` が失敗したら
+node同梱パス（`/Users/yuuya/claude code/node-v22.11.0-darwin-arm64/bin/higgsfield`）へ
+自動フォールバックする（`_resolve_cli_bin()`）ため、通常は追加設定不要。
+
+**エラー分類**: `HiggsfieldAuthError`（stderrに"Not authenticated"）/
+`HiggsfieldTimeoutError`（CLI自身のタイムアウト報告 or Python側subprocessタイムアウト）/
+`HiggsfieldJobFailedError`（status=="failed"）/ `HiggsfieldCostLimitError`（課金安全弁）を
+それぞれ明確なメッセージで区別する（すべて`VisualBackendError`のサブクラス）。
+
+**実測**: `resolution: "480p"`, `aspect_ratio: "9:16"` を指定すると、実際の出力は
+**496x864**（h264, 24fps, aac音声付き）で返る（1080x1920ではない）。そのため
+`pipeline/render.build_normalize_clip_cmd`（scale+crop+fps+format）による
+1080x1920への正規化を、mock/higgsfieldどちらの出力に対しても必ず経由させている
+（`run.py` Stage 3で全バックエンド共通）。
+
+**既定モデル**: `seedance_2_0_mini`（video, aspect_ratio="9:16"対応,
+resolution=480p/720p, durationは整数秒, generate_audio=true既定）。
+`config.json` の `higgsfield.model` で変更可能。
 
 ### cloudapi（未実装スタブ）
 
@@ -112,7 +140,15 @@ CLI未インストール時は「`npm i -g @higgsfield/cli && higgsfield auth lo
   "resolution": [1080, 1920],
   "target_duration_sec": 30,
   "voice": "Kyoko",
-  "brand_rules": {"ng_words": ["絶対稼げる", "100%成功", "みお", "@mio_ai_insta_", ...]}
+  "brand_rules": {"ng_words": ["絶対稼げる", "100%成功", "みお", "@mio_ai_insta_", ...]},
+  "higgsfield": {
+    "cli_bin": "higgsfield",
+    "model": "seedance_2_0_mini",
+    "resolution": "480p",
+    "max_credits_per_shot": 10,
+    "poll_interval_sec": 5,
+    "poll_timeout_sec": 600
+  }
 }
 ```
 
@@ -129,8 +165,9 @@ python -m pytest -q
 
 ## 既知の未完・リスク
 
-- **higgsfield_backend.py は未検証。** Higgsfield CLIの実サブコマンド名・JSON形式を
-  確認していないため、実際に`--backend higgsfield`で動かす前に上記の仕様確認が必須。
+- **higgsfield_backend.py は実CLI仕様確認済み・1ショットの実機生成で検証済み**
+  （2026-07-17。5秒/480p/9:16で実生成→ダウンロード→ffprobe実測まで確認）。
+  ただし複数ショットのフルリール生成でのコスト・安定性（レート制限等）は未検証。
 - **cloudapi_backend.py は未実装スタブ。** エンドポイント仕様確定後に実装する。
 - ナレーション音声とショットの表示区間の同期は、TTSの単語単位タイムスタンプではなく
   「ショットごとの想定尺(duration_sec)」に基づく近似（`say`コマンドは単語タイムスタンプを
