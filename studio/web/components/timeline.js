@@ -18,7 +18,7 @@ export function renderTimeline(container, state, actions) {
   if (!project || !plan) {
     container.innerHTML = `
       <div class="state-block" style="padding:var(--space-3);">
-        <div class="state-block__desc">プロジェクトを開くとタイムラインが表示されます</div>
+        <div class="state-block__desc">プロジェクトを開くと表示されます</div>
       </div>`;
     return;
   }
@@ -79,13 +79,15 @@ export function renderTimeline(container, state, actions) {
     <div class="timeline-body">
       <div class="timeline-tracklabels">
         <div style="height:28px;">時間</div>
-        <div class="timeline-track--bgm" style="height:44px;">BGM</div>
+        <div class="timeline-track--bgm" style="height:36px;">BGM</div>
+        <div class="timeline-track--sfx" style="height:28px;">SFX</div>
         <div style="height:72px;">ショット</div>
       </div>
       <div class="timeline-scroll scroll-x">
         <div class="timeline-tracks" style="width:${widthPx}px;">
           <div class="timeline-ruler">${ruler}</div>
-          <div class="timeline-track timeline-track--bgm">${bgmHtml}${sfxHtml}</div>
+          <div class="timeline-track timeline-track--bgm">${bgmHtml}</div>
+          <div class="timeline-track timeline-track--sfx">${sfxHtml}</div>
           <div class="timeline-track timeline-track--shots">${shotBlocks || `<div class="field-hint" style="padding:8px 12px;">ショットがありません</div>`}</div>
         </div>
       </div>

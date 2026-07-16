@@ -17,6 +17,11 @@
 }
 .btn:hover:not(:disabled) { background: #262B36; border-color: var(--text-faint); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled, .btn[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 .btn--primary {
   background: var(--accent-fill);
@@ -389,12 +394,13 @@ input[type="color"]::-webkit-color-swatch { border-radius: 4px; border: none; }
   position: relative;
   border-bottom: 1px solid var(--border);
 }
-.timeline-track--bgm { background: rgba(255,216,77,0.03); }
+.timeline-track--bgm { height: 36px; background: rgba(255,216,77,0.03); }
+.timeline-track--sfx { height: 28px; background: rgba(255,122,89,0.03); }
 .timeline-track--shots { height: 72px; }
 
 .bgm-band {
   position: absolute;
-  top: 8px; bottom: 8px;
+  top: 6px; bottom: 6px;
   border-radius: 6px;
   background: repeating-linear-gradient(90deg, rgba(255,216,77,0.28) 0 8px, rgba(255,216,77,0.16) 8px 16px);
   border: 1px solid rgba(255,216,77,0.5);
@@ -406,9 +412,10 @@ input[type="color"]::-webkit-color-swatch { border-radius: 4px; border: none; }
   white-space: nowrap;
 }
 
+/* SFXマーカーは専用トラック行（.timeline-track--sfx）に配置し、BGM帯とは重ならない（BUG-8） */
 .sfx-marker {
   position: absolute;
-  top: 6px;
+  top: 8px;
   width: 12px; height: 12px;
   transform: translateX(-50%) rotate(45deg);
   background: var(--accent2);
@@ -490,7 +497,7 @@ input[type="color"]::-webkit-color-swatch { border-radius: 4px; border: none; }
 }
 .state-block__icon { color: var(--text-faint); }
 .state-block__title { font-weight: 700; color: var(--text); font-size: 13px; }
-.state-block__desc { font-size: 12px; color: var(--text-faint); max-width: 240px; }
+.state-block__desc { font-size: 12px; color: var(--text-faint); max-width: 280px; word-break: keep-all; overflow-wrap: normal; }
 
 .skeleton {
   background: linear-gradient(90deg, var(--panel-raised) 25%, #262b36 37%, var(--panel-raised) 63%);

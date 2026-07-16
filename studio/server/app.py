@@ -294,3 +294,14 @@ app.mount("/media/output", StaticFiles(directory=str(output_dir())), name="media
 app.mount("/media/bgm", StaticFiles(directory=str(project_root() / "assets" / "bgm")), name="media_bgm")
 app.mount("/media/sfx", StaticFiles(directory=str(project_root() / "assets" / "sfx")), name="media_sfx")
 app.mount("/media/assets", StaticFiles(directory=str(project_root() / "assets")), name="media_assets")
+
+# ---------------------------------------------------------------------------
+# SPA配信（studio/web/ を同一オリジンで配信。BUG-6）
+# ---------------------------------------------------------------------------
+# 上記の /api/* ルートおよび /media/* マウントは、いずれもこのモジュール内で
+# このマウントより「前」に登録されているため、Starletteのルーティング（登録順に
+# 最初にマッチしたものを採用）により優先して処理される。このマウントは
+# それらに一致しない残りすべてのパス（"/", "/app.js", "/styles/tokens.css" 等）
+# を studio/web/ 配下の静的ファイルとして返す最後の受け皿として機能する。
+_STUDIO_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+app.mount("/", StaticFiles(directory=str(_STUDIO_WEB_DIR), html=True), name="web_spa")

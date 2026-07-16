@@ -343,6 +343,9 @@ function renderHeader() {
   const project = state.current;
   const job = state.job;
 
+  const saveDisabled = !project || !state.draftPlan || !state.dirty || state.saving;
+  const renderDisabled = !project || !state.draftPlan || project.status === "generating" || project.status === "rendering";
+
   el.innerHTML = `
     <div class="app-header__brand"><span class="logo-dot" aria-hidden="true"></span><span>Reel Studio</span></div>
     <div class="app-header__project">
@@ -359,10 +362,10 @@ function renderHeader() {
         <div class="progress-bar"><div class="progress-bar__fill" style="width:${job.progress}%"></div></div>
       </div>` : ""}
     <div class="app-header__actions">
-      <button class="btn" data-action="save-plan" ${!project || !state.draftPlan || !state.dirty || state.saving ? "disabled" : ""} aria-label="プランを保存">
+      <button class="btn" data-action="save-plan" ${saveDisabled ? "disabled" : ""} aria-disabled="${saveDisabled}" aria-label="プランを保存">
         ${state.saving ? "保存中…" : "保存"}
       </button>
-      <button class="btn btn--accent2" data-action="start-render" ${!project || !state.draftPlan || project.status === "generating" || project.status === "rendering" ? "disabled" : ""} aria-label="動画を書き出し">
+      <button class="btn btn--accent2" data-action="start-render" ${renderDisabled ? "disabled" : ""} aria-disabled="${renderDisabled}" aria-label="動画を書き出し">
         書き出し
       </button>
     </div>
