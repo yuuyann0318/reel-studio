@@ -167,6 +167,90 @@ def build_ass_header():
     )
 
 
+# ---------------------------------------------------------------------------
+# Studio: plan.subtitle_style（font_size/accent_color/position）を反映したASS再生成
+# ---------------------------------------------------------------------------
+
+DEFAULT_SUBTITLE_STYLE = {"font_size": 76, "accent_color": "#FFD84D", "position": "lower"}
+
+# Alignment=2(bottom-center)基準でのMarginV（画面下端からの距離）。
+_POSITION_MARGIN_V = {"lower": 420, "center": 900, "upper": 1400}
+
+_STYLED_ASS_HEADER_TEMPLATE = """[Script Info]
+ScriptType: v4.00+
+PlayResX: {play_res_x}
+PlayResY: {play_res_y}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Base,Noto Sans JP Black,{base_size},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},{alignment},{margin_l},{margin_r},{margin_v},1
+Style: Big,Noto Sans JP Black,{big_size},{big_primary},&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},{alignment},{margin_l},{margin_r},{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _hex_to_ass_style_color(hex_color, alpha_hex="00"):
+    """`#RRGGBB` を Style行のPrimaryColour用 `&HAABBGGRR` 形式へ変換する（alpha_hex省略時は不透明）。"""
+    bgr_tag = hex_to_ass_bgr(hex_color)  # "&HBBGGRR&"
+    bgr = bgr_tag[2:-1]
+    return "&H{}{}".format(alpha_hex, bgr)
+
+
+def resolve_subtitle_style(subtitle_style=None):
+    """plan.subtitle_style（部分指定可）を DEFAULT_SUBTITLE_STYLE で補完して返す。"""
+    merged = dict(DEFAULT_SUBTITLE_STYLE)
+    if isinstance(subtitle_style, dict):
+        for k, v in subtitle_style.items():
+            if v is not None:
+                merged[k] = v
+    return merged
+
+
+def build_ass_header_with_style(subtitle_style=None):
+    """subtitle_style（font_size/accent_color/position）を反映したASSヘッダを構築する。
+
+    Studio専用のテロップ再生成で使う（既存の build_ass_header()/generate_ass() は
+    run.py のCLI経路向けとして変更せず残す）。DEFAULT_SUBTITLE_STYLE を既定値とし、
+    Big(フック)スタイルの文字色に accent_color を反映する。
+    """
+    style = resolve_subtitle_style(subtitle_style)
+    base_size = int(style.get("font_size") or STYLE_BASE_FONTSIZE)
+    big_size = base_size + (STYLE_BIG_FONTSIZE - STYLE_BASE_FONTSIZE)
+    margin_v = _POSITION_MARGIN_V.get(style.get("position"), MARGIN_V)
+    accent_color = style.get("accent_color")
+    big_primary = _hex_to_ass_style_color(accent_color) if accent_color else "&H00FFFFFF"
+
+    return _STYLED_ASS_HEADER_TEMPLATE.format(
+        play_res_x=PLAY_RES_X,
+        play_res_y=PLAY_RES_Y,
+        base_size=base_size,
+        big_size=big_size,
+        big_primary=big_primary,
+        outline=OUTLINE,
+        shadow=SHADOW,
+        alignment=ALIGNMENT,
+        margin_l=MARGIN_L,
+        margin_r=MARGIN_R,
+        margin_v=margin_v,
+    )
+
+
+def generate_ass_with_style(telop_pieces, subtitle_style=None):
+    """generate_ass() のsubtitle_style対応版。Studioのテロップ再生成で使う。"""
+    lines_out = [build_ass_header_with_style(subtitle_style).rstrip("\n")]
+    for piece in sorted(telop_pieces, key=lambda p: p["out_start"]):
+        lines_out.append(
+            build_dialogue_line(
+                piece["out_start"], piece["out_end"], piece["lines"], piece.get("emphasis"), piece.get("style", "base")
+            )
+        )
+    return "\n".join(lines_out) + "\n"
+
+
 def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base"):
     style_name = "Big" if style == "big" else "Base"
     start = seconds_to_ass_time(out_start)

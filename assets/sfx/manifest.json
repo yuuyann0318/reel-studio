@@ -1,0 +1,50 @@
+[
+  {
+    "file": "whoosh_01.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "duration": 0.6,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "swoosh_01.wav",
+    "label_jp": "スウォッシュ（動きの強調）",
+    "duration": 0.5,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_01.wav",
+    "label_jp": "ポップ（選択/決定）",
+    "duration": 0.3,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "ding_01.wav",
+    "label_jp": "ディン（達成/通知）",
+    "duration": 1.2,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "click_01.wav",
+    "label_jp": "クリック（タップ/操作）",
+    "duration": 0.3,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_01.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "duration": 1.5,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_01.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "duration": 0.45,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "sparkle_01.wav",
+    "label_jp": "スパークル（キラキラ演出）",
+    "duration": 1.0,
+    "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  }
+]

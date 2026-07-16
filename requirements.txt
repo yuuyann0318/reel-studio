@@ -1,1 +1,5 @@
 pytest
+fastapi
+uvicorn
+python-multipart
+httpx

@@ -6,3 +6,5 @@ work/
 bin/
 assets/bgm/*.mp3
 assets/fonts/
+assets/sfx/*.wav
+projects/
