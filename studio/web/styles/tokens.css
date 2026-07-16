@@ -1,0 +1,54 @@
+/* Reel Studio — デザイントークン（docs/STUDIO-DESIGN.md 準拠） */
+:root {
+  /* ベースカラー（設計書指定） */
+  --bg: #0F1115;
+  --panel: #181B22;
+  --panel-raised: #1F232C;
+  --border: #2A2F3A;
+  --border-strong: #3A4152;
+  --text: #E8EAF0;
+  --text-dim: #9AA1B2;
+  --text-faint: #6B7284;
+  --accent: #6C8CFF;      /* ブランドアクセント（境界線・リンク・フォーカス表示用） */
+  --accent2: #FFD84D;     /* セカンダリアクセント（強調バッジ・警告寄りの見出し） */
+
+  /* ボタン塗りつぶし用の派生シェード（WCAG AA 文字コントラスト確保のため算出） */
+  --accent-fill: #4C63D6;      /* accent の濃色版。白文字とのコントラスト比 ≈ 5.1:1 */
+  --accent-fill-hover: #5A72E8;
+  --accent2-fill: #FFD84D;     /* 濃色テキストとのコントラスト比 ≈ 12:1 */
+  --accent2-fill-hover: #FFE07A;
+
+  --danger: #FF6B6B;
+  --danger-fill: #E5484D;
+  --success: #4ADE80;
+  --warning: #FFB84D;
+
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-lg: 14px;
+
+  --font-ui: "Inter", "Noto Sans JP", -apple-system, BlinkMacSystemFont,
+    "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic", "Segoe UI",
+    system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 12px 32px rgba(0, 0, 0, 0.55);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --transition-fast: 120ms ease;
+  --transition-base: 200ms ease;
+
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  --z-toast: 1000;
+  --z-overlay: 500;
+  --z-sticky: 100;
+}

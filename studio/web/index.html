@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reel Studio — リール編集</title>
+  <meta name="color-scheme" content="dark" />
+  <link rel="stylesheet" href="./styles/tokens.css" />
+  <link rel="stylesheet" href="./styles/base.css" />
+  <link rel="stylesheet" href="./styles/layout.css" />
+  <link rel="stylesheet" href="./styles/components.css" />
+</head>
+<body>
+  <a class="visually-hidden" href="#pane-inspector">インスペクタへスキップ</a>
+
+  <div class="app-shell" id="app-shell">
+    <header class="app-header" id="app-header">
+      <!-- ヘッダーは app.js が描画（プロジェクト名・保存/書き出し・進捗） -->
+    </header>
+
+    <section class="pane pane-left" aria-label="プロジェクトとアセット">
+      <div class="pane-left__section" id="pane-projects"></div>
+      <div class="pane-left__section" id="pane-assets"></div>
+    </section>
+
+    <section class="pane pane-center" id="pane-preview" aria-label="プレビュー"></section>
+
+    <section class="pane pane-right" id="pane-inspector" aria-label="インスペクタ" tabindex="-1"></section>
+
+    <section class="pane pane-timeline" id="pane-timeline" aria-label="タイムライン"></section>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
