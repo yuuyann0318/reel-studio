@@ -42,6 +42,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 FORBIDDEN_LINE_START = "」』）。、！？ゃゅょっー"
 
+# 簡易文節分割用: これらの文字列で終わる位置は「文節/句読点の区切り」とみなし、
+# 改行位置として優先する（語中分割を避けるための簡易ヒューリスティック）。
+# 長い語尾から先に判定するよう長さ降順に並べる。
+_PARTICLE_BREAK_ENDINGS = tuple(
+    sorted(
+        [
+            "ですが", "ますが", "けれども", "けれど", "ながら", "でも",
+            "には", "とは", "から", "まで", "より", "ので", "のに",
+            "として", "については", "によって",
+            "は", "が", "を", "に", "で", "と", "も", "の", "へ", "や",
+            "、", "。", "！", "？", "!", "?",
+        ],
+        key=len,
+        reverse=True,
+    )
+)
+
 
 def hex_to_ass_bgr(hex_color):
     """`#RRGGBB` を ASS の `&HBBGGRR&` 形式へ変換する。"""
@@ -170,17 +187,39 @@ def generate_ass(telop_pieces):
 # reel固有: shots配列 → telop断片（各ショットの表示区間＝ナレーションの対応区間に同期）
 # ---------------------------------------------------------------------------
 
+def _find_bunsetsu_break(text, max_chars):
+    """text内でmax_chars以内に収まる最も右側の文節/句読点境界を探す（簡易文節分割）。
+
+    見つからなければNoneを返す（呼び出し側は文字数ベースの禁則改行にフォールバックする）。
+    """
+    limit = min(max_chars, len(text) - 1)
+    for i in range(limit, 0, -1):
+        if text[i] in FORBIDDEN_LINE_START:
+            continue
+        for ending in _PARTICLE_BREAK_ENDINGS:
+            if text[:i].endswith(ending):
+                return i
+    return None
+
+
 def wrap_caption_kinsoku(text, max_chars=13, max_lines=2):
-    """caption_jpを13字禁則改行で最大2行に分割する（行頭禁則文字は前行へ繰り込み）。"""
+    """caption_jpを最大max_lines行に分割する。
+
+    まず文節/句読点の境界（簡易分割）で13字以内に収まる改行位置を探し、見つかれば
+    そこで折る（「リセ／ット」のような語中分割を避ける）。見つからない場合のみ、
+    従来どおり13字禁則改行（行頭禁則文字は前行へ繰り込み）にフォールバックする。
+    """
     text = (text or "").strip()
     if not text:
         return []
     lines = []
     remaining = text
     while remaining and len(lines) < max_lines - 1:
-        cut = min(max_chars, len(remaining))
-        while cut < len(remaining) and remaining[cut] in FORBIDDEN_LINE_START:
-            cut += 1
+        cut = _find_bunsetsu_break(remaining, max_chars)
+        if cut is None:
+            cut = min(max_chars, len(remaining))
+            while cut < len(remaining) and remaining[cut] in FORBIDDEN_LINE_START:
+                cut += 1
         lines.append(remaining[:cut])
         remaining = remaining[cut:]
     if remaining:

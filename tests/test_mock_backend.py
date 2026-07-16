@@ -46,6 +46,31 @@ def test_escape_drawtext_handles_special_chars():
     assert "'" not in escaped.replace("’", "")  # シングルクォートは全角へ置換済み
 
 
+def test_shot_number_label_extracts_digits():
+    assert mock_backend._shot_number_label("s1") == "#1"
+    assert mock_backend._shot_number_label("s12") == "#12"
+    assert mock_backend._shot_number_label("") == ""
+    assert mock_backend._shot_number_label(None) == ""
+
+
+def test_build_mock_cmd_does_not_burn_caption_text_bug1():
+    """BUG-1: mockクリップにcaption_jpをdrawtextで焼き込まない（ASS字幕と二重表示になるため）。"""
+    shot = _shot(caption_jp="このキャプションは画面に焼き込まれてはならない")
+    cmd = mock_backend.build_mock_cmd(FFMPEG_BIN, shot, "/tmp/out.mp4")
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "このキャプションは画面に焼き込まれてはならない" not in vf
+    # ショット識別用の小さな番号表示は残る
+    assert "drawtext" in vf
+    assert "#1" in vf
+
+
+def test_build_mock_cmd_no_drawtext_when_shot_id_missing():
+    shot = _shot(id="")
+    cmd = mock_backend.build_mock_cmd(FFMPEG_BIN, shot, "/tmp/out.mp4")
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "drawtext" not in vf
+
+
 @pytest.mark.slow
 def test_mock_backend_generate_produces_valid_clip(tmp_path):
     """実機ffmpegを使い小尺(1.5秒)のクリップを実際に生成して検証する（重い部分は小尺に限定）。"""

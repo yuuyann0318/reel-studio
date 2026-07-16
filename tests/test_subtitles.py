@@ -21,6 +21,23 @@ def test_wrap_caption_kinsoku_avoids_forbidden_line_start():
     assert not lines[1].startswith("。")
 
 
+def test_wrap_caption_kinsoku_bug2_does_not_split_word_mid_way():
+    """BUG-2: 「毎日5分で散らかる前にリセット」が「リセ」/「ット」のように語中分割されない。
+    文節境界（助詞「に」の後）で改行し、「リセット」は1行にまとまる。"""
+    text = "毎日5分で散らかる前にリセット"
+    lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
+    assert len(lines) == 2
+    assert "リセット" in lines[1] or "リセット" in lines[0]
+    assert "リセ" != lines[0][-2:]  # 「リセ」で行が終わっていない(=「ット」だけ次行に落ちていない)
+    assert lines[1] == "リセット"
+    assert lines[0] == "毎日5分で散らかる前に"
+
+
+def test_find_bunsetsu_break_prefers_particle_boundary():
+    cut = subtitles._find_bunsetsu_break("毎日5分で散らかる前にリセット", 13)
+    assert cut == 11  # 「毎日5分で散らかる前に」で区切る
+
+
 def test_build_telop_pieces_from_shots_sync_to_cumulative_duration():
     shots = [
         {"id": "s1", "duration_sec": 5.0, "caption_jp": "最初のキャプション"},

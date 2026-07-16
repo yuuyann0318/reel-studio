@@ -2,8 +2,12 @@
 """Mockビジュアルバックエンド（必須・完全動作・無課金）。
 
 `bin/ffmpeg` の `gradients` ソースフィルタでグラデーション背景を生成し、
-`zoompan` フィルタで motion_preset に応じたパン/ズーム（Ken Burns風）を適用、
-`drawtext` でショットの caption_jp を焼き込んだ擬似クリップmp4を出力する。
+`zoompan` フィルタで motion_preset に応じたパン/ズーム（Ken Burns風）を適用した
+擬似クリップmp4を出力する。
+
+キャプション本文(caption_jp)はここでは焼き込まない（render.py が ASS 字幕として
+一本化して焼き込むため）。ショット識別用に、画面右上へ小さく半透明のショット番号
+（例: "#1"）だけを drawtext で添える。
 
 外部APIを一切使わないため課金なし・鍵不要で常にE2Eが通る（このプロジェクトの
 自己検証はこのバックエンドで行う）。実写/イラスト等の具象生成は行わない
@@ -14,6 +18,7 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import re
 import subprocess
 
 from pipeline.config import load_config, project_root
@@ -46,6 +51,17 @@ def _escape_drawtext(text):
     text = text.replace("'", "’")
     text = text.replace("%", "\\%")
     return text
+
+
+def _shot_number_label(shot_id):
+    """shot_id（例: "s1" "s12"）から画面表示用の短いショット番号ラベルを作る。
+
+    数字が取れなければidそのものを、idが無ければ空文字を返す（=表示しない）。
+    """
+    if not shot_id:
+        return ""
+    m = re.search(r"(\d+)", str(shot_id))
+    return "#{}".format(m.group(1)) if m else "#{}".format(shot_id)
 
 
 def _motion_exprs(motion_preset, total_frames):
@@ -83,8 +99,8 @@ def build_mock_cmd(ffmpeg_bin, shot, out_path, fonts_dir=None):
     duration = float(shot.get("duration_sec", 5.0))
     total_frames = max(1, int(round(duration * FPS)))
     motion_preset = shot.get("motion_preset", "static")
-    caption = shot.get("caption_jp", "") or ""
     shot_id = shot.get("id", "")
+    number_label = _shot_number_label(shot_id)
 
     c0, c1 = _palette_for(shot_id)
     z, x, y = _motion_exprs(motion_preset, total_frames)
@@ -101,11 +117,11 @@ def build_mock_cmd(ffmpeg_bin, shot, out_path, fonts_dir=None):
         "setsar=1",
         "format=yuv420p",
     ]
-    if caption:
+    if number_label:
         vf_parts.append(
-            "drawtext=fontfile='{font}':text='{text}':fontsize=64:fontcolor=white:"
-            "x=(w-text_w)/2:y=h-320:box=1:boxcolor=black@0.45:boxborderw=24".format(
-                font=font_path, text=_escape_drawtext(caption)
+            "drawtext=fontfile='{font}':text='{text}':fontsize=28:fontcolor=white@0.5:"
+            "x=w-text_w-24:y=24".format(
+                font=font_path, text=_escape_drawtext(number_label)
             )
         )
     vf = ",".join(vf_parts)

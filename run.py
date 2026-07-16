@@ -90,6 +90,20 @@ class StageError(RuntimeError):
     pass
 
 
+def resolve_ng_words(cfg):
+    """config の brand_rules.ng_words を「デフォルトNGワードへの追加分」として解決する。
+
+    config未設定・ng_words未設定・ng_words=[] のいずれでも、compliance.DEFAULT_NG_WORDS
+    （景表法NG表現・競合名義等）は常に有効にする。config側の値は追加分としてマージする。
+    """
+    config_ng_words = (cfg.get("brand_rules") or {}).get("ng_words") or []
+    ng_words = list(compliance.DEFAULT_NG_WORDS)
+    for w in config_ng_words:
+        if w not in ng_words:
+            ng_words.append(w)
+    return ng_words
+
+
 def _timed_stage(report, name):
     """`with _timed_stage(report, "director"): ...` で経過時間とok/errorをreportへ記録するcontext manager。"""
 
@@ -145,7 +159,7 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg):
     # --- Stage 2: compliance（NGワード検査） ---
     try:
         with _timed_stage(report, "compliance"):
-            ng_words = (cfg.get("brand_rules") or {}).get("ng_words", [])
+            ng_words = resolve_ng_words(cfg)
             check = compliance.check_plan(plan, ng_words=ng_words)
             (run_dir / "compliance_report.json").write_text(
                 json.dumps(check, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -285,6 +299,8 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg):
             )
             report["qa"] = qa_report
             report["stages"]["qa"]["overall_ok"] = qa_report["overall_ok"]
+            # QA不合格ならこのstage自体をokにしない（=report["ok"]もFalseになりexit code非0になる）。
+            report["stages"]["qa"]["ok"] = qa_report["overall_ok"]
     except Exception:
         _write_report(report)
         return report
