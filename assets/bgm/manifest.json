@@ -1,0 +1,20 @@
+[
+  {
+    "file": "upbeat_01.mp3",
+    "mood": "upbeat",
+    "license": "synthetic-placeholder (generate_placeholder_bgm.py で ffmpeg sine 合成。著作権フリー。BGM＋ダッキング機能の実機検証用。本番配布前にライセンスの明確な楽曲へ差し替えてください)",
+    "loop_ok": true
+  },
+  {
+    "file": "calm_01.mp3",
+    "mood": "calm",
+    "license": "synthetic-placeholder (generate_placeholder_bgm.py で ffmpeg sine 合成。著作権フリー。BGM＋ダッキング機能の実機検証用。本番配布前にライセンスの明確な楽曲へ差し替えてください)",
+    "loop_ok": true
+  },
+  {
+    "file": "emotional_01.mp3",
+    "mood": "emotional",
+    "license": "synthetic-placeholder (generate_placeholder_bgm.py で ffmpeg sine 合成。著作権フリー。BGM＋ダッキング機能の実機検証用。本番配布前にライセンスの明確な楽曲へ差し替えてください)",
+    "loop_ok": true
+  }
+]

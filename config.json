@@ -1,0 +1,31 @@
+{
+  "backend": "mock",
+  "claude_bin": "/Users/yuuya/.local/bin/claude",
+  "claude_model": "claude-fable-5",
+  "claude_timeout_sec": 600,
+  "resolution": [1080, 1920],
+  "aspect": "9:16",
+  "target_duration_sec": 30,
+  "voice": "Kyoko",
+  "brand_rules": {
+    "ng_words": [
+      "絶対稼げる",
+      "絶対に稼げる",
+      "100%成功",
+      "100%儲かる",
+      "元本保証",
+      "必ず儲かる",
+      "みお",
+      "@mio_ai_insta_"
+    ]
+  },
+  "higgsfield": {
+    "cli_bin": "higgsfield",
+    "poll_interval_sec": 5,
+    "poll_timeout_sec": 600
+  },
+  "cloudapi": {
+    "base_url": "https://api.higgsfield.example/v1",
+    "api_key_env": "HIGGSFIELD_API_KEY"
+  }
+}
