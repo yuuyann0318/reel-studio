@@ -38,6 +38,43 @@ def test_find_bunsetsu_break_prefers_particle_boundary():
     assert cut == 11  # 「毎日5分で散らかる前に」で区切る
 
 
+def test_wrap_caption_kinsoku_bug5_particle_de_not_confused_with_verb_dekiru():
+    """BUG-5: 「できる」の先頭「で」を助詞と誤認して「毎日5分でで／きる」のように
+    語中分割しない。助詞の直後がひらがな（=動詞/補助動詞の一部の可能性）の場合は
+    その境界を無効化する。"""
+    text = "毎日5分でできる片付け習慣を始めよう"
+    lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
+    assert len(lines) == 2
+    assert "".join(lines) == text
+    assert "できる" in lines[0]
+    assert not lines[0].endswith("で")
+
+
+def test_wrap_caption_kinsoku_bug5_does_not_regress_bug2():
+    """BUG-5修正後もBUG-2（「リセ」/「ット」の語中分割）が再発しないことを確認する。"""
+    text = "毎日5分で散らかる前にリセット"
+    lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
+    assert len(lines) == 2
+    assert lines[1] == "リセット"
+
+
+def test_wrap_caption_kinsoku_bug5_breaks_at_natural_position():
+    """読点などの自然な位置で折れ、「範囲」「決める」が語中分割されない。"""
+    text = "今日は床の上だけ、と範囲を決める"
+    lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
+    assert len(lines) == 2
+    assert "".join(lines) == text
+    assert ("範囲" in lines[0]) or ("範囲" in lines[1])
+    assert ("決める" in lines[0]) or ("決める" in lines[1])
+
+
+def test_wrap_caption_kinsoku_bug5_short_text_no_wrap_even_with_particle():
+    """max_chars以内に収まる短文は、途中に助詞（「は」等）を含んでいても改行しない。"""
+    text = "今日は片付けよう"
+    lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
+    assert lines == [text]
+
+
 def test_build_telop_pieces_from_shots_sync_to_cumulative_duration():
     shots = [
         {"id": "s1", "duration_sec": 5.0, "caption_jp": "最初のキャプション"},

@@ -59,6 +59,13 @@ _PARTICLE_BREAK_ENDINGS = tuple(
     )
 )
 
+# 句読点系の語尾（この後はひらがなが続いても改行境界として常に有効）。
+_PUNCTUATION_BREAK_ENDINGS = frozenset(["、", "。", "！", "？", "!", "?"])
+
+
+def _is_hiragana(ch):
+    return "ぁ" <= ch <= "ゟ"
+
 
 def hex_to_ass_bgr(hex_color):
     """`#RRGGBB` を ASS の `&HBBGGRR&` 形式へ変換する。"""
@@ -190,6 +197,13 @@ def generate_ass(telop_pieces):
 def _find_bunsetsu_break(text, max_chars):
     """text内でmax_chars以内に収まる最も右側の文節/句読点境界を探す（簡易文節分割）。
 
+    助詞境界（句読点以外）は、直後の文字が「ひらがな以外」（漢字・カタカナ・
+    英数字等）の場合にのみ有効とする。助詞の直後にひらがなが続く場合は
+    「でできる」「にはじめる」のように動詞/補助動詞の一部（＝助詞そのものではない）
+    である可能性が高く、採用すると語中分割（BUG-5: 「毎日5分でで／きる」等）になる
+    ため無効とする。句読点（、。！？）の直後はこの制約を適用しない
+    （句読点は常に有効な境界とみなす）。
+
     見つからなければNoneを返す（呼び出し側は文字数ベースの禁則改行にフォールバックする）。
     """
     limit = min(max_chars, len(text) - 1)
@@ -197,8 +211,12 @@ def _find_bunsetsu_break(text, max_chars):
         if text[i] in FORBIDDEN_LINE_START:
             continue
         for ending in _PARTICLE_BREAK_ENDINGS:
-            if text[:i].endswith(ending):
-                return i
+            if not text[:i].endswith(ending):
+                continue
+            if ending not in _PUNCTUATION_BREAK_ENDINGS and _is_hiragana(text[i]):
+                # 助詞直後がひらがな -> 動詞/補助動詞の一部の可能性が高く語中分割になるため無効
+                continue
+            return i
     return None
 
 
@@ -212,6 +230,9 @@ def wrap_caption_kinsoku(text, max_chars=13, max_lines=2):
     text = (text or "").strip()
     if not text:
         return []
+    if len(text) <= max_chars:
+        # 全体がmax_chars以内に収まるなら、文中に助詞が含まれていても改行しない。
+        return [text]
     lines = []
     remaining = text
     while remaining and len(lines) < max_lines - 1:
