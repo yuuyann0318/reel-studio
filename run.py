@@ -227,11 +227,13 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     narration_wav_path = run_dir / "narration.wav"
     try:
         with _timed_stage(report, "tts"):
-            tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"))
+            tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
             tts_meta = tts_backend.synthesize(plan.get("narration_script", ""), str(narration_wav_path), cfg)
             report["stages"]["tts"]["backend"] = tts_meta.get("backend")
             report["stages"]["tts"]["duration_sec"] = tts_meta.get("duration_sec")
             report["stages"]["tts"]["is_silent"] = tts_meta.get("is_silent")
+            report["stages"]["tts"]["requested_backend"] = tts_meta.get("requested_backend")
+            report["stages"]["tts"]["fallback_reason"] = tts_meta.get("fallback_reason")
     except Exception:
         _write_report(report)
         return report

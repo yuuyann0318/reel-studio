@@ -65,6 +65,158 @@ def test_build_cost_cmd_has_expected_flags():
     assert "--duration" in cmd and "5" in cmd
 
 
+# --- image_path / reference_images（image-to-video） ---------------------------
+
+def test_build_create_cmd_adds_start_image_when_image_path_present():
+    cmd = hb._build_create_cmd(
+        "higgsfield", "seedance_2_0_mini", _shot(image_path="/tmp/product.png"), "480p"
+    )
+    idx = cmd.index("--start-image")
+    assert cmd[idx + 1] == "/tmp/product.png"
+
+
+def test_build_cost_cmd_adds_start_image_when_image_path_present():
+    cmd = hb._build_cost_cmd(
+        "higgsfield", "seedance_2_0_mini", _shot(image_path="/tmp/product.png"), "480p"
+    )
+    idx = cmd.index("--start-image")
+    assert cmd[idx + 1] == "/tmp/product.png"
+
+
+def test_build_create_cmd_without_image_path_is_unchanged_regression():
+    """画像なしshotのコマンドは従来と完全に同一(--start-image/--image-referencesを含まない)。"""
+    cmd = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p")
+    assert cmd == [
+        "higgsfield", "generate", "create", "seedance_2_0_mini",
+        "--prompt", _shot()["visual_prompt"],
+        "--aspect-ratio", "9:16",
+        "--resolution", "480p",
+        "--duration", "5",
+        "--json",
+    ]
+    assert "--start-image" not in cmd
+    assert "--image-references" not in cmd
+
+
+def test_build_cost_cmd_without_image_path_is_unchanged_regression():
+    cmd = hb._build_cost_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p")
+    assert cmd == [
+        "higgsfield", "generate", "cost", "seedance_2_0_mini",
+        "--prompt", _shot()["visual_prompt"],
+        "--aspect-ratio", "9:16",
+        "--resolution", "480p",
+        "--duration", "5",
+        "--json",
+    ]
+    assert "--start-image" not in cmd
+    assert "--image-references" not in cmd
+
+
+def test_build_create_cmd_repeats_image_references_flag_per_image():
+    refs = ["/tmp/ref1.png", "/tmp/ref2.png", "/tmp/ref3.png"]
+    cmd = hb._build_create_cmd(
+        "higgsfield", "seedance_2_0_mini", _shot(reference_images=refs), "480p"
+    )
+    assert cmd.count("--image-references") == 3
+    positions = [i for i, v in enumerate(cmd) if v == "--image-references"]
+    values = [cmd[i + 1] for i in positions]
+    assert values == refs
+
+
+def test_build_create_cmd_clips_reference_images_to_max_9():
+    refs = ["/tmp/ref{}.png".format(i) for i in range(15)]
+    cmd = hb._build_create_cmd(
+        "higgsfield", "seedance_2_0_mini", _shot(reference_images=refs), "480p"
+    )
+    assert cmd.count("--image-references") == 9
+    positions = [i for i, v in enumerate(cmd) if v == "--image-references"]
+    values = [cmd[i + 1] for i in positions]
+    assert values == refs[:9]
+
+
+def test_build_create_cmd_combines_start_image_and_reference_images():
+    cmd = hb._build_create_cmd(
+        "higgsfield", "seedance_2_0_mini",
+        _shot(image_path="/tmp/product.png", reference_images=["/tmp/ref1.png"]),
+        "480p",
+    )
+    assert cmd.index("--start-image") < cmd.index("--json")
+    assert cmd.count("--image-references") == 1
+
+
+# --- image_pathの実在チェック(生成前・日本語エラー) ---------------------------
+
+def test_generate_raises_japanese_error_when_image_path_missing(tmp_path):
+    backend = hb.HiggsfieldBackend(_cfg())
+    missing_path = str(tmp_path / "not_exists.png")
+    with pytest.raises(VisualBackendError) as excinfo:
+        backend.generate(_shot(image_path=missing_path), "/tmp/out.mp4")
+    message = str(excinfo.value)
+    assert "商品画像が見つかりません" in message
+    assert missing_path in message
+
+
+def test_generate_does_not_call_cli_when_image_path_missing(tmp_path, monkeypatch):
+    backend = hb.HiggsfieldBackend(_cfg())
+    missing_path = str(tmp_path / "not_exists.png")
+
+    def _fail(*args, **kwargs):
+        raise AssertionError("image_pathが存在しないのにCLIを呼んではいけない")
+
+    monkeypatch.setattr(backend, "estimate_cost", _fail)
+    with pytest.raises(VisualBackendError):
+        backend.generate(_shot(image_path=missing_path), "/tmp/out.mp4")
+
+
+# --- 安全リトライ中もimage_pathを維持する --------------------------------------
+
+def test_generate_keeps_image_path_across_safety_retry(monkeypatch, tmp_path):
+    """1回目nsfw拒否→2回目(安全プレフィックス版)でも --start-image が維持されることを検証する。"""
+    backend = hb.HiggsfieldBackend(_cfg())
+    out_path = str(tmp_path / "out.mp4")
+    image_path = str(tmp_path / "product.png")
+    with open(image_path, "wb") as f:
+        f.write(b"fake-png-bytes")
+
+    calls = []
+    create_cmds = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            create_cmds.append(cmd)
+            job_id = "job-attempt-{}".format(len(create_cmds))
+            return _FakeProc(returncode=0, stdout=json.dumps([job_id]).encode("utf-8"))
+        if cmd[2] == "wait":
+            job_id = cmd[3]
+            if job_id == "job-attempt-1":
+                return _FakeProc(returncode=1, stderr=b'Error: job job-attempt-1 ended with status "nsfw"')
+            return _FakeProc(
+                returncode=0,
+                stdout=b'{"status": "completed", "result_url": "https://example.com/a.mp4"}',
+            )
+        raise AssertionError("想定外のコマンド: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: None)
+    monkeypatch.setattr(hb, "_download_url", lambda url, path, curl_bin=None, timeout_sec=120: None)
+
+    shot = _shot(
+        image_path=image_path,
+        visual_prompt="bold warning-style graphic with a soft yellow gradient background and a simple exclamation icon",
+    )
+    meta = backend.generate(shot, out_path)
+
+    assert len(create_cmds) == 2
+    for cmd in create_cmds:
+        idx = cmd.index("--start-image")
+        assert cmd[idx + 1] == image_path  # 安全リトライ2回目でもimage_pathが維持されている
+    assert meta["status"] == "completed"
+    assert meta["safety_retry_attempt"] == 2
+
+
 # --- BUG-10: モデル最小/最大duration制約に合わせたクランプ ---------------------
 
 def test_resolve_request_duration_sec_clamps_below_minimum_to_4_bug10():

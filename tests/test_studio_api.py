@@ -50,6 +50,45 @@ def test_create_project_rejects_invalid_style():
     assert resp.json()["error"]["code"] == "invalid_style"
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "not-a-url",
+        "ftp://example.com/product",
+        "javascript:alert(1)",
+        "",
+        "   ",
+        123,
+    ],
+)
+def test_create_project_rejects_invalid_product_url(bad_url):
+    resp = client.post("/api/projects", json={"theme": "テスト", "backend": "mock", "product_url": bad_url})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_product_url"
+
+
+def test_create_project_omits_product_url_when_not_provided(monkeypatch):
+    """product_urlを指定しない従来どおりの呼び出しは、job_manager.start_generateへ
+    product_url=Noneで渡り、既存の非商品モードの挙動を壊さないこと。"""
+    from studio.server import app as app_mod
+
+    captured = {}
+
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
+        captured["product_url"] = product_url
+        return project_id
+
+    monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
+
+    resp = client.post("/api/projects", json={"theme": "テスト:商品URL無し", "backend": "mock"})
+    assert resp.status_code == 202
+    project_id = resp.json()["id"]
+    try:
+        assert captured["product_url"] is None
+    finally:
+        shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
+
+
 def test_create_project_threads_style_into_start_generate(monkeypatch):
     """POST /api/projects の style が job_manager.start_generate に渡ることを検証する。
 
@@ -60,9 +99,10 @@ def test_create_project_threads_style_into_start_generate(monkeypatch):
 
     captured = {}
 
-    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default"):
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
         captured["project_id"] = project_id
         captured["style"] = style
+        captured["product_url"] = product_url
         return project_id
 
     monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
@@ -73,6 +113,33 @@ def test_create_project_threads_style_into_start_generate(monkeypatch):
     try:
         assert captured["style"] == "vertical_hook"
         assert captured["project_id"] == project_id
+    finally:
+        shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
+
+
+def test_create_project_threads_product_url_into_start_generate_and_persists_none_before_job_runs(monkeypatch):
+    """POST /api/projects の product_url が job_manager.start_generate に渡ること、
+    かつジョブ完了前（202直後）は project["product"] が None のまま保存されていること
+    （実際の商品情報/画像はジョブが collect_product_images 実行後に書き込む）。"""
+    from studio.server import app as app_mod
+
+    captured = {}
+
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
+        captured["project_id"] = project_id
+        captured["product_url"] = product_url
+        return project_id
+
+    monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
+
+    product_url = "https://shop.example.com/item/42"
+    resp = client.post("/api/projects", json={"theme": "テスト:商品URL疎通", "backend": "mock", "product_url": product_url})
+    assert resp.status_code == 202
+    project_id = resp.json()["id"]
+    try:
+        assert captured["product_url"] == product_url
+        fetched = client.get("/api/projects/{}".format(project_id)).json()
+        assert fetched["product"] is None
     finally:
         shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
 
@@ -176,6 +243,49 @@ def test_put_plan_saves_successfully_with_unrendered_shot_clip_path_null():
         assert resp.status_code == 200, resp.text
         body = resp.json()
         assert body["plan"]["shots"][0]["clip_path"] is None
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 回帰: PUT /api/projects/{id}/plan は薬機法NGワード検査をすり抜けていた
+# （商品アフィリエイト動画モードのプロジェクトでも、render開始/generate時と違い
+#  compliance.BEAUTY_YAKKIHO_NG_WORDS/PATTERNS が合成されずに保存できてしまっていた）
+# ---------------------------------------------------------------------------
+
+def _plan_with_caption(project, caption):
+    plan = project["plan"]
+    plan["shots"] = [{
+        "id": "s1", "order": 0, "enabled": True, "prompt": "abstract",
+        "caption": caption,
+        "clip_path": None, "source_duration": 5.0, "trim": {"start": 0.0, "end": 5.0},
+    }]
+    return plan
+
+
+def test_put_plan_rejects_yakkiho_ng_caption_when_project_has_product():
+    project = projects.create_project("商品モード薬機法テスト", 10.0, "mock", status="draft")
+    project["product"] = {"name": "美容液X", "url": "https://shop.example.com/lp", "images": [], "warnings": []}
+    projects.save_project(project)
+    try:
+        plan = _plan_with_caption(project, "このクリームで頑固なシミが消える")
+        resp = client.put("/api/projects/{}/plan".format(project["id"]), json=plan)
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"]["code"] == "invalid_plan"
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+def test_put_plan_allows_yakkiho_words_when_project_has_no_product():
+    """通常モード（project["product"] is None）は従来どおり薬機法NGワードの合成を行わず
+    （挙動不変）、DEFAULT_NG_WORDSにのみ該当しなければ保存できること。"""
+    project = projects.create_project("通常モードテスト", 10.0, "mock", status="draft")
+    assert project["product"] is None
+    try:
+        plan = _plan_with_caption(project, "このクリームで頑固なシミが消える")
+        resp = client.put("/api/projects/{}/plan".format(project["id"]), json=plan)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["plan"]["shots"][0]["caption"] == "このクリームで頑固なシミが消える"
     finally:
         shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
 

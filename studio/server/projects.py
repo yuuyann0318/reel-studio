@@ -58,6 +58,13 @@ class PlanValidationError(Exception):
         self.errors = errors
 
 
+class UnsafeMediaPathError(ValueError):
+    """resolve_media_relpath/resolve_clip_pathの解決結果がPROJECTS_ROOT配下から
+    逸脱した場合に送出する（'../'によるディレクトリトラバーサル・シンボリックリンク
+    経由の脱出・PROJECTS_ROOT外を指す絶対パスを検知するため）。
+    """
+
+
 def is_safe_project_id(project_id):
     return bool(project_id) and bool(_ID_RE.match(project_id))
 
@@ -78,6 +85,11 @@ def renders_dir(project_id):
     return project_dir(project_id) / "renders"
 
 
+def product_dir(project_id):
+    """商品モードで取得した商品画像の保存先（project_dir(project_id)/product）。"""
+    return project_dir(project_id) / "product"
+
+
 def _project_json_path(project_id):
     return project_dir(project_id) / "project.json"
 
@@ -92,16 +104,24 @@ def media_relpath_for_render(project_id, filename):
     return "projects/{}/renders/{}".format(project_id, filename)
 
 
+def media_relpath_for_product(project_id, filename):
+    """商品画像の正規パス（project_root()相対・/media/projects/... で配信するため）。"""
+    return "projects/{}/product/{}".format(project_id, filename)
+
+
 def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def create_project(theme, target_duration_sec, backend_name, status="generating", style="default"):
+def create_project(theme, target_duration_sec, backend_name, status="generating", style="default", product_url=None):
     """新規プロジェクトの雛形を作成し保存する。plan/shotsは生成ジョブが後で埋める。
 
     style: "default" | "vertical_hook"（縦書きテロップ・高速カットのTTPスタイル）。
     directorの企画生成（shot数/尺の目安/構成）と、生成後のplan.subtitle_style.presetの
     両方に反映される。不明な値は"default"に正規化する。
+    product_url: 商品アフィリエイト動画モードの入口（任意）。実際の商品情報・取得画像は
+    生成ジョブ（jobs.py _run_generate）が collect_product_images 実行後に project["product"]
+    へ書き込む。ここでは常に None で初期化する（呼び出し側の透過渡しのためだけに受け取る）。
     """
     style = style if style in VALID_SUBTITLE_PRESETS else "default"
     project_id = new_project_id()
@@ -129,6 +149,8 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
         "error": None,
         "error_history": [],
         "director": None,
+        "product": None,
+        "tts": None,
     }
     save_project(project)
     return project
@@ -164,10 +186,12 @@ def get_project(project_id):
         project = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
-    # 旧project.json（本機能追加前に作成されたもの）にはerror_history/directorが
+    # 旧project.json（本機能追加前に作成されたもの）にはerror_history/director/product/ttsが
     # 無いため、既定値を補って呼び出し側が常に安全に扱えるようにする。
     project.setdefault("error_history", [])
     project.setdefault("director", None)
+    project.setdefault("product", None)
+    project.setdefault("tts", None)
     return project
 
 
@@ -230,15 +254,39 @@ def resolve_media_relpath(rel_path):
     project.json に保存するclip_path/renders[].pathは常にこの形式で統一する
     （= ディスク解決とURL構築が同じ文字列で成立する）。
     PROJECTS_ROOT（モジュール属性）を都度参照するため、テストでのmonkeypatchにも追従する。
+
+    セキュリティ: PUT /api/projects/{id}/plan 経由でclip_path等はクライアントから
+    任意文字列を受け取れるため、ここで解決結果がPROJECTS_ROOT配下に収まることを
+    Path.resolve()ベースで検証する（'../../'による脱出・シンボリックリンク経由の
+    脱出・PROJECTS_ROOT外を指す絶対パスの指定を検知しUnsafeMediaPathErrorで拒否する）。
+    /media/projects StaticFilesマウントがPROJECTS_ROOTそのものを配信しているため、
+    許容範囲の境界はPROJECTS_ROOTとする。
     """
+    if not rel_path:
+        raise UnsafeMediaPathError("rel_path が空です")
     p = Path(rel_path)
-    if p.is_absolute():
-        return p
-    return PROJECTS_ROOT.parent / rel_path
+    root = PROJECTS_ROOT.parent
+    candidate = p if p.is_absolute() else (root / p)
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError as exc:
+        raise UnsafeMediaPathError(
+            "パスの解決に失敗しました（循環シンボリックリンク等の疑い）: {!r} ({})".format(rel_path, exc)
+        )
+    projects_root_resolved = PROJECTS_ROOT.resolve(strict=False)
+    if resolved != projects_root_resolved and projects_root_resolved not in resolved.parents:
+        raise UnsafeMediaPathError(
+            "パスがprojects/配下から逸脱しています（パストラバーサルの疑い）: {!r}".format(rel_path)
+        )
+    return resolved
 
 
 def resolve_clip_path(project_id, clip_path):
-    """clip_pathを絶対パスへ解決する（project_id引数は将来の後方互換用に残す）。"""
+    """clip_pathを絶対パスへ解決する（project_id引数は将来の後方互換用に残す）。
+
+    PROJECTS_ROOT外を指す場合は UnsafeMediaPathError を送出する
+    （resolve_media_relpath参照）。
+    """
     return resolve_media_relpath(clip_path)
 
 
@@ -286,7 +334,7 @@ def unrendered_enabled_shot_ids(plan):
     return ids
 
 
-def validate_plan(project_id, plan, ng_words=None):
+def validate_plan(project_id, plan, ng_words=None, ng_patterns=None):
     """plan（Studio形式）を検証する。Returns (ok:bool, errors:list[str], normalized:dict|None)。
 
     検証内容（KR4準拠）:
@@ -295,6 +343,9 @@ def validate_plan(project_id, plan, ng_words=None):
       - bgm.file / sfx[].file が assets 配下に実在する
       - subtitle_style の値域
       - narration_text/shots captionのコンプライアンスNGワード検査（compliance.py流用）
+
+    ng_patterns: 商品アフィリエイト動画モード時のみ呼び出し側が
+    compliance.BEAUTY_YAKKIHO_NG_PATTERNS を渡す（通常モードはNoneのまま=従来どおり不変）。
     """
     errors = []
     if not isinstance(plan, dict):
@@ -337,7 +388,13 @@ def validate_plan(project_id, plan, ng_words=None):
             if not isinstance(clip_path, str):
                 errors.append("plan.shots[{}(id={})].clip_path は文字列またはnullである必要があります".format(i, sid))
                 continue
-            resolved_clip = resolve_clip_path(project_id, clip_path)
+            try:
+                resolved_clip = resolve_clip_path(project_id, clip_path)
+            except UnsafeMediaPathError as exc:
+                errors.append(
+                    "plan.shots[{}(id={})].clip_path が不正です: {}".format(i, sid, exc)
+                )
+                continue
             if not resolved_clip.exists():
                 errors.append(
                     "plan.shots[{}(id={})].clip_path が参照するファイルが存在しません: {}".format(i, sid, clip_path)
@@ -370,7 +427,7 @@ def validate_plan(project_id, plan, ng_words=None):
             continue
 
         seen_ids.add(sid)
-        normalized_shots.append({
+        normalized_shot = {
             "id": sid,
             "order": order,
             "enabled": enabled,
@@ -379,7 +436,15 @@ def validate_plan(project_id, plan, ng_words=None):
             "clip_path": clip_path,
             "source_duration": float(source_duration),
             "trim": {"start": float(start), "end": float(end)},
-        })
+        }
+        # image_path（商品アフィリエイト動画モード）は任意パススルー: 文字列ならそのまま保持する。
+        # 実在チェックはここでは行わない（ビジュアルバックエンド側=resume/render実行時に検査される。
+        # mock_backendは未実在ならgradients生成にフォールバック、higgsfield_backendは
+        # VisualBackendErrorを送出する設計のため、ここで弾くと通常モードの互換性を壊すリスクがある）。
+        image_path = shot.get("image_path")
+        if isinstance(image_path, str) and image_path:
+            normalized_shot["image_path"] = image_path
+        normalized_shots.append(normalized_shot)
 
     narration_text = plan.get("narration_text", "")
     if not isinstance(narration_text, str):
@@ -464,7 +529,7 @@ def validate_plan(project_id, plan, ng_words=None):
             for s in normalized_shots
         ],
     }
-    check = compliance.check_plan(compat_plan, ng_words=ng_words)
+    check = compliance.check_plan(compat_plan, ng_words=ng_words, ng_patterns=ng_patterns)
     if not check["ok"]:
         for v in check["violations"]:
             errors.append(

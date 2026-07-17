@@ -32,3 +32,18 @@ higgsfield-auto-reel の独立レビュー(codex)＋目視検収で確定した�
 ### 同時に実施した機能強化（不具合ではない）
 - **Director v2（3段多段生成・supreme品質）**: 切り口3案の発散と自己選抜（angles）→ 強化した執筆規律での本書き（write）→ 鬼編集者の10項目批評リライト（polish）。全段 claude -p × **claude-opus-4-8**（modelUsage実測記録・自己申告不使用）。既定 config.director_quality="supreme"、--quality single で従来動作。実機E2E: 生成88.7秒・3段とも opus-4-8 実測・QA合格。台本例の品質向上を窓口目視で検収済み。
 - 台本メタのUI表示: かんたんモードに「台本AI: <model>」/ ルールベース代替時は注意バナー表示（AI不通が黙って劣化する問題の可視化）。
+
+## 2026-07-17 夜: Fish Audio音声+美容系商品アフィリモード追加時の棚卸し（3周目）
+
+発見経路: 独立レビュー(exec-sonnet)。**いずれもコミット前に検出・修正済み**（ユーザー影響なし）。pytest 360 passed。
+
+| ID | 重大度 | 発見経路 | 症状 | 修正内容 | 検証方法 | 状態 |
+|---|---|---|---|---|---|---|
+| BUG-17 | 高 | 独立レビュー | 商品モードの薬機法検査が generate/render 経路にしか効かず、Studio編集画面の保存(PUT /plan)では「シミが消える」等のNG表現がすり抜けて保存できた。 | update_plan でも project["product"] 非Null時に BEAUTY_YAKKIHO_NG_WORDS/PATTERNS を validate_plan へ合成。 | 回帰テスト: productモードでNG caption保存→400 / 通常モードは従来どおり。 | 修正済み・テスト検証済み |
+| BUG-18 | 高 | 独立レビュー | 商品LP取得のSSRF対策がURL文字列のみの判定で、リダイレクト先の私有IP(169.254.169.254等)とDNS rebindingを検知できなかった。 | _SafeRedirectHandler(各ホップに再検査・最大5ホップ)+_is_safe_resolved_host(接続前にDNS解決IPを検査)を追加。 | 回帰テスト: 127.0.0.1/169.254.169.254へのリダイレクトを拒否。 | 修正済み・テスト検証済み |
+| BUG-19 | 中 | 独立レビュー | LP/画像ダウンロードにサイズ上限がなくメモリ枯渇リスク。 | HTML 2MB/画像10MBの上限(config上書き可)。超過は破棄+warnings記録。 | 回帰テスト: 上限超過モックで破棄確認。 | 修正済み・テスト検証済み |
+| BUG-20 | 低 | 独立レビュー | config.json の tts.fish_audio.timeout_sec / product_images.timeout_sec が実コード未配線のデッドコンフィグ。 | 両方を実際のHTTP/フェッチ呼び出しへ配線。 | 回帰テスト: cfg値の伝播をモックで確認。 | 修正済み・テスト検証済み |
+
+### 同時に実施した機能追加（不具合ではない）
+- **Fish Audio TTS**: fish→say→silent の三段フォールバック・実測メタ(project["tts"])のUI表示。キー未設定でも全機能動作(sayに自動切替)。E2E実機でフォールバック経路を確認済み。
+- **美容系商品アフィリモード**: 商品LP URL→画像自動取得(og:image優先・SSRFガード・サイズ上限)+ assets/products/inbox/ のローカル画像優先併用 → 決定論のショット割り当て(フック/CTA優先) → higgsfield --start-image / mock画像背景+KenBurns。薬機法規律はプロンプト(product_block.txt 窓口確定稿・打消し表示必須)と検査(BEAUTY_YAKKIHO_NG_WORDS/PATTERNS・商品モード限定)の二重防御。実機E2E(mock): 実LP(FANCL)から5枚取得成功・inbox画像がs1/s5の背景に使われることをフレーム平均色で数値確認・台本に「※個人の感想です」自動挿入を確認。

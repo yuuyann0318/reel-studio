@@ -23,6 +23,7 @@ const state = {
   assets: { bgm: [], sfx: [], loaded: false },
 
   theme: "",
+  productUrl: "", // 商品リンク（任意）。貼ると商品アフィリエイト動画モードになる
   style: "default", // 'default' | 'vertical_hook'
   backend: "mock", // 'mock' | 'higgsfield'
   submitting: false,
@@ -74,9 +75,13 @@ function syncSubmitButton() {
 async function submitCreate() {
   const theme = state.theme.trim();
   if (!theme) return;
+  const productUrl = (state.productUrl || "").trim();
   setState({ submitting: true, submitError: null });
   try {
-    const { id } = await api.createProject({ theme, duration: 30, backend: state.backend, style: state.style });
+    const { id } = await api.createProject({
+      theme, duration: 30, backend: state.backend, style: state.style,
+      productUrl: productUrl || undefined, // 空なら送らない（通常モードのまま）
+    });
     setState({ submitting: false });
     await beginGenerate(id);
   } catch (err) {
@@ -353,7 +358,7 @@ async function resumeGenerate() {
 function goEdit() { setState({ screen: "edit", editingCaptionId: null }); }
 function goHomeFresh() {
   stopJobSub(); stopPoll();
-  setState({ screen: "home", current: null, draftPlan: null, job: null, theme: "", submitError: null });
+  setState({ screen: "home", current: null, draftPlan: null, job: null, theme: "", productUrl: "", submitError: null });
   loadProjects();
 }
 function saveLink() {
@@ -386,6 +391,56 @@ function directorMetaHtml(project) {
   return `<div class="s-director-note s-director-note--warn">
     <strong>注意:</strong> 台本はAI接続に失敗したため、自動テンプレで作成されています
   </div>`;
+}
+
+// 音声AI（Fish Audio）の使用有無 / フォールバック時の注意表示。専門用語を避け、
+// フォールバック理由は日本語の一言に変換する（project["tts"] = pipeline/tts.py の
+// synthesize() 返り値そのもの: backend/duration_sec/is_silent/requested_backend/fallback_reason）。
+const TTS_FALLBACK_REASON_LABELS = {
+  api_key_missing: "APIキーが未設定です",
+  http_error_401: "APIキーが正しくありません",
+  http_error_403: "APIの利用が許可されていません",
+  retry_exhausted: "サーバーが混み合っています",
+  save_failed: "音声の保存に失敗しました",
+  ffmpeg_convert_failed: "音声の変換に失敗しました",
+  say_failed: "音声合成に失敗しました",
+  voice_unavailable: "この声が使えません",
+  unknown_error: "不明なエラーが発生しました",
+};
+function ttsMetaHtml(project) {
+  const ttsMeta = project && project.tts;
+  if (!ttsMeta) return "";
+  if (ttsMeta.requested_backend === "fish_audio" && ttsMeta.fallback_reason) {
+    const reason = TTS_FALLBACK_REASON_LABELS[ttsMeta.fallback_reason] || ttsMeta.fallback_reason;
+    return `<div class="s-director-note s-director-note--warn">
+      <strong>注意:</strong> 音声: macOS標準に切替（理由: ${escapeHtml(reason)}）
+    </div>`;
+  }
+  if (ttsMeta.backend === "fish_audio") {
+    return `<div class="s-director-note">音声AI: Fish Audio</div>`;
+  }
+  return "";
+}
+
+// 商品アフィリエイト動画モードで取得した商品画像のサムネイル行。
+// project["product"] は {"name","url","images":[{"path","source","width","height"}],"warnings"}。
+function productThumbsHtml(project) {
+  const product = project && project.product;
+  if (!product || !product.images || !product.images.length) return "";
+  return `
+    <div class="s-card">
+      <div class="s-section-title">使った商品画像</div>
+      ${product.name ? `<div class="s-section-sub">${escapeHtml(product.name)}</div>` : ""}
+      <div class="s-product-thumbs">
+        ${product.images.map((img) => `
+          <div class="s-product-thumb">
+            <img src="${escapeHtml(api.mediaUrl("raw", img.path))}" alt="商品画像" loading="lazy">
+          </div>`).join("")}
+      </div>
+      ${(product.warnings || []).length
+        ? `<div class="s-hint" style="margin-top:10px;">${escapeHtml(product.warnings.join(" / "))}</div>`
+        : ""}
+    </div>`;
 }
 
 // 失敗の原因履歴（最新2件）。project["error"]は最新の失敗理由で上書きされるが、
@@ -471,6 +526,12 @@ function renderHome() {
         </div>
       </div>
 
+      <div class="s-section-title">商品リンク（任意）</div>
+      <div class="s-input-wrap">
+        <input type="url" class="s-url-input" id="s-product-url" placeholder="https://example.com/product/123" maxlength="500" value="${escapeHtml(state.productUrl)}">
+        <div class="s-hint" style="margin-top:8px;">貼ると商品画像を自動で取得して動画の主役にします。assets/products/inbox に入れた画像も使われます</div>
+      </div>
+
       <div class="s-section-title">見た目のスタイル</div>
       <div class="s-style-grid" role="group" aria-label="スタイル選択">
         ${styleCardHtml("default", "ふつう", "読みやすい横書きテロップ")}
@@ -501,6 +562,8 @@ function renderHome() {
 
   const themeInput = el.querySelector("#s-theme");
   themeInput.addEventListener("input", (e) => { state.theme = e.target.value; syncSubmitButton(); });
+  const productUrlInput = el.querySelector("#s-product-url");
+  productUrlInput.addEventListener("input", (e) => { state.productUrl = e.target.value; });
   el.querySelectorAll("[data-chip]").forEach((btn) => btn.addEventListener("click", () => setState({ theme: btn.dataset.chip })));
   el.querySelectorAll("[data-style]").forEach((btn) => btn.addEventListener("click", () => setState({ style: btn.dataset.style })));
   el.querySelectorAll("[data-backend]").forEach((btn) => btn.addEventListener("click", () => setState({ backend: btn.dataset.backend })));
@@ -581,6 +644,8 @@ function renderResult() {
   el.innerHTML = `
     ${topbarHtml()}
     ${directorMetaHtml(project)}
+    ${ttsMetaHtml(project)}
+    ${productThumbsHtml(project)}
     <div class="s-card">
       <div class="s-section-title">動画が完成しました</div>
       <div class="s-section-sub">「${escapeHtml(project ? project.theme : "")}」</div>
@@ -651,6 +716,8 @@ function renderEdit() {
   el.innerHTML = `
     ${topbarHtml()}
     ${directorMetaHtml(state.current)}
+    ${ttsMetaHtml(state.current)}
+    ${productThumbsHtml(state.current)}
     ${state.current && state.current.status === "failed" ? `
       <div class="s-card">
         <div class="s-section-title">前回は完成しませんでした</div>

@@ -61,6 +61,29 @@ _MIN_REQUEST_DURATION_SEC = 4
 _MAX_REQUEST_DURATION_SEC = 12
 
 
+_MAX_REFERENCE_IMAGES = 9
+
+
+def _build_image_args(shot):
+    """shotの image_path / reference_images から画像関連の追加CLIフラグを構築する（副作用なし・テスト対象）。
+
+    - image_path（商品画像のローカル絶対パス、非空）: `--start-image <path>` を1つ追加
+      （image-to-video。Higgsfield CLIはローカルパスを自動アップロードする＝実機確認済み）。
+    - reference_images（list、任意）: 最大 `_MAX_REFERENCE_IMAGES`(9) 枚にクリップし、
+      1枚ごとに `--image-references <path>` を繰り返し追加する（CLIヘルプ実測:
+      "use repeated --image-references"）。
+    - どちらも無い/空のshotでは何も追加しない＝画像なしshotのコマンドは従来と完全に同一（回帰）。
+    """
+    args = []
+    image_path = shot.get("image_path")
+    if image_path:
+        args += ["--start-image", str(image_path)]
+    reference_images = shot.get("reference_images") or []
+    for ref_path in list(reference_images)[:_MAX_REFERENCE_IMAGES]:
+        args += ["--image-references", str(ref_path)]
+    return args
+
+
 def _resolve_request_duration_sec(shot):
     """ショット尺(shot['duration_sec'])から、CLIへ実際にリクエストする秒数を決める。
 
@@ -132,12 +155,15 @@ def _build_create_cmd(cli_bin, model, shot, resolution):
         "--aspect-ratio", "9:16",
         "--resolution", resolution,
         "--duration", str(duration_sec),
-        "--json",
-    ]
+    ] + _build_image_args(shot) + ["--json"]
 
 
 def _build_cost_cmd(cli_bin, model, shot, resolution):
-    """コスト見積コマンドを構築する（副作用なし・テスト対象）。"""
+    """コスト見積コマンドを構築する（副作用なし・テスト対象）。
+
+    課金額の見積とジョブ投入(_build_create_cmd)は、画像フラグを含め同じ入力条件で
+    行うべき(見積と実際の課金対象が一致する)ため、_build_image_args を共通利用する。
+    """
     duration_sec = _resolve_request_duration_sec(shot)
     return [
         cli_bin, "generate", "cost", model,
@@ -145,8 +171,7 @@ def _build_cost_cmd(cli_bin, model, shot, resolution):
         "--aspect-ratio", "9:16",
         "--resolution", resolution,
         "--duration", str(duration_sec),
-        "--json",
-    ]
+    ] + _build_image_args(shot) + ["--json"]
 
 
 def _build_wait_cmd(cli_bin, job_id, timeout_sec, interval_sec):
@@ -494,9 +519,18 @@ class HiggsfieldBackend(VisualBackend):
         }
 
     def generate(self, shot: dict, out_path: str) -> dict:
+        # ★image_pathの実在チェックは全リトライ試行に共通の前提条件のため、安全リトライ
+        # ループに入る前に1回だけ行う(image_pathは全試行を通じて不変=attempt_shotでも
+        # dict(shot)によりそのまま維持される。差し替わるのはvisual_promptのみ)。
+        image_path = shot.get("image_path")
+        if image_path and not os.path.isfile(image_path):
+            raise VisualBackendError("商品画像が見つかりません: {}".format(image_path))
+
         # ★安全フィルタ誤検知対策(2026-07-17実機確認): nsfw等で拒否されたら、プロンプトを
         # 段階的に安全側へ言い換えてcreateからやり直す。nsfw失敗はクレジット未消課金のため
         # (実測で残高確認済み)、createの再試行は二重課金にならない。
+        # ★image_path/reference_imagesは安全リトライでも維持する(言い換えるのはpromptのみ。
+        # 3回目の抽象プロンプト差し替え時も商品画像は落とさない=商品画像が主役のため)。
         original_prompt = shot.get("visual_prompt", "")
         last_safety_error = None
         for attempt in range(1, _MAX_SAFETY_ATTEMPTS + 1):

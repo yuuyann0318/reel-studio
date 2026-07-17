@@ -9,14 +9,27 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
+import time
+import urllib.error
+import urllib.request
 
 from pipeline.config import load_config, project_root
 
 # 日本語の平均読み上げ速度の概算（文字/秒）。無音フォールバック時の尺見積りに使う。
 _JP_CHARS_PER_SEC = 6.0
 _MIN_FALLBACK_SEC = 2.0
+
+# --- Fish Audio TTS 関連の既定値（pipeline/config.py の _DEFAULTS には未登録。統合フェーズで別途追加予定） ---
+_FISH_AUDIO_URL = "https://api.fish.audio/v1/tts"
+_FISH_AUDIO_DEFAULT_MODEL = "s2.1-pro-free"
+_FISH_AUDIO_DEFAULT_FORMAT = "wav"
+_FISH_AUDIO_DEFAULT_API_KEY_ENV = "FISH_AUDIO_API_KEY"
+_FISH_AUDIO_RETRY_BACKOFF_SEC = [2, 5]
+_FISH_AUDIO_MAX_RETRIES = 2
 
 
 class TTSError(RuntimeError):
@@ -67,7 +80,7 @@ class SayTTSBackend(TTSBackend):
         ffprobe_bin = cfg.get("ffprobe_bin") or str(project_root() / "bin" / "ffprobe")
 
         if shutil.which("say") is None or not _voice_available(self.voice):
-            return SilentTTSBackend().synthesize(text, out_wav_path, cfg)
+            return self._silent_fallback(text, out_wav_path, cfg, "voice_unavailable")
 
         aiff_path = out_wav_path + ".say.aiff"
         try:
@@ -78,7 +91,7 @@ class SayTTSBackend(TTSBackend):
         except Exception as exc:
             raise TTSError("say コマンド実行に失敗しました: {}".format(exc))
         if proc.returncode != 0 or not _file_nonempty(aiff_path):
-            return SilentTTSBackend().synthesize(text, out_wav_path, cfg)
+            return self._silent_fallback(text, out_wav_path, cfg, "say_failed")
 
         conv = subprocess.run(
             [ffmpeg_bin, "-y", "-i", aiff_path, "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", out_wav_path],
@@ -86,10 +99,19 @@ class SayTTSBackend(TTSBackend):
         )
         _safe_remove(aiff_path)
         if conv.returncode != 0 or not _file_nonempty(out_wav_path):
-            return SilentTTSBackend().synthesize(text, out_wav_path, cfg)
+            return self._silent_fallback(text, out_wav_path, cfg, "ffmpeg_convert_failed")
 
         duration = _ffprobe_duration(ffprobe_bin, out_wav_path)
-        return {"backend": self.name, "duration_sec": duration, "is_silent": False}
+        return {
+            "backend": self.name, "duration_sec": duration, "is_silent": False,
+            "requested_backend": self.name, "fallback_reason": None,
+        }
+
+    def _silent_fallback(self, text, out_wav_path, cfg, reason):
+        result = SilentTTSBackend().synthesize(text, out_wav_path, cfg)
+        result["requested_backend"] = self.name
+        result["fallback_reason"] = reason
+        return result
 
 
 class SilentTTSBackend(TTSBackend):
@@ -115,6 +137,123 @@ class SilentTTSBackend(TTSBackend):
         return {"backend": self.name, "duration_sec": duration, "is_silent": True}
 
 
+def _default_fish_audio_http_post(url, payload, api_key, model, timeout_sec=60):
+    """Fish Audio TTS APIへPOSTし、音声バイト列を返す(stdlib urllib.requestのみ・依存追加ゼロ)。
+
+    HTTPエラーは urllib.error.HTTPError（exc.codeで判別）、接続/タイムアウト等は
+    OSError（URLErrorのスーパークラス）としてそのまま呼び出し元に伝播させる。
+    """
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Authorization", "Bearer {}".format(api_key))
+    req.add_header("model", model)
+    req.add_header("Content-Type", "application/json")
+    resp = urllib.request.urlopen(req, timeout=timeout_sec)
+    try:
+        return resp.read()
+    finally:
+        resp.close()
+
+
+class FishAudioTTSBackend(TTSBackend):
+    """Fish Audio TTS API によるナレーション音声合成。
+
+    APIキー未設定・認証エラー・リトライ全滅・保存/変換失敗のいずれでも例外を出さず、
+    `SayTTSBackend`（さらにその内部で `SilentTTSBackend`）へ即フォールバックする。
+    パイプライン全体がTTSの都合で止まらないことを最優先する既存設計を踏襲する。
+    """
+
+    name = "fish_audio"
+
+    def __init__(self, voice="Kyoko", _http_post=None, _sleep=None):
+        self.voice = voice
+        self._http_post = _http_post or _default_fish_audio_http_post
+        self._sleep = _sleep or time.sleep
+
+    def _fallback_to_say(self, text, out_wav_path, cfg, fallback_reason):
+        result = SayTTSBackend(voice=self.voice).synthesize(text, out_wav_path, cfg)
+        result["requested_backend"] = self.name
+        result["fallback_reason"] = fallback_reason
+        return result
+
+    def synthesize(self, text: str, out_wav_path: str, cfg: dict = None) -> dict:
+        cfg = cfg or load_config()
+        fish_cfg = (cfg.get("tts") or {}).get("fish_audio") or {}
+        api_key_env = fish_cfg.get("api_key_env") or _FISH_AUDIO_DEFAULT_API_KEY_ENV
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
+            return self._fallback_to_say(text, out_wav_path, cfg, "api_key_missing")
+
+        model = fish_cfg.get("model") or _FISH_AUDIO_DEFAULT_MODEL
+        audio_format = fish_cfg.get("format") or _FISH_AUDIO_DEFAULT_FORMAT
+        reference_id = fish_cfg.get("reference_id")
+        # デッドコンフィグ対策: fish_cfg["timeout_sec"](config.json product_images... ではなく
+        # tts.fish_audio.timeout_sec)を実際のHTTPタイムアウトへ配線する。従来はこの値を読まず、
+        # _default_fish_audio_http_post の既定値(60秒)が常に使われていた。
+        http_timeout_sec = fish_cfg.get("timeout_sec", 60)
+
+        payload = {"text": text or "", "format": audio_format}
+        if reference_id:
+            payload["reference_id"] = reference_id
+
+        audio_bytes = None
+        fallback_reason = None
+        attempt = 0
+        while True:
+            try:
+                audio_bytes = self._http_post(_FISH_AUDIO_URL, payload, api_key, model, timeout_sec=http_timeout_sec)
+                break
+            except urllib.error.HTTPError as exc:
+                code = exc.code
+                if code == 429 or code >= 500:
+                    if attempt >= _FISH_AUDIO_MAX_RETRIES:
+                        fallback_reason = "retry_exhausted"
+                        break
+                    self._sleep(_FISH_AUDIO_RETRY_BACKOFF_SEC[min(attempt, len(_FISH_AUDIO_RETRY_BACKOFF_SEC) - 1)])
+                    attempt += 1
+                    continue
+                # 401/403/400 等はリトライせず即フォールバック
+                fallback_reason = "http_error_{}".format(code)
+                break
+            except OSError as exc:
+                # URLError/timeout等の接続系エラーのみリトライ対象
+                if attempt >= _FISH_AUDIO_MAX_RETRIES:
+                    fallback_reason = "retry_exhausted"
+                    break
+                self._sleep(_FISH_AUDIO_RETRY_BACKOFF_SEC[min(attempt, len(_FISH_AUDIO_RETRY_BACKOFF_SEC) - 1)])
+                attempt += 1
+                continue
+            except Exception:
+                fallback_reason = "unknown_error"
+                break
+
+        if audio_bytes is None:
+            return self._fallback_to_say(text, out_wav_path, cfg, fallback_reason or "unknown_error")
+
+        ffmpeg_bin = cfg.get("ffmpeg_bin") or str(project_root() / "bin" / "ffmpeg")
+        ffprobe_bin = cfg.get("ffprobe_bin") or str(project_root() / "bin" / "ffprobe")
+        tmp_path = out_wav_path + ".fish.{}".format(audio_format)
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(audio_bytes)
+        except OSError:
+            return self._fallback_to_say(text, out_wav_path, cfg, "save_failed")
+
+        conv = subprocess.run(
+            [ffmpeg_bin, "-y", "-i", tmp_path, "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", out_wav_path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        _safe_remove(tmp_path)
+        if conv.returncode != 0 or not _file_nonempty(out_wav_path):
+            return self._fallback_to_say(text, out_wav_path, cfg, "ffmpeg_convert_failed")
+
+        duration = _ffprobe_duration(ffprobe_bin, out_wav_path)
+        return {
+            "backend": self.name, "duration_sec": duration, "is_silent": False,
+            "requested_backend": self.name, "fallback_reason": None,
+        }
+
+
 def _file_nonempty(path):
     import os
     return os.path.exists(path) and os.path.getsize(path) > 0
@@ -128,5 +267,13 @@ def _safe_remove(path):
         pass
 
 
-def get_tts_backend(voice="Kyoko"):
+def get_tts_backend(voice="Kyoko", cfg=None):
+    """TTSバックエンドを選択する。
+
+    cfg["tts"]["engine"] == "fish_audio" のときのみ FishAudioTTSBackend
+    （内部にsay/silentフォールバックを内蔵）を返す。cfg未指定・それ以外は
+    従来どおり SayTTSBackend を返す（後方互換）。
+    """
+    if cfg is not None and (cfg.get("tts") or {}).get("engine") == "fish_audio":
+        return FishAudioTTSBackend(voice=voice)
     return SayTTSBackend(voice=voice)

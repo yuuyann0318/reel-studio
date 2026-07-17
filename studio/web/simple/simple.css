@@ -107,6 +107,25 @@ body.theme-simple {
 .s-chip:hover { background: #F5F6FA; border-color: var(--accent); color: var(--text); }
 .s-chip:active { transform: translateY(1px); }
 
+/* ---------- ホーム: 商品リンク入力（任意） ---------- */
+.s-url-input {
+  width: 100%;
+  height: 48px;
+  font-size: 15px;
+  padding: 0 14px;
+  border-radius: var(--radius);
+  border: 1.5px solid var(--border-strong);
+  background: #FFFFFF;
+  color: var(--text);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+.s-url-input::placeholder { color: var(--text-faint); }
+.s-url-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 107, 255, 0.14);
+}
+
 /* ---------- ホーム: スタイル選択カード ---------- */
 .s-style-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .s-style-card {
@@ -246,6 +265,28 @@ body.theme-simple {
   word-break: break-word;
 }
 .s-error-history__item:last-child { margin-bottom: 0; }
+
+/* ---------- 商品画像サムネイル（商品アフィリエイト動画モード） ---------- */
+.s-product-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.s-product-thumb {
+  width: 72px;
+  height: 72px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #F5F6FA;
+  flex: none;
+}
+.s-product-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 
 /* ---------- 過去の動画 ---------- */
 .s-history-list { display: flex; flex-direction: column; gap: 10px; }

@@ -31,6 +31,15 @@ class VisualBackend:
 
         Args:
             shot: {"id","visual_prompt","motion_preset","duration_sec","caption_jp"}
+                任意キー:
+                - "image_path" (str): 商品画像のローカル絶対パス。指定時はこの画像を
+                  起点にimage-to-video生成する（Higgsfieldバックエンドは `--start-image`
+                  として渡す。mockバックエンドは実在すればffmpegの画像入力+Ken Burns風
+                  ズームで擬似動画化する）。未指定/ファイル不在(mockのみ非エラーでフォール
+                  バック。Higgsfieldは生成前にVisualBackendErrorで明確に失敗する)なら
+                  従来どおりプロンプトのみのt2v/グラデーション生成にフォールバックする。
+                - "reference_images" (list[str]): 見た目参照用の追加画像パス（最大9枚。
+                  Higgsfieldバックエンドのみ使用。`--image-references` を1枚ごとに繰り返す）。
             out_path: 出力mp4パス（呼び出し側が用意したディレクトリ配下）
 
         Returns:

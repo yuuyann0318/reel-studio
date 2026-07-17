@@ -78,12 +78,31 @@ _STYLE_PROMPT_FILES = {
 
 _ANGLES_PROMPT_FILE = "angles_prompt.txt"
 _CRITIQUE_PROMPT_FILE = "critique_prompt.txt"
+_PRODUCT_BLOCK_PROMPT_FILE = "product_block.txt"
 
 _VERTICAL_HOOK_STYLE_NOTE = "テロップは縦書き・高速カット(1カット約2秒)で見せるスタイル"
 
 
+def _build_product_block(product):
+    """product(dict|None) から {PRODUCT_BLOCK} 挿入用テキストを組み立てる。
+
+    product=None（または空dict）の場合は空文字を返す（商品モードでない従来の
+    企画生成は一切影響を受けない）。
+    """
+    if not product:
+        return ""
+    template = _load_prompt(_PRODUCT_BLOCK_PROMPT_FILE)
+    name = (product.get("name") or "この商品").strip()
+    image_count = product.get("image_count")
+    try:
+        image_count = int(image_count)
+    except (TypeError, ValueError):
+        image_count = 0
+    return template.replace("{PRODUCT_NAME}", name).replace("{IMAGE_COUNT}", str(image_count))
+
+
 def build_director_prompt(theme, target_duration_sec, target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC,
-                           style="default", angle_block=""):
+                           style="default", angle_block="", product=None):
     template = _load_prompt(_STYLE_PROMPT_FILES.get(style, _STYLE_PROMPT_FILES["default"]))
     return (
         template.replace("{THEME}", theme)
@@ -91,6 +110,7 @@ def build_director_prompt(theme, target_duration_sec, target_tolerance_sec=DEFAU
         .replace("{TARGET_TOLERANCE}", "{:.0f}".format(target_tolerance_sec))
         .replace("{SCHEMA_EXAMPLE}", SCHEMA_EXAMPLE)
         .replace("{ANGLE_BLOCK}", angle_block or "")
+        .replace("{PRODUCT_BLOCK}", _build_product_block(product))
     )
 
 
@@ -236,7 +256,8 @@ def build_critique_prompt(theme, target_duration_sec, target_tolerance_sec, styl
 
 
 def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
-                  target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC, style="default", quality=None):
+                  target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC, style="default", quality=None,
+                  product=None):
     """テーマから reel_plan を生成する。常に有効なplanを返す（AI失敗時はルールベース代替）。
 
     no_llm=True: claude呼び出しを一切行わず、決定論的テンプレートで即座に生成する
@@ -248,6 +269,9 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     向けのTTP構成。director_prompt_vertical_hook.txt を使い、shots数=尺÷2秒目安・各ショット
     1.5〜2.5秒・5部構成のプロンプトに差し替える。claude不通時のルールベース代替も
     style別のテンプレートを使う）。
+    product: 商品アフィリエイト動画モード用の商品情報 {"name","url","image_count"}。
+    Noneなら従来どおり(プロンプトの{PRODUCT_BLOCK}は空文字に置換される)。ルールベース
+    代替(build_rule_based_plan)は商品モードでも変更しない。
     """
     config = config or {}
     if target_duration_sec is None:
@@ -262,6 +286,7 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
         plan.setdefault("meta", {})
         plan["meta"]["style"] = style
         plan["meta"]["quality"] = quality
+        plan["meta"]["product"] = (product or {}).get("name") if product else None
         return plan
 
     stages = {}
@@ -272,7 +297,7 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
 
     write_trace = {}
     prompt = build_director_prompt(
-        theme, target_duration_sec, target_tolerance_sec, style=style, angle_block=angle_block
+        theme, target_duration_sec, target_tolerance_sec, style=style, angle_block=angle_block, product=product
     )
     plan = _attempt_plan(prompt, config, MAX_RETRIES, target_duration_sec, target_tolerance_sec, trace=write_trace)
     stages["write"] = {"ok": plan is not None, "model_used": write_trace.get("last_model_used")}
@@ -294,6 +319,7 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     plan.setdefault("meta", {})
     plan["meta"]["style"] = style
     plan["meta"]["quality"] = quality
+    plan["meta"]["product"] = (product or {}).get("name") if product else None
     if quality == "supreme":
         plan["meta"]["stages"] = stages
     return plan

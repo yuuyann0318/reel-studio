@@ -14,10 +14,16 @@
 （抽象的なグラデーション+アイコン風テキストのみ。svg-figures-abstract-only の
 教訓と同じ理由=具象イラストはAIに描かせると必ず崩れるため、そもそも狙わない）。
 
+shot["image_path"] が実在する画像ファイルを指す場合のみ例外で、gradients生成の
+代わりにその画像を入力にしてKen Burns風のズーム/パンを付ける（商品画像を主役にした
+image-to-videoのMock版）。未指定/ファイル不在時は非エラーで従来のgradients生成に
+フォールバックする。
+
 Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 
@@ -95,24 +101,43 @@ def _motion_exprs(motion_preset, total_frames):
 
 
 def build_mock_cmd(ffmpeg_bin, shot, out_path, fonts_dir=None):
-    """1ショット分のMock擬似クリップを生成するffmpegコマンド配列を構築する（副作用なし・テスト対象）。"""
+    """1ショット分のMock擬似クリップを生成するffmpegコマンド配列を構築する（副作用なし・テスト対象）。
+
+    shot["image_path"] が実在するファイルを指す場合は、gradientsソースの代わりに
+    その画像を入力にして(-loop 1 -i <image>)、1080x1920へcrop（force_original_aspect_ratio=
+    increase後にcrop=中央）した上で、通常どおり motion_preset に応じた zoompan（Ken Burns風）
+    を適用する。image_path未指定/ファイル不在時は従来どおりgradients生成にフォールバック
+    する（非エラー。mockは常に無課金・鍵不要でE2Eが通ることを優先する設計のため）。
+    """
     duration = float(shot.get("duration_sec", 5.0))
     total_frames = max(1, int(round(duration * FPS)))
     motion_preset = shot.get("motion_preset", "static")
     shot_id = shot.get("id", "")
     number_label = _shot_number_label(shot_id)
 
-    c0, c1 = _palette_for(shot_id)
     z, x, y = _motion_exprs(motion_preset, total_frames)
 
     fonts_dir = fonts_dir or str(project_root() / "assets" / "fonts")
     font_path = fonts_dir.rstrip("/") + "/NotoSansJP-Black.ttf"
 
-    gradients_src = (
-        "gradients=size={w}x{h}:rate={fps}:speed=0.03:c0={c0}:c1={c1}:x0=0:y0=0:x1={w}:y1={h}"
-    ).format(w=OUT_W, h=OUT_H, fps=FPS, c0=c0, c1=c1)
+    image_path = shot.get("image_path")
+    use_image = bool(image_path) and os.path.isfile(image_path)
 
-    vf_parts = [
+    pre_filters = []
+    if use_image:
+        input_args = ["-loop", "1", "-i", str(image_path)]
+        pre_filters = [
+            "scale={w}:{h}:force_original_aspect_ratio=increase".format(w=OUT_W, h=OUT_H),
+            "crop={w}:{h}".format(w=OUT_W, h=OUT_H),
+        ]
+    else:
+        c0, c1 = _palette_for(shot_id)
+        gradients_src = (
+            "gradients=size={w}x{h}:rate={fps}:speed=0.03:c0={c0}:c1={c1}:x0=0:y0=0:x1={w}:y1={h}"
+        ).format(w=OUT_W, h=OUT_H, fps=FPS, c0=c0, c1=c1)
+        input_args = ["-f", "lavfi", "-i", gradients_src]
+
+    vf_parts = pre_filters + [
         "zoompan=z='{z}':x='{x}':y='{y}':d=1:s={w}x{h}:fps={fps}".format(z=z, x=x, y=y, w=OUT_W, h=OUT_H, fps=FPS),
         "setsar=1",
         "format=yuv420p",
@@ -128,7 +153,7 @@ def build_mock_cmd(ffmpeg_bin, shot, out_path, fonts_dir=None):
 
     cmd = [
         ffmpeg_bin, "-y",
-        "-f", "lavfi", "-i", gradients_src,
+    ] + input_args + [
         "-t", "{:.3f}".format(duration),
         "-vf", vf,
         "-r", str(FPS),

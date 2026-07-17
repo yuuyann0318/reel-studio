@@ -34,6 +34,22 @@ _DEFAULTS = {
         "poll_timeout_sec": 600,
     },
     "cloudapi": {"base_url": "", "api_key_env": "HIGGSFIELD_API_KEY"},
+    "tts": {
+        "engine": "fish_audio",
+        "fish_audio": {
+            "api_key_env": "FISH_AUDIO_API_KEY",
+            "model": "s2.1-pro-free",
+            "reference_id": "",
+            "format": "wav",
+            "timeout_sec": 60,
+        },
+    },
+    "product_images": {
+        "max_images": 6,
+        "min_short_side": 400,
+        "local_dir": "assets/products/inbox",
+        "timeout_sec": 20,
+    },
 }
 
 

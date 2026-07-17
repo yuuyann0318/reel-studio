@@ -3,6 +3,8 @@
 
 PROJECTS_ROOTをtmp_pathへ差し替えて実プロジェクトディレクトリを汚さない。
 """
+from pathlib import Path
+
 import pytest
 
 from studio.server import projects
@@ -207,6 +209,55 @@ def test_validate_plan_accepts_unrendered_shot_with_empty_clip_path():
     assert normalized["shots"][0]["clip_path"] is None
 
 
+# ---------------------------------------------------------------------------
+# パストラバーサル対策回帰: resolve_media_relpath/resolve_clip_path が
+# PROJECTS_ROOT配下から逸脱する解決結果を拒否すること
+# ---------------------------------------------------------------------------
+
+def test_resolve_media_relpath_rejects_parent_traversal():
+    with pytest.raises(projects.UnsafeMediaPathError):
+        projects.resolve_media_relpath("../../../../etc/passwd")
+
+
+def test_resolve_media_relpath_rejects_traversal_embedded_mid_path(tmp_path):
+    # 一見 "projects/<id>/clips/..." から始まっていても、途中の "../" でPROJECTS_ROOT外へ
+    # 抜け出すパターンも拒否されること。
+    outside_target = str(projects.PROJECTS_ROOT.parent.parent / "secret.txt")
+    traversal = "projects/p_x/clips/../../../{}".format(Path(outside_target).name)
+    with pytest.raises(projects.UnsafeMediaPathError):
+        projects.resolve_media_relpath(traversal)
+
+
+def test_resolve_media_relpath_rejects_absolute_path_outside_root(tmp_path):
+    outside_abs = str(tmp_path / "outside" / "evil.mp4")
+    with pytest.raises(projects.UnsafeMediaPathError):
+        projects.resolve_media_relpath(outside_abs)
+
+
+def test_resolve_clip_path_rejects_traversal():
+    with pytest.raises(projects.UnsafeMediaPathError):
+        projects.resolve_clip_path("p_any", "../../outside.mp4")
+
+
+def test_resolve_media_relpath_accepts_normal_relpath_within_root():
+    # 既存の正常系（従来どおり通ること）の非退行確認。
+    project = _make_project_with_clip()
+    clip_path = projects.media_relpath_for_clip(project["id"], "s1.mp4")
+    resolved = projects.resolve_media_relpath(clip_path)
+    assert resolved.exists()
+    assert resolved == projects.clips_dir(project["id"]) / "s1.mp4"
+
+
+def test_validate_plan_rejects_clip_path_with_parent_traversal():
+    project = _make_project_with_clip()
+    shot = _base_shot(project, clip_path="../../../../etc/passwd")
+    plan = {"shots": [shot], "narration_text": ""}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert not ok
+    assert any("clip_path" in e and "不正" in e for e in errors)
+    assert normalized is None
+
+
 def test_validate_plan_still_rejects_nonexistent_clip_file_when_clip_path_present():
     project = _make_project_with_clip()
     shot = _base_shot(project, clip_path=projects.media_relpath_for_clip(project["id"], "does_not_exist.mp4"))
@@ -237,3 +288,94 @@ def test_unrendered_enabled_shot_ids_lists_enabled_shots_without_clip():
     plan = {"shots": [s1, s2, s3], "narration_text": ""}
     ids = projects.unrendered_enabled_shot_ids(plan)
     assert ids == ["s2"]
+
+
+# ---------------------------------------------------------------------------
+# 商品アフィリエイト動画モード統合: product/tts永続化・image_pathパススルー・
+# 薬機法ng_patternsの合成（productモードのみ有効化される想定）
+# ---------------------------------------------------------------------------
+
+def test_create_project_initializes_product_and_tts_to_none():
+    project = projects.create_project("商品モードテスト", 15.0, "mock", status="draft", product_url="https://shop.example.com/item/1")
+    assert project["product"] is None
+    assert project["tts"] is None
+    loaded = projects.get_project(project["id"])
+    assert loaded["product"] is None
+    assert loaded["tts"] is None
+
+
+def test_get_project_setdefaults_product_and_tts_for_legacy_project_json():
+    """本機能追加前に作られたproject.json（product/ttsキーが無い）を読んでも安全に扱えること。"""
+    project = _make_project_with_clip()
+    raw = projects.get_project(project["id"])
+    del raw["product"]
+    del raw["tts"]
+    projects._project_json_path(project["id"]).write_text(
+        __import__("json").dumps(raw, ensure_ascii=False), encoding="utf-8"
+    )
+    reloaded = projects.get_project(project["id"])
+    assert reloaded["product"] is None
+    assert reloaded["tts"] is None
+
+
+def test_validate_plan_passes_through_string_image_path():
+    project = _make_project_with_clip()
+    shot = _base_shot(project)
+    shot["image_path"] = "/tmp/fake_product_image_001.jpg"
+    plan = {"shots": [shot], "narration_text": ""}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert ok, errors
+    assert normalized["shots"][0]["image_path"] == "/tmp/fake_product_image_001.jpg"
+
+
+def test_validate_plan_omits_image_path_key_when_absent():
+    project = _make_project_with_clip()
+    shot = _base_shot(project)
+    plan = {"shots": [shot], "narration_text": ""}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert ok, errors
+    assert "image_path" not in normalized["shots"][0]
+
+
+def test_validate_plan_ng_patterns_none_by_default_allows_yakkiho_word():
+    """通常モード(ng_patterns未指定)では薬機法ワードは検査されない(既定NGワードのみ)。"""
+    from pipeline import compliance
+
+    project = _make_project_with_clip()
+    shot = _base_shot(project)
+    shot["caption"] = "このシミが消える美容液"  # BEAUTY_YAKKIHO_NG_WORDS に含まれる文言
+    plan = {"shots": [shot], "narration_text": ""}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan, ng_words=list(compliance.DEFAULT_NG_WORDS))
+    assert ok, errors  # 薬機法ワードはDEFAULT_NG_WORDSに含まれないため通常モードでは弾かれない
+
+
+def test_validate_plan_ng_patterns_blocks_yakkiho_word_when_product_mode_words_supplied():
+    """商品モード相当（呼び出し側がBEAUTY_YAKKIHO_NG_WORDS/NG_PATTERNSを合成して渡す）では弾かれる。"""
+    from pipeline import compliance
+
+    project = _make_project_with_clip()
+    shot = _base_shot(project)
+    shot["caption"] = "このシミが消える美容液"
+    plan = {"shots": [shot], "narration_text": ""}
+    ng_words = list(compliance.DEFAULT_NG_WORDS) + list(compliance.BEAUTY_YAKKIHO_NG_WORDS)
+    ok, errors, normalized = projects.validate_plan(
+        project["id"], plan, ng_words=ng_words, ng_patterns=compliance.BEAUTY_YAKKIHO_NG_PATTERNS
+    )
+    assert not ok
+    assert any("コンプライアンス違反" in e for e in errors)
+
+
+def test_validate_plan_ng_patterns_catches_loose_yakkiho_phrasing_not_in_word_list():
+    """固定文言リストに無い言い回し（例:「頑固なシミがみるみる消えます」）はng_patternsが補足する。"""
+    from pipeline import compliance
+
+    project = _make_project_with_clip()
+    shot = _base_shot(project)
+    shot["caption"] = "頑固なシミがみるみる消えます"
+    plan = {"shots": [shot], "narration_text": ""}
+    ng_words = list(compliance.DEFAULT_NG_WORDS) + list(compliance.BEAUTY_YAKKIHO_NG_WORDS)
+    ok, errors, normalized = projects.validate_plan(
+        project["id"], plan, ng_words=ng_words, ng_patterns=compliance.BEAUTY_YAKKIHO_NG_PATTERNS
+    )
+    assert not ok
+    assert any("コンプライアンス違反" in e for e in errors)

@@ -13,6 +13,8 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import re
+
 DEFAULT_NG_WORDS = [
     "絶対稼げる",
     "絶対に稼げる",
@@ -29,6 +31,32 @@ DEFAULT_NG_WORDS = [
 # （出現したら警告のみ・runは止めない）
 TOKUSHOHO_WATCH_WORDS = ["月額", "サブスク", "定期購入", "自動更新", "契約"]
 TOKUSHOHO_REQUIRED_HINTS = ["解約", "退会", "いつでもやめられる", "解除"]
+
+# 美容系商品アフィリ動画モード向け薬機法(医薬品医療機器等法)NGワード。
+# DEFAULT_NG_WORDSには混ぜない（商品モードでcheck_plan()呼び出し側が明示的に
+# ng_words/ng_patternsへ合成して渡す設計。既定モードの挙動は不変にするため）。
+BEAUTY_YAKKIHO_NG_WORDS = [
+    "シミが消える",
+    "シワが消える",
+    "必ず痩せる",
+    "絶対痩せる",
+    "飲むだけで痩せる",
+    "塗るだけで痩せる",
+    "若返る",
+    "アトピーが治る",
+    "ニキビが治る",
+    "毛穴が消える",
+    "白髪がなくなる",
+    "医学的に効果が証明",
+]
+
+# 「シミ/シワ/ニキビ/たるみ/くすみ」等が「消える/なくなる/治る」と断定する表現を
+# 広く検出する正規表現。BEAUTY_YAKKIHO_NG_WORDSの固定文言だけでは拾えない言い回し
+# （例:「頑固なシミがみるみる消えます」）を補足する。
+BEAUTY_YAKKIHO_NG_PATTERNS = [
+    r"(シミ|シワ|ニキビ|たるみ|くすみ|毛穴)が(すぐに|みるみる|完全に)?(消え|なくな|治)",
+    r"(必ず|絶対|100%)(痩せ|効く|治る|若返る)",
+]
 
 
 def _collect_texts(plan):
@@ -50,12 +78,17 @@ def _collect_texts(plan):
     return texts
 
 
-def check_plan(plan, ng_words=None):
-    """plan全体をNGワードで検査する。
+def check_plan(plan, ng_words=None, ng_patterns=None):
+    """plan全体をNGワード(+任意でNGパターン)で検査する。
 
     Returns: {"ok": bool, "violations": [{"field","word","text"}...],
               "warnings": [{"field","reason"}...]}
     ok=False の場合、呼び出し側(run.py)はレンダリングへ進んではならない。
+
+    ng_patterns: 正規表現文字列(またはコンパイル済みPatternオブジェクト)のリスト。
+    Noneの場合はパターン検査を一切行わず、既存のng_wordsのみの挙動と完全に不変
+    （後方互換）。マッチした場合は violations に {"field","word","text","pattern"}
+    を追加する（"word"にはマッチした実際の部分文字列を入れる）。
     """
     ng_words = ng_words if ng_words is not None else DEFAULT_NG_WORDS
     texts = _collect_texts(plan)
@@ -65,6 +98,14 @@ def check_plan(plan, ng_words=None):
         for word in ng_words:
             if word and word in text:
                 violations.append({"field": field, "word": word, "text": text})
+        if ng_patterns:
+            for pat in ng_patterns:
+                compiled = pat if hasattr(pat, "search") else re.compile(pat)
+                m = compiled.search(text)
+                if m:
+                    violations.append(
+                        {"field": field, "word": m.group(0), "text": text, "pattern": compiled.pattern}
+                    )
 
     warnings = []
     full_text = "".join(t for _, t in texts)

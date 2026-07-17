@@ -133,3 +133,75 @@ def test_put_plan_still_allowed_while_status_is_draft():
     resp = client.put("/api/projects/{}/plan".format(project["id"]), json=plan)
     assert resp.status_code == 200, resp.text
     assert resp.json()["plan"]["narration_text"] == "編集後のナレーション"
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU回帰: PUT /plan がリクエスト受信時点の古いstatusスナップショットのまま
+# 保存し、間に割り込んだ POST /render の "rendering" 遷移を巻き戻してしまわないこと
+# ---------------------------------------------------------------------------
+
+def test_put_plan_does_not_clobber_status_changed_during_validation(monkeypatch):
+    """update_planがGET時点のproject（status="draft"）を保持したまま、
+    validate_plan実行中（重い処理を模擬）に別スレッド相当のPOST /renderがstatusを
+    "rendering"へ遷移させた場合、PUT /planの保存がそのrendering状態を"draft"へ
+    巻き戻さないこと（=保存直前の再読込・再判定で409を返し保存自体を行わない）。
+    """
+    project = _make_project_with_one_enabled_shot("TOCTOUガード:PUT plan中の並行render")
+    assert project["status"] == "draft"
+
+    original_validate_plan = projects.validate_plan
+
+    def _validate_plan_with_concurrent_render(project_id, plan, **kwargs):
+        # PUT /plan のリクエスト処理中（validate_plan実行中）に、別スレッドの
+        # POST /render が割り込んでstatusをrenderingへ遷移させたことを模擬する。
+        concurrent = projects.get_project(project_id)
+        concurrent["status"] = "rendering"
+        projects.save_project(concurrent)
+        return original_validate_plan(project_id, plan, **kwargs)
+
+    monkeypatch.setattr(projects, "validate_plan", _validate_plan_with_concurrent_render)
+
+    plan = dict(project["plan"])
+    plan["narration_text"] = "並行編集による上書きテスト（保存されてはいけない）"
+
+    resp = client.put("/api/projects/{}/plan".format(project["id"]), json=plan)
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"]["code"] == "conflict"
+
+    saved = projects.get_project(project["id"])
+    assert saved["status"] == "rendering"
+    assert saved["plan"]["narration_text"] != "並行編集による上書きテスト（保存されてはいけない）"
+
+
+def test_try_update_plan_still_saves_when_status_unchanged_during_validation(monkeypatch):
+    """非退行確認: 保存直前の再読込時点でもstatusがdraft/readyのままなら、
+    従来どおり正常に保存されること（アトミック化で通常経路を壊していないこと）。"""
+    project = _make_project_with_one_enabled_shot("TOCTOUガード:通常経路は不変")
+    plan = dict(project["plan"])
+    plan["narration_text"] = "通常どおり保存されるはずのナレーション"
+
+    resp = client.put("/api/projects/{}/plan".format(project["id"]), json=plan)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["plan"]["narration_text"] == "通常どおり保存されるはずのナレーション"
+
+    saved = projects.get_project(project["id"])
+    assert saved["plan"]["narration_text"] == "通常どおり保存されるはずのナレーション"
+
+
+# ---------------------------------------------------------------------------
+# 二重enqueue防止回帰: try_start_render の状態確認+遷移+enqueueがアトミックであり、
+# 直後の2回目呼び出しは RenderConflictError になること
+# ---------------------------------------------------------------------------
+
+def test_try_start_render_rejects_immediately_repeated_call(monkeypatch):
+    project = _make_project_with_one_enabled_shot("二重enqueue防止テスト")
+    manager = _make_job_manager_without_worker(monkeypatch)
+
+    job_id_1 = manager.try_start_render(project["id"])
+    assert job_id_1 is not None
+
+    with pytest.raises(jobs_mod.RenderConflictError):
+        manager.try_start_render(project["id"])
+
+    saved = projects.get_project(project["id"])
+    assert saved["status"] == "rendering"

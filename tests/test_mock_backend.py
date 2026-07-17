@@ -71,6 +71,80 @@ def test_build_mock_cmd_no_drawtext_when_shot_id_missing():
     assert "drawtext" not in vf
 
 
+# --- image_path分岐（image-to-video風のMock） ----------------------------------
+
+def test_build_mock_cmd_without_image_path_uses_gradients_regression():
+    """image_path未指定なら従来どおりgradientsソースを使う（回帰）。"""
+    cmd = mock_backend.build_mock_cmd(FFMPEG_BIN, _shot(), "/tmp/out.mp4")
+    assert cmd[2] == "-f" and cmd[3] == "lavfi"
+    assert "gradients=" in cmd[5]
+    assert "-loop" not in cmd
+
+
+def test_build_mock_cmd_with_missing_image_file_falls_back_to_gradients():
+    """image_pathが指定されていてもファイルが実在しなければgradientsにフォールバックする(非エラー)。"""
+    shot = _shot(image_path="/tmp/does-not-exist-xyz.png")
+    cmd = mock_backend.build_mock_cmd(FFMPEG_BIN, shot, "/tmp/out.mp4")
+    assert cmd[2] == "-f" and cmd[3] == "lavfi"
+    assert "-loop" not in cmd
+
+
+def test_build_mock_cmd_with_existing_image_uses_image_input(tmp_path):
+    image_path = tmp_path / "product.png"
+    image_path.write_bytes(b"fake-png-bytes")
+    shot = _shot(image_path=str(image_path))
+    cmd = mock_backend.build_mock_cmd(FFMPEG_BIN, shot, "/tmp/out.mp4")
+    assert cmd[2] == "-loop" and cmd[3] == "1"
+    assert cmd[4] == "-i" and cmd[5] == str(image_path)
+    assert "-f" not in cmd[:2]
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "scale=1080:1920:force_original_aspect_ratio=increase" in vf
+    assert "crop=1080:1920" in vf
+    assert "zoompan" in vf  # Ken Burns相当の動きは維持
+
+
+def test_build_mock_cmd_with_existing_image_keeps_shot_number_label(tmp_path):
+    image_path = tmp_path / "product.png"
+    image_path.write_bytes(b"fake-png-bytes")
+    shot = _shot(image_path=str(image_path), id="s3")
+    cmd = mock_backend.build_mock_cmd(FFMPEG_BIN, shot, "/tmp/out.mp4")
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "drawtext" in vf
+    assert "#3" in vf
+
+
+@pytest.mark.slow
+def test_mock_backend_generate_with_image_path_produces_valid_clip(tmp_path):
+    """実機ffmpegで image_path 指定時のクリップを実際に生成し、1080x1920のmp4が出ることをffprobeで実測する。"""
+    image_path = tmp_path / "product.png"
+    gen_proc = subprocess.run(
+        [
+            FFMPEG_BIN, "-y",
+            "-f", "lavfi", "-i", "testsrc=size=640x480:rate=1",
+            "-frames:v", "1", str(image_path),
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert gen_proc.returncode == 0, gen_proc.stderr.decode("utf-8", "replace")
+    assert image_path.exists()
+
+    out_path = tmp_path / "s1.mp4"
+    backend = mock_backend.MockBackend({"ffmpeg_bin": FFMPEG_BIN})
+    meta = backend.generate(_shot(duration_sec=1.5, image_path=str(image_path)), str(out_path))
+    assert meta["backend"] == "mock"
+    assert out_path.exists()
+    assert out_path.stat().st_size > 0
+
+    proc = subprocess.run(
+        [FFPROBE_BIN, "-v", "error", "-show_entries", "stream=width,height,codec_type",
+         "-of", "default=noprint_wrappers=1", str(out_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    out = proc.stdout.decode("utf-8")
+    assert "width=1080" in out
+    assert "height=1920" in out
+
+
 @pytest.mark.slow
 def test_mock_backend_generate_produces_valid_clip(tmp_path):
     """実機ffmpegを使い小尺(1.5秒)のクリップを実際に生成して検証する（重い部分は小尺に限定）。"""

@@ -6,6 +6,7 @@
 # テーマ
 {THEME}
 {ANGLE_BLOCK}
+{PRODUCT_BLOCK}
 # 目標
 - 完成尺: 約{TARGET_DURATION}秒（±{TARGET_TOLERANCE}秒）
 - 縦型9:16のSNSショート動画

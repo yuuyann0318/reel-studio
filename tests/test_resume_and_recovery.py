@@ -188,7 +188,7 @@ def test_run_resume_generates_only_missing_shots_then_ready(monkeypatch):
 
     def _fake_render_project(project_id, plan, cfg):
         captured_render_plan["plan"] = plan
-        return projects.media_relpath_for_render(project_id, "out.mp4"), 15.0
+        return projects.media_relpath_for_render(project_id, "out.mp4"), 15.0, {"backend": "say", "duration_sec": 15.0, "is_silent": False}
 
     monkeypatch.setattr(jobs_mod, "_render_project", _fake_render_project)
 

@@ -34,6 +34,7 @@ from queue import Empty, Queue
 
 from pipeline import compliance
 from pipeline import director
+from pipeline import product_images
 from pipeline import render
 from pipeline import subtitles
 from pipeline import tts as tts_mod
@@ -152,14 +153,14 @@ class JobManager:
 
     # --- 公開API -----------------------------------------------------
 
-    def start_generate(self, project_id, theme, target_duration_sec, backend_name, style="default"):
+    def start_generate(self, project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
         job_id = project_id  # POST /api/projects はプロジェクトIDそのものをjob_idとして使う（設計判断）
         with self._lock:
             self._jobs[job_id] = {"job_id": job_id, "kind": "generate", "status": "queued"}
         self._queue.put(("generate", job_id, {
             "project_id": project_id, "theme": theme,
             "target_duration_sec": target_duration_sec, "backend_name": backend_name,
-            "style": style,
+            "style": style, "product_url": product_url,
         }))
         return job_id
 
@@ -190,6 +191,32 @@ class JobManager:
             project["status"] = "rendering"
             projects.save_project(project)
             return self.start_render(project_id)
+
+    def try_update_plan(self, project_id, normalized_plan):
+        """PUT /api/projects/{id}/plan の保存をtry_start_render/try_start_resumeと同じ
+        _project_status_lockの下でアトミックに行う。
+
+        TOCTOU対策: update_planハンドラがリクエスト受信時に読んだprojectスナップショット
+        （status="ready"等）をそのまま保存すると、validate_plan実行中（ディスクI/O・
+        コンプライアンス検査で時間がかかる）にPOST /renderが割り込んでstatusを
+        "rendering"へ遷移させても、古いstatusで上書きしてしまうレースがあった。
+        ここで保存直前にprojectを再読込し、statusが生成/レンダリング中であれば
+        RenderConflictErrorを送出して保存自体を行わない
+        （= try_start_render/try_start_resumeと同じロックで直列化されるため、
+        このメソッド実行中に別スレッドがstatusを書き換えることもない）。
+
+        Returns: 保存後のproject dict（更新後の最新状態）。存在しなければNone。
+        Raises: RenderConflictError（保存直前の再読込でstatusがgenerating/rendering中）。
+        """
+        with self._project_status_lock:
+            project = projects.get_project(project_id)
+            if project is None:
+                return None
+            if project.get("status") in ("generating", "rendering"):
+                raise RenderConflictError(project_id)
+            project["plan"] = normalized_plan
+            projects.save_project(project)
+            return project
 
     def start_resume(self, project_id):
         job_id = _new_job_id()
@@ -282,6 +309,7 @@ class JobManager:
         target_duration_sec = payload["target_duration_sec"]
         backend_name = payload["backend_name"]
         style = payload.get("style") or "default"
+        product_url = payload.get("product_url")
         cfg = self.cfg
 
         def fail(message):
@@ -294,9 +322,70 @@ class JobManager:
             self._emit(job_id, "error", 100, message)
             self._finish(job_id, ok=False, path=None)
 
+        # --- 商品画像の取得（商品アフィリエイト動画モード。product_url指定時のみ） -----------
+        # director企画生成の前に行う: director側へ product={"name","url","image_count"} を渡し
+        # 企画そのものを商品訴求向けに寄せるため。画像0枚/取得失敗でもfailさせず、
+        # warningsを進捗メッセージで通知したうえで通常モードのまま続行する
+        # （TTS同様「パイプライン全体が必ず完成すること」を優先する既存設計を踏襲）。
+        product_info = None
+        product_image_paths = []
+        if product_url:
+            self._emit(job_id, "product", 3, "商品画像を取得中…")
+            pcfg = cfg.get("product_images") or {}
+            local_dir_conf = pcfg.get("local_dir")
+            local_dir_abs = str(project_root() / local_dir_conf) if local_dir_conf else None
+            fetch_cfg = {
+                "max_images": pcfg.get("max_images", product_images.DEFAULT_MAX_IMAGES),
+                "min_image_short_side": pcfg.get("min_short_side", product_images.DEFAULT_MIN_SHORT_SIDE),
+                "ffprobe_bin": cfg.get("ffprobe_bin"),
+                # デッドコンフィグ対策: config.json product_images.timeout_sec を実際のLP/画像フェッチの
+                # タイムアウトへ配線する（従来はcollect_product_images側で読まれず常に既定値15秒だった）。
+                "timeout_sec": pcfg.get("timeout_sec", product_images.DEFAULT_TIMEOUT_SEC),
+            }
+            try:
+                result = product_images.collect_product_images(
+                    product_url, str(projects.product_dir(project_id)), fetch_cfg, local_dir=local_dir_abs
+                )
+            except Exception as exc:
+                result = {
+                    "name": "", "url": product_url, "images": [],
+                    "warnings": ["商品画像の取得中に予期しないエラーが発生しました: {}".format(exc)],
+                }
+            product_image_paths = [img["path"] for img in (result.get("images") or [])]
+            media_images = [
+                dict(img, path=projects.media_relpath_for_product(project_id, Path(img["path"]).name))
+                for img in (result.get("images") or [])
+            ]
+            product_info = {
+                "name": result.get("name") or "",
+                "url": product_url,
+                "images": media_images,
+                "warnings": result.get("warnings") or [],
+            }
+            project = projects.get_project(project_id)
+            if project is not None:
+                project["product"] = product_info
+                projects.save_project(project)
+            if result.get("warnings"):
+                self._emit(job_id, "product", 4, "商品画像の取得で注意: {}".format("; ".join(result["warnings"])))
+            if product_image_paths:
+                self._emit(job_id, "product", 5, "商品画像を{}枚取得しました".format(len(product_image_paths)))
+            else:
+                self._emit(job_id, "product", 5, "商品画像を取得できなかったため通常モードで続行します")
+
         self._emit(job_id, "director", 5, "企画を生成中…")
+        director_product = None
+        if product_url:
+            director_product = {
+                "name": (product_info or {}).get("name") or "",
+                "url": product_url,
+                "image_count": len(product_image_paths),
+            }
         try:
-            plan = director.run_director(theme, cfg, target_duration_sec=target_duration_sec, no_llm=False, style=style)
+            plan = director.run_director(
+                theme, cfg, target_duration_sec=target_duration_sec, no_llm=False, style=style,
+                product=director_product,
+            )
         except Exception as exc:
             fail("企画生成に失敗しました: {}".format(exc))
             return
@@ -320,12 +409,23 @@ class JobManager:
         for w in (cfg.get("brand_rules") or {}).get("ng_words") or []:
             if w not in ng_words:
                 ng_words.append(w)
-        check = compliance.check_plan(plan, ng_words=ng_words)
+        ng_patterns = None
+        if product_url:
+            # 商品アフィリエイト動画モードのときのみ薬機法NGワード/パターンを合成する
+            # （通常モードの挙動は不変に保つ。ng_words/ng_patternsは呼び出し側が明示的に
+            # 合成して渡す設計＝pipeline/compliance.pyのコメント方針に従う）。
+            for w in compliance.BEAUTY_YAKKIHO_NG_WORDS:
+                if w not in ng_words:
+                    ng_words.append(w)
+            ng_patterns = compliance.BEAUTY_YAKKIHO_NG_PATTERNS
+        check = compliance.check_plan(plan, ng_words=ng_words, ng_patterns=ng_patterns)
         if not check["ok"]:
             fail("コンプライアンス違反のため生成を停止しました: {}".format(check["violations"]))
             return
 
         shots = plan.get("shots", [])
+        if product_url and product_image_paths:
+            shots = product_images.assign_images_to_shots(shots, product_image_paths)
         pdir = projects.project_dir(project_id)
         clips_dir = projects.clips_dir(project_id)
         clips_dir.mkdir(parents=True, exist_ok=True)
@@ -336,8 +436,9 @@ class JobManager:
         # 残るようにする。以前は生成ループを抜けた後にまとめて project["plan"] を書いていた
         # ため、途中失敗時は create_project() 時点の空のplan（shots:[]）のままになっていた。
         bgm_file = _resolve_bgm_by_mood(plan.get("bgm_mood"))
-        planned_shots = [
-            {
+
+        def _planned_shot(i, shot):
+            base = {
                 "id": shot["id"],
                 "order": i,
                 "enabled": True,
@@ -347,8 +448,11 @@ class JobManager:
                 "source_duration": float(shot["duration_sec"]),
                 "trim": {"start": 0.0, "end": float(shot["duration_sec"])},
             }
-            for i, shot in enumerate(shots)
-        ]
+            if shot.get("image_path"):
+                base["image_path"] = shot["image_path"]
+            return base
+
+        planned_shots = [_planned_shot(i, shot) for i, shot in enumerate(shots)]
         studio_plan = {
             "shots": planned_shots,
             "narration_text": plan.get("narration_script", ""),
@@ -412,7 +516,7 @@ class JobManager:
         self._emit(job_id, "subtitles", 80, "字幕を生成中…")
         self._emit(job_id, "render", 85, "レンダリング中…")
         try:
-            out_path, out_duration = _render_project(project_id, studio_plan, cfg)
+            out_path, out_duration, tts_meta = _render_project(project_id, studio_plan, cfg)
         except Exception as exc:
             fail("初回レンダリングに失敗しました: {}".format(exc))
             return
@@ -420,6 +524,7 @@ class JobManager:
         project = projects.get_project(project_id)
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
+        project["tts"] = tts_meta
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
@@ -454,7 +559,17 @@ class JobManager:
         for w in (cfg.get("brand_rules") or {}).get("ng_words") or []:
             if w not in ng_words:
                 ng_words.append(w)
-        ok, errors, normalized = projects.validate_plan(project_id, project.get("plan"), ng_words=ng_words)
+        ng_patterns = None
+        if project.get("product"):
+            # 商品アフィリエイト動画モードのプロジェクト（初回generate時にproductが設定済み）の
+            # 再レンダリングでも薬機法検査を効かせる（通常モードのプロジェクトはproduct=Noneのため不変）。
+            for w in compliance.BEAUTY_YAKKIHO_NG_WORDS:
+                if w not in ng_words:
+                    ng_words.append(w)
+            ng_patterns = compliance.BEAUTY_YAKKIHO_NG_PATTERNS
+        ok, errors, normalized = projects.validate_plan(
+            project_id, project.get("plan"), ng_words=ng_words, ng_patterns=ng_patterns
+        )
         if not ok:
             fail("編集内容の検証に失敗しました: {}".format("; ".join(errors)))
             return
@@ -477,7 +592,7 @@ class JobManager:
         self._emit(job_id, "subtitles", 50, "字幕を生成中…")
         self._emit(job_id, "render", 65, "レンダリング中…")
         try:
-            out_path, out_duration = _render_project(project_id, normalized, cfg)
+            out_path, out_duration, tts_meta = _render_project(project_id, normalized, cfg)
         except Exception as exc:
             fail("レンダリングに失敗しました: {}".format(exc))
             return
@@ -485,6 +600,7 @@ class JobManager:
         project = projects.get_project(project_id)
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
+        project["tts"] = tts_meta
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
@@ -546,6 +662,8 @@ class JobManager:
                 "duration_sec": shot.get("source_duration") or 5.0,
                 "caption_jp": shot.get("caption") or "",
             }
+            if shot.get("image_path"):
+                backend_shot["image_path"] = shot.get("image_path")
             raw_path = clips_dir / "{}.raw.mp4".format(shot_id)
             norm_path = clips_dir / "{}.mp4".format(shot_id)
             try:
@@ -590,7 +708,7 @@ class JobManager:
         self._emit(job_id, "subtitles", 80, "字幕を生成中…")
         self._emit(job_id, "render", 85, "レンダリング中…")
         try:
-            out_path, out_duration = _render_project(project_id, project["plan"], cfg)
+            out_path, out_duration, tts_meta = _render_project(project_id, project["plan"], cfg)
         except Exception as exc:
             fail("レンダリングに失敗しました（続きから生成）: {}".format(exc))
             return
@@ -598,6 +716,7 @@ class JobManager:
         project = projects.get_project(project_id)
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
+        project["tts"] = tts_meta
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
@@ -612,10 +731,12 @@ class JobManager:
 # ---------------------------------------------------------------------------
 
 def _render_project(project_id, plan, cfg):
-    """plan（Studio形式・正規化済み）からffmpegレンダリングを実行し、(出力パス, 出力尺) を返す。
+    """plan（Studio形式・正規化済み）からffmpegレンダリングを実行し、(出力パス, 出力尺, tts_meta) を返す。
 
     トリム済みショットの正規化+連結 -> TTS(常に現在のnarration_textから再生成) ->
     ASS再生成(subtitle_style反映) -> BGM(gain_db)+SFX(at_sec配置)オーバーレイ -> 最終loudnorm。
+    tts_metaは tts_mod.get_tts_backend().synthesize() の返り値そのもの
+    （backend/duration_sec/is_silent/requested_backend/fallback_reason）。
     """
     pdir = projects.project_dir(project_id)
     work_dir = pdir / "_render_work" / (time.strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:6])
@@ -656,8 +777,8 @@ def _render_project(project_id, plan, cfg):
     out_duration = sum(s["duration_sec"] for s in telop_shots)
 
     narration_path = work_dir / "narration.wav"
-    tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"))
-    tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg)
+    tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
+    tts_meta = tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg)
 
     telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=telop_shots[0]["id"] if telop_shots else None)
     ass_text = subtitles.generate_ass_with_style(telop_pieces, plan.get("subtitle_style"))
@@ -717,7 +838,7 @@ def _render_project(project_id, plan, cfg):
         raise RuntimeError("最終レンダリングに失敗しました: {}".format(res2["stderr"][-800:]))
 
     shutil.rmtree(work_dir, ignore_errors=True)
-    return projects.media_relpath_for_render(project_id, output_filename), out_duration
+    return projects.media_relpath_for_render(project_id, output_filename), out_duration, tts_meta
 
 
 job_manager = JobManager()

@@ -20,6 +20,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,8 +103,24 @@ async def create_project(request: Request):
     if style not in projects.VALID_SUBTITLE_PRESETS:
         _bad_request("invalid_style", "style は {} のいずれかである必要があります".format(projects.VALID_SUBTITLE_PRESETS))
 
-    project = projects.create_project(theme.strip(), target_duration_sec, backend_name, status="generating", style=style)
-    job_manager.start_generate(project["id"], theme.strip(), target_duration_sec, backend_name, style=style)
+    # product_url（任意）: 商品アフィリエイト動画モードの入口。指定時のみ http/https の
+    # 有効な絶対URLであることを検証する（SSRF対策の私有IP判定等はpipeline.product_images側で
+    # 別途行うため、ここではスキームとホストの形式だけを見る軽量チェックに留める）。
+    product_url = (body or {}).get("product_url")
+    if product_url is not None:
+        if not isinstance(product_url, str) or not product_url.strip():
+            _bad_request("invalid_product_url", "product_url は非空文字列である必要があります")
+        product_url = product_url.strip()
+        parsed = urlparse(product_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            _bad_request("invalid_product_url", "product_url は http/https の有効なURLである必要があります")
+
+    project = projects.create_project(
+        theme.strip(), target_duration_sec, backend_name, status="generating", style=style, product_url=product_url
+    )
+    job_manager.start_generate(
+        project["id"], theme.strip(), target_duration_sec, backend_name, style=style, product_url=product_url
+    )
     return {"id": project["id"]}
 
 
@@ -202,14 +219,35 @@ async def update_plan(project_id: str, request: Request):
     for w in (cfg.get("brand_rules") or {}).get("ng_words") or []:
         if w not in ng_words:
             ng_words.append(w)
+    ng_patterns = None
+    if project.get("product"):
+        # 商品アフィリエイト動画モードのプロジェクト（jobs.py _run_render/_run_generate と同じ判定条件）
+        # では、PUT /plan の下書き保存経由でも薬機法NGワード/パターンを効かせる。ここで合成を
+        # 省略すると、通常モードのバリデーションのみが適用され「シミが消える」等の薬機法NG表現が
+        # レンダー前の編集画面から検査すり抜けでそのまま保存できてしまう（jobs.py側の再検査は
+        # render開始時にしか効かないため、下書き保存の時点では素通りする）。
+        for w in compliance.BEAUTY_YAKKIHO_NG_WORDS:
+            if w not in ng_words:
+                ng_words.append(w)
+        ng_patterns = compliance.BEAUTY_YAKKIHO_NG_PATTERNS
 
-    ok, errors, normalized = projects.validate_plan(project_id, plan, ng_words=ng_words)
+    ok, errors, normalized = projects.validate_plan(project_id, plan, ng_words=ng_words, ng_patterns=ng_patterns)
     if not ok:
         return _error_response(400, "invalid_plan", "; ".join(errors))
 
-    project["plan"] = normalized
-    projects.save_project(project)
-    return project
+    # 上のstatusチェックはリクエスト受信時点のスナップショットに基づく早期リジェクト
+    # （UXとして速く弾くため）。validate_plan実行中（ディスクI/O・コンプライアンス検査で
+    # 時間がかかりうる）にPOST /renderが割り込んでstatusを変えても、ここで保存直前に
+    # job_manager側が再読込+アトミック保存を行うため、古いstatusで上書きされない
+    # （TOCTOU対策。try_start_render/try_start_resumeと同じ_project_status_lockを共有）。
+    try:
+        updated_project = job_manager.try_update_plan(project_id, normalized)
+    except RenderConflictError:
+        _conflict("このプロジェクトは処理中のため編集できません。完了後に再度お試しください")
+        return
+    if updated_project is None:
+        _not_found("プロジェクトが見つかりません: {}".format(project_id))
+    return updated_project
 
 
 @app.post("/api/projects/{project_id}/render", status_code=202)
