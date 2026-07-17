@@ -21,7 +21,8 @@ from __future__ import annotations
 #   status が failed で、有効(enabled)ショットの一部にclip_path=nullが残っているプロジェクトに対し、
 #   未生成ショットだけをバックエンドで生成し直し、揃ったら_render_projectで書き出しまで進める。
 #   途中でサーバが再起動した場合（generating/rendering のまま止まっていた場合）は、
-#   JobManager初期化時のスタック回復でstatus="failed"に倒し、resumeで再開できるようにする。
+#   サーバ起動時（FastAPIのstartup/lifespan経由）のスタック回復でstatus="failed"に倒し、
+#   resumeで再開できるようにする（JobManager()の生成自体では回復は走らない。BUG-21）。
 
 import json
 import re
@@ -116,13 +117,22 @@ class JobManager:
         self._sub_lock = threading.Lock()
         self._subscribers = {}
         self._project_status_lock = threading.Lock()  # render開始時のstatus確認+書換をアトミックにする
-        self._recover_stuck_projects()
+        # ★BUG-21修正: 以前はここで self._recover_stuck_projects() を呼んでいたが、
+        # それだと「studio.server.jobs を import しただけ」（pytest収集時のimportや
+        # 他プロセスからのimport等）で本物の projects/ ディレクトリを走査し、
+        # 稼働中(status=generating/rendering)のプロジェクトを勝手にfailedへ倒してしまう
+        # 実害があった（サーバでresume生成中に別プロセスのpytestが走り、生成中ジョブが
+        # 強制failed化された）。回復処理は実サーバプロセスの起動時のみ走らせるべきなので、
+        # ここでは呼ばず、studio/server/app.py の FastAPI起動イベント(lifespan)から
+        # 明示的に recover_stuck_projects() を呼ぶ設計にする。
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
 
     # --- 起動時のスタック回復 -------------------------------------------
+    # 呼び出しは実サーバプロセスの起動時のみ（studio/server/app.py の startup/lifespan）。
+    # JobManager() を生成しただけでは走らない（import副作用を断つため）。
 
-    def _recover_stuck_projects(self):
+    def recover_stuck_projects(self):
         """サーバ起動時、status が generating/rendering のまま残っているプロジェクトを回復する。
 
         以前のプロセスがクラッシュ/再起動で終了すると、ワーカースレッド（メモリ上の状態）が

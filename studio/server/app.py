@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import subprocess
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -34,7 +35,19 @@ from pipeline.config import load_config, project_root, output_dir
 from studio.server import projects
 from studio.server.jobs import job_manager, RenderConflictError, ResumeNotAllowedError, UnrenderedShotsError
 
-app = FastAPI(title="Reel Studio API")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # ★BUG-21修正: スタック回復（status=generating/rendering のプロジェクトをfailedへ倒す処理）は
+    # 実サーバプロセスの起動時のみ走らせる。以前は studio.server.jobs の import副作用
+    # （JobManager.__init__内で無条件に実行）だったため、pytest収集などjobsモジュールを
+    # importしただけの別プロセスが本物のprojects/を走査し、稼働中ジョブを誤ってfailedへ
+    # 倒す実害があった。ここでFastAPIのlifespan(=実サーバ起動時にのみ発火)から明示的に呼ぶ。
+    job_manager.recover_stuck_projects()
+    yield
+
+
+app = FastAPI(title="Reel Studio API", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,

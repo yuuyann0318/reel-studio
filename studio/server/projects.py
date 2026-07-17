@@ -290,17 +290,50 @@ def resolve_clip_path(project_id, clip_path):
     return resolve_media_relpath(clip_path)
 
 
+def _resolve_within_dir(base_dir, filename):
+    """filenameをbase_dir配下に解決し、境界逸脱を検知する共通ヘルパー
+    （resolve_media_relpathと同型の検証: '../'によるトラバーサル・境界外を指す
+    絶対パス・シンボリックリンク経由の脱出をUnsafeMediaPathErrorで拒否する）。
+
+    実在チェックは呼び出し側の責務（ここではパス解決と境界検証のみ行う）。
+    """
+    p = Path(filename)
+    candidate = p if p.is_absolute() else (base_dir / p)
+    try:
+        resolved = candidate.resolve(strict=False)
+    except OSError as exc:
+        raise UnsafeMediaPathError(
+            "パスの解決に失敗しました（循環シンボリックリンク等の疑い）: {!r} ({})".format(filename, exc)
+        )
+    base_resolved = base_dir.resolve(strict=False)
+    if resolved != base_resolved and base_resolved not in resolved.parents:
+        raise UnsafeMediaPathError(
+            "パスが{}配下から逸脱しています（パストラバーサルの疑い）: {!r}".format(base_dir.name, filename)
+        )
+    return resolved
+
+
 def resolve_bgm_path(filename):
+    """filenameをBGM_DIR配下の絶対パスへ解決する。
+
+    BGM_DIR外を指す場合はUnsafeMediaPathErrorを送出する（_resolve_within_dir参照）。
+    ファイルが存在しない場合はNoneを返す（従来どおりの契約を維持）。
+    """
     if not filename:
         return None
-    p = BGM_DIR / filename
+    p = _resolve_within_dir(BGM_DIR, filename)
     return p if p.exists() else None
 
 
 def resolve_sfx_path(filename):
+    """filenameをSFX_DIR配下の絶対パスへ解決する。
+
+    SFX_DIR外を指す場合はUnsafeMediaPathErrorを送出する（_resolve_within_dir参照）。
+    ファイルが存在しない場合はNoneを返す（従来どおりの契約を維持）。
+    """
     if not filename:
         return None
-    p = SFX_DIR / filename
+    p = _resolve_within_dir(SFX_DIR, filename)
     return p if p.exists() else None
 
 
@@ -458,8 +491,14 @@ def validate_plan(project_id, plan, ng_words=None, ng_patterns=None):
             errors.append("plan.bgm はオブジェクトかnullである必要があります")
         else:
             bgm_file = bgm.get("file")
-            if bgm_file and resolve_bgm_path(bgm_file) is None:
-                errors.append("plan.bgm.file が assets/bgm 配下に見つかりません: {!r}".format(bgm_file))
+            if bgm_file:
+                try:
+                    bgm_resolved = resolve_bgm_path(bgm_file)
+                except UnsafeMediaPathError as exc:
+                    errors.append("plan.bgm.file が不正です: {}".format(exc))
+                else:
+                    if bgm_resolved is None:
+                        errors.append("plan.bgm.file が assets/bgm 配下に見つかりません: {!r}".format(bgm_file))
             gain_db = bgm.get("gain_db", -14)
             if not _is_number(gain_db):
                 errors.append("plan.bgm.gain_db は数値である必要があります")
@@ -480,7 +519,15 @@ def validate_plan(project_id, plan, ng_words=None, ng_patterns=None):
             errors.append("plan.sfx[{}] はオブジェクトである必要があります".format(i))
             continue
         sfx_file = s.get("file")
-        if not sfx_file or resolve_sfx_path(sfx_file) is None:
+        if not sfx_file:
+            errors.append("plan.sfx[{}].file が assets/sfx 配下に見つかりません: {!r}".format(i, sfx_file))
+            continue
+        try:
+            sfx_resolved = resolve_sfx_path(sfx_file)
+        except UnsafeMediaPathError as exc:
+            errors.append("plan.sfx[{}].file が不正です: {}".format(i, exc))
+            continue
+        if sfx_resolved is None:
             errors.append("plan.sfx[{}].file が assets/sfx 配下に見つかりません: {!r}".format(i, sfx_file))
             continue
         at_sec = s.get("at_sec", 0.0)

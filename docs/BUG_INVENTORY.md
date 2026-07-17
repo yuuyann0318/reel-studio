@@ -47,3 +47,5 @@ higgsfield-auto-reel の独立レビュー(codex)＋目視検収で確定した�
 ### 同時に実施した機能追加（不具合ではない）
 - **Fish Audio TTS**: fish→say→silent の三段フォールバック・実測メタ(project["tts"])のUI表示。キー未設定でも全機能動作(sayに自動切替)。E2E実機でフォールバック経路を確認済み。
 - **美容系商品アフィリモード**: 商品LP URL→画像自動取得(og:image優先・SSRFガード・サイズ上限)+ assets/products/inbox/ のローカル画像優先併用 → 決定論のショット割り当て(フック/CTA優先) → higgsfield --start-image / mock画像背景+KenBurns。薬機法規律はプロンプト(product_block.txt 窓口確定稿・打消し表示必須)と検査(BEAUTY_YAKKIHO_NG_WORDS/PATTERNS・商品モード限定)の二重防御。実機E2E(mock): 実LP(FANCL)から5枚取得成功・inbox画像がs1/s5の背景に使われることをフレーム平均色で数値確認・台本に「※個人の感想です」自動挿入を確認。
+
+| BUG-21 | 高 | 窓口実機（resume中断の再発で発見） | サーバ以外のPythonプロセス(pytest等)が studio.server.jobs を import しただけで、module-level の JobManager() 初期化が「起動時回復」を実行し、**本物の projects/ を走査して稼働中(generating)のプロジェクトを failed に強制遷移**させる。実害: サーバでresume生成中に別プロセスのpytestが走り(18:40のキャッシュ実測)、生成中ジョブが「サーバ再起動により中断」で破壊された。テストのPROJECTS_ROOT差し替え(monkeypatch)より前のimport時点で発火するため、テスト実行が本番データに触れていた。 | JobManager.__init__ から回復呼び出しを削除し、公開メソッド recover_stuck_projects() に分離。FastAPI の lifespan(起動イベント)から実サーバプロセスのみが呼ぶ構成に変更。回帰テスト: JobManager()生成だけではstatus不変 / TestClient起動で回復発火。 | pytest 368 passed。実機: 修正後サーバでresume再実行→s12〜s14生成→書き出しまで完走(ready・1080x1920実測)。 | 修正済み・実機検証済み |

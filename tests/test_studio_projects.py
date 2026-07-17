@@ -258,6 +258,61 @@ def test_validate_plan_rejects_clip_path_with_parent_traversal():
     assert normalized is None
 
 
+# ---------------------------------------------------------------------------
+# パストラバーサル対策回帰: resolve_bgm_path/resolve_sfx_path もresolve_media_relpath
+# と同様にBGM_DIR/SFX_DIR配下からの逸脱をUnsafeMediaPathErrorで拒否すること
+# ---------------------------------------------------------------------------
+
+def test_resolve_bgm_path_rejects_parent_traversal():
+    with pytest.raises(projects.UnsafeMediaPathError):
+        projects.resolve_bgm_path("../../../../etc/passwd")
+
+
+def test_resolve_sfx_path_rejects_parent_traversal():
+    with pytest.raises(projects.UnsafeMediaPathError):
+        projects.resolve_sfx_path("../../../../etc/passwd")
+
+
+def test_resolve_bgm_path_accepts_normal_filename_within_root():
+    # 既存の正常系（従来どおり通ること）の非退行確認。
+    resolved = projects.resolve_bgm_path("upbeat_01.mp3")
+    assert resolved is not None
+    assert resolved.exists()
+    assert resolved == projects.BGM_DIR / "upbeat_01.mp3"
+
+
+def test_resolve_sfx_path_accepts_normal_filename_within_root():
+    # 既存の正常系（従来どおり通ること）の非退行確認。
+    resolved = projects.resolve_sfx_path("whoosh_01.wav")
+    assert resolved is not None
+    assert resolved.exists()
+    assert resolved == projects.SFX_DIR / "whoosh_01.wav"
+
+
+def test_validate_plan_rejects_bgm_file_with_parent_traversal():
+    project = _make_project_with_clip()
+    plan = {
+        "shots": [_base_shot(project)], "narration_text": "",
+        "bgm": {"file": "../../../../etc/passwd"},
+    }
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert not ok
+    assert any("plan.bgm.file" in e and "不正" in e for e in errors)
+    assert normalized is None
+
+
+def test_validate_plan_rejects_sfx_file_with_parent_traversal():
+    project = _make_project_with_clip()
+    plan = {
+        "shots": [_base_shot(project)], "narration_text": "",
+        "sfx": [{"file": "../../../../etc/passwd", "at_sec": 1.0}],
+    }
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert not ok
+    assert any("plan.sfx[0].file" in e and "不正" in e for e in errors)
+    assert normalized is None
+
+
 def test_validate_plan_still_rejects_nonexistent_clip_file_when_clip_path_present():
     project = _make_project_with_clip()
     shot = _base_shot(project, clip_path=projects.media_relpath_for_clip(project["id"], "does_not_exist.mp4"))

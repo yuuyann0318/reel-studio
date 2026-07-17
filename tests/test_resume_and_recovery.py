@@ -127,7 +127,10 @@ def test_fail_appends_to_error_history_without_losing_earlier_entries(monkeypatc
 def test_recover_stuck_projects_on_startup(monkeypatch, stuck_status, expected_kind):
     project = projects.create_project("スタック回復テスト", 10.0, "mock", status=stuck_status)
     try:
-        manager = _make_job_manager_without_worker(monkeypatch)  # __init__内で回復処理が走る
+        # BUG-21修正: JobManager() 生成だけでは回復は走らない（サーバ起動イベント経由でのみ
+        # 明示的に呼ぶ設計になったため、ここでも明示的に呼ぶ）。
+        manager = _make_job_manager_without_worker(monkeypatch)
+        manager.recover_stuck_projects()
         saved = projects.get_project(project["id"])
         assert saved["status"] == "failed"
         assert "再起動" in saved["error"]
@@ -142,7 +145,8 @@ def test_recover_stuck_projects_leaves_ready_and_failed_projects_untouched(monke
     ready = projects.create_project("回復対象外:ready", 10.0, "mock", status="ready")
     failed = projects.create_project("回復対象外:failed", 10.0, "mock", status="failed")
     try:
-        _make_job_manager_without_worker(monkeypatch)
+        manager = _make_job_manager_without_worker(monkeypatch)
+        manager.recover_stuck_projects()
         assert projects.get_project(ready["id"])["status"] == "ready"
         saved_failed = projects.get_project(failed["id"])
         assert saved_failed["status"] == "failed"
@@ -150,6 +154,49 @@ def test_recover_stuck_projects_leaves_ready_and_failed_projects_untouched(monke
     finally:
         shutil.rmtree(projects.project_dir(ready["id"]), ignore_errors=True)
         shutil.rmtree(projects.project_dir(failed["id"]), ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# (b') BUG-21回帰テスト: import副作用の除去 + startup限定での回復
+#
+# 実害: JobManager.__init__ が無条件に _recover_stuck_projects() を呼んでいたため、
+# studio.server.jobs を import しただけの別プロセス（pytest収集等）が本物のprojects/を
+# 走査し、稼働中(generating/rendering)のプロジェクトを勝手にfailedへ倒してしまっていた。
+# ---------------------------------------------------------------------------
+
+def test_job_manager_construction_alone_does_not_touch_project_status(monkeypatch):
+    """JobManager() を生成しただけ（起動イベント発火前）では、稼働中プロジェクトのstatusは
+    書き換わらないこと（importするだけでスタック回復が走っていた旧挙動の回帰テスト）。
+    """
+    project = projects.create_project("import副作用回帰テスト", 10.0, "mock", status="generating")
+    try:
+        _make_job_manager_without_worker(monkeypatch)  # 生成のみ。recover_stuck_projects()は呼ばない
+        saved = projects.get_project(project["id"])
+        assert saved["status"] == "generating"  # 書き換わっていない
+        assert saved["error_history"] == []
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+def test_testclient_startup_triggers_recovery(monkeypatch):
+    """FastAPIのlifespan(=実サーバプロセス起動時に相当)発火時にのみ、スタック回復が走ること。
+
+    `with TestClient(app) as c:` で ASGI lifespan の startup/shutdown を明示的に発火させる
+    （モジュール直下の `client = TestClient(app)`（このファイル冒頭）はcontext managerを
+    使っていないためlifespanは発火せず、他のエンドポイントテストの挙動には影響しない）。
+    """
+    project = projects.create_project("startup回復テスト", 10.0, "mock", status="rendering")
+    try:
+        with TestClient(app) as c:
+            resp = c.get("/api/projects/{}".format(project["id"]))
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "failed"
+        saved = projects.get_project(project["id"])
+        assert saved["status"] == "failed"
+        assert "再起動" in saved["error"]
+        assert saved["error_history"][0]["kind"] == "render"
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
