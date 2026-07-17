@@ -517,7 +517,7 @@ function renderResult() {
       <div class="s-video-wrap">
         <div class="preview-frame">
           ${link
-            ? `<video src="${escapeHtml(link)}" controls playsinline preload="metadata" aria-label="できあがった動画"></video>`
+            ? `<video src="${escapeHtml(link)}" controls playsinline preload="metadata" aria-label="完成した動画"></video>`
             : `<div class="preview-frame__placeholder">${MOCK ? "デモ素材モードのため、実際の動画ファイルはありません。" : "動画を読み込めませんでした。"}</div>`}
         </div>
       </div>
