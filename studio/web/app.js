@@ -338,6 +338,14 @@ function iconBack() {
   return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>`;
 }
 
+// プロUI→かんたんモードへのリンク（?pro=1 を外し、他のQAクエリ(mock等)は維持する）
+function simpleModeHref() {
+  const p = new URLSearchParams(location.search);
+  p.delete("pro");
+  const s = p.toString();
+  return "/" + (s ? `?${s}` : "");
+}
+
 function renderHeader() {
   const el = document.getElementById("app-header");
   const project = state.current;
@@ -348,6 +356,7 @@ function renderHeader() {
 
   el.innerHTML = `
     <div class="app-header__brand"><span class="logo-dot" aria-hidden="true"></span><span>Reel Studio</span></div>
+    <a class="btn btn--sm btn--ghost" href="${simpleModeHref()}" data-action="to-simple-mode">← かんたん画面へ</a>
     <div class="app-header__project">
       ${project ? `
         <button class="btn btn--icon btn--ghost" data-action="close-project" aria-label="一覧に戻る">${iconBack()}</button>

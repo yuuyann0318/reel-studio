@@ -1,0 +1,660 @@
+// Reel Studio — かんたんモード（既定UI）。既存の api.js / mock.js をそのまま再利用する。
+// 専門用語ゼロ・1画面1アクションを徹底する（詳細は docs/STUDIO-DESIGN.md ではなく、
+// 発注時のUI/UX要件「AI初心者・高校生でも迷わない」に準拠）。
+import { api, MOCK } from "../api.js";
+import { showToast, showApiError } from "../components/toast.js";
+
+const qsParams = new URLSearchParams(location.search);
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+function deepClone(obj) { return obj == null ? obj : JSON.parse(JSON.stringify(obj)); }
+
+// ---------- 中央ステート ----------
+const state = {
+  screen: "home", // 'home' | 'creating' | 'result' | 'edit'
+
+  projects: [],
+  projectsLoading: true,
+  projectsError: null,
+
+  assets: { bgm: [], sfx: [], loaded: false },
+
+  theme: "",
+  style: "default", // 'default' | 'vertical_hook'
+  backend: "mock", // 'mock' | 'higgsfield'
+  submitting: false,
+  submitError: null,
+
+  current: null,
+  draftPlan: null,
+  dirty: false,
+  savingEdit: false,
+  editingCaptionId: null,
+
+  job: null, // { phase:'generate'|'render', totalPhases, stage, progress, message }
+};
+
+let unsubscribeJob = null;
+let pollTimer = null;
+
+function setState(patch) { Object.assign(state, patch); render(); }
+function stopJobSub() { if (unsubscribeJob) { unsubscribeJob(); unsubscribeJob = null; } }
+function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// ---------- データ読み込み ----------
+async function loadProjects() {
+  setState({ projectsLoading: true, projectsError: null });
+  try {
+    const list = await api.listProjects();
+    setState({ projectsLoading: false, projects: list });
+  } catch (err) {
+    setState({ projectsLoading: false, projectsError: err });
+  }
+}
+
+async function loadAssets() {
+  try {
+    const [bgm, sfx] = await Promise.all([api.getBgmAssets(), api.getSfxAssets()]);
+    setState({ assets: { bgm, sfx, loaded: true } });
+  } catch (err) {
+    showApiError(err, "素材の読み込みに失敗しました");
+    setState({ assets: { bgm: [], sfx: [], loaded: true } });
+  }
+}
+
+// ---------- ホーム: 入力操作 ----------
+function syncSubmitButton() {
+  const btn = document.getElementById("s-submit");
+  if (btn) btn.disabled = !state.theme.trim() || state.submitting;
+}
+
+async function submitCreate() {
+  const theme = state.theme.trim();
+  if (!theme) return;
+  setState({ submitting: true, submitError: null });
+  try {
+    const { id } = await api.createProject({ theme, duration: 30, backend: state.backend, style: state.style });
+    setState({ submitting: false });
+    await beginGenerate(id);
+  } catch (err) {
+    setState({ submitting: false, submitError: err });
+  }
+}
+
+// ---------- 生成〜仕上げの進行（作成中画面を貫通させる） ----------
+async function beginGenerate(id) {
+  stopJobSub();
+  stopPoll();
+  let project;
+  try {
+    project = await api.getProject(id);
+  } catch (err) {
+    showApiError(err, "読み込みに失敗しました");
+    setState({ screen: "home" });
+    return;
+  }
+  setState({
+    current: project,
+    draftPlan: project.plan ? deepClone(project.plan) : null,
+    screen: "creating",
+    job: { phase: "generate", totalPhases: 2, stage: "queued", progress: 0, message: "" },
+  });
+
+  if (project.status !== "generating") {
+    // 過去プロジェクトを開いた場合など: 既に台本ができているので仕上げ(レンダー)へ直行
+    await beginRender(id, { totalPhases: project.status === "rendering" ? 1 : 2, resumeIfRendering: project.status === "rendering" });
+    return;
+  }
+
+  // 契約: 生成ジョブの id はプロジェクト作成レスポンスの{id}と同一（docs/STUDIO-DESIGN.md準拠）
+  unsubscribeJob = api.subscribeJobEvents(id, {
+    onMessage: (d) => {
+      if (!state.job) return;
+      setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
+    },
+    onDone: async () => {
+      stopJobSub();
+      try {
+        const refreshed = await api.getProject(id);
+        setState({ current: refreshed, draftPlan: refreshed.plan ? deepClone(refreshed.plan) : null });
+      } catch (err) {
+        showApiError(err, "最新状態の取得に失敗しました");
+      }
+      await beginRender(id, { totalPhases: 2 });
+    },
+    onError: (err) => {
+      showApiError(err, "台本づくりでエラーが発生しました");
+      stopJobSub();
+      setState({ screen: "home", job: null });
+    },
+  });
+}
+
+async function beginRender(id, { totalPhases = 1, resumeIfRendering = false } = {}) {
+  stopJobSub();
+  stopPoll();
+  setState({
+    screen: "creating",
+    job: { phase: "render", totalPhases, stage: "queued", progress: resumeIfRendering ? 50 : 0, message: "" },
+  });
+
+  if (resumeIfRendering) {
+    // 書き出し中に開いた場合: job_idが無いため、2秒おきの再取得で完了を検知する
+    pollTimer = setInterval(async () => {
+      try {
+        const project = await api.getProject(id);
+        if (project.status !== "rendering") { stopPoll(); await finishRender(project); }
+      } catch (err) { /* 次回のポーリングに任せる */ }
+    }, 2000);
+    return;
+  }
+
+  try {
+    const { job_id } = await api.startRender(id);
+    unsubscribeJob = api.subscribeJobEvents(job_id, {
+      onMessage: (d) => {
+        if (!state.job) return;
+        setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
+      },
+      onDone: async () => {
+        stopJobSub();
+        try {
+          const project = await api.getProject(id);
+          await finishRender(project);
+        } catch (err) {
+          showApiError(err, "最新状態の取得に失敗しました");
+          setState({ screen: "edit", job: null });
+        }
+      },
+      onError: (err) => {
+        showApiError(err, "仕上げ中にエラーが発生しました");
+        stopJobSub();
+        setState({ screen: "edit", job: null });
+      },
+    });
+  } catch (err) {
+    showApiError(err, "仕上げを開始できませんでした");
+    setState({ screen: state.draftPlan ? "edit" : "home", job: null });
+  }
+}
+
+async function finishRender(project) {
+  const failed = project.status === "failed";
+  setState({
+    current: project,
+    draftPlan: project.plan ? deepClone(project.plan) : null,
+    dirty: false,
+    job: null,
+    screen: failed ? "edit" : "result",
+  });
+  loadProjects();
+  if (failed) showApiError(new Error(project.error || "仕上げに失敗しました"), "うまく仕上げられませんでした");
+}
+
+// ---------- 過去の動画を開く ----------
+async function openPast(id) {
+  try {
+    const project = await api.getProject(id);
+    if (project.status === "generating") { await beginGenerate(id); return; }
+    if (project.status === "rendering") {
+      setState({ current: project, draftPlan: project.plan ? deepClone(project.plan) : null });
+      await beginRender(id, { totalPhases: 1, resumeIfRendering: true });
+      return;
+    }
+    setState({ current: project, draftPlan: project.plan ? deepClone(project.plan) : null, dirty: false });
+    if (project.status === "ready" && project.renders && project.renders.length) {
+      setState({ screen: "result" });
+    } else if (project.status === "failed") {
+      setState({ screen: "edit" });
+      showApiError(new Error(project.error || "前回はうまくいきませんでした"), "このプロジェクトは失敗しています");
+    } else {
+      setState({ screen: "edit" });
+    }
+  } catch (err) {
+    showApiError(err, "開けませんでした");
+  }
+}
+
+// ---------- かんたん編集 ----------
+function updateCaption(shotId, value) {
+  const shot = state.draftPlan && state.draftPlan.shots.find((s) => s.id === shotId);
+  if (!shot) return;
+  shot.caption = value;
+  setState({ dirty: true });
+}
+function startEditCaption(shotId) { setState({ editingCaptionId: shotId }); }
+function stopEditCaption() { setState({ editingCaptionId: null }); }
+
+function toggleScene(shotId) {
+  const shot = state.draftPlan && state.draftPlan.shots.find((s) => s.id === shotId);
+  if (!shot) return;
+  shot.enabled = !shot.enabled;
+  setState({ dirty: true });
+}
+
+function currentMood() {
+  const bgm = state.draftPlan && state.draftPlan.bgm;
+  if (!bgm || !bgm.file) return null;
+  const asset = (state.assets.bgm || []).find((a) => a.file === bgm.file);
+  return asset ? asset.mood : null;
+}
+function setMood(mood) {
+  if (!state.draftPlan) return;
+  const asset = (state.assets.bgm || []).find((a) => a.mood === mood);
+  if (!asset) { showToast({ type: "error", title: "その音楽が見つかりません" }); return; }
+  if (!state.draftPlan.bgm) state.draftPlan.bgm = { file: null, gain_db: -14, ducking: true };
+  state.draftPlan.bgm.file = asset.file;
+  setState({ dirty: true });
+}
+
+const VOLUME_MAP = { large: -8, mid: -14, small: -20 };
+function currentVolumeKey() {
+  const bgm = state.draftPlan && state.draftPlan.bgm;
+  const g = bgm ? bgm.gain_db : -14;
+  if (g === VOLUME_MAP.large) return "large";
+  if (g === VOLUME_MAP.small) return "small";
+  return "mid";
+}
+function setVolume(key) {
+  if (!state.draftPlan) return;
+  if (!state.draftPlan.bgm) state.draftPlan.bgm = { file: null, gain_db: -14, ducking: true };
+  state.draftPlan.bgm.gain_db = VOLUME_MAP[key] != null ? VOLUME_MAP[key] : -14;
+  setState({ dirty: true });
+}
+
+function sfxIsOn() { return !!(state.draftPlan && state.draftPlan.sfx && state.draftPlan.sfx.length); }
+function toggleSfx() {
+  if (!state.draftPlan) return;
+  if (sfxIsOn()) { state.draftPlan.sfx = []; setState({ dirty: true }); return; }
+  const shots = (state.draftPlan.shots || []).filter((s) => s.enabled);
+  const sfxAssets = state.assets.sfx || [];
+  const sfxAsset = sfxAssets.find((a) => a.file === "whoosh_01.wav") || sfxAssets[0];
+  if (!sfxAsset) { showToast({ type: "error", title: "効果音の素材が見つかりません" }); return; }
+  let t = 0;
+  const list = [];
+  shots.forEach((s, i) => {
+    if (i > 0) list.push({ file: sfxAsset.file, at_sec: Math.round(t * 10) / 10, gain_db: -8 });
+    t += Math.max(0, s.trim.end - s.trim.start);
+  });
+  state.draftPlan.sfx = list;
+  setState({ dirty: true });
+}
+
+async function saveDraft() {
+  if (!state.current || !state.draftPlan) return false;
+  setState({ savingEdit: true });
+  try {
+    await api.putPlan(state.current.id, state.draftPlan);
+    setState({ savingEdit: false, dirty: false, current: { ...state.current, plan: deepClone(state.draftPlan) } });
+    return true;
+  } catch (err) {
+    setState({ savingEdit: false });
+    showApiError(err, "保存に失敗しました");
+    return false;
+  }
+}
+
+async function finalizeEdit() {
+  if (!state.current) return;
+  if (state.dirty) {
+    const ok = await saveDraft();
+    if (!ok) return;
+  }
+  await beginRender(state.current.id, { totalPhases: 1 });
+}
+
+// ---------- できあがり画面の操作 ----------
+function goEdit() { setState({ screen: "edit", editingCaptionId: null }); }
+function goHomeFresh() {
+  stopJobSub(); stopPoll();
+  setState({ screen: "home", current: null, draftPlan: null, job: null, theme: "", submitError: null });
+  loadProjects();
+}
+function saveLink() {
+  const project = state.current;
+  if (!project || !project.renders || !project.renders.length) return "";
+  return api.mediaUrl("raw", project.renders[project.renders.length - 1].path);
+}
+
+// ---------- 共通パーツ ----------
+function topbarHtml() {
+  return `<div class="s-topbar"><span class="logo-dot" aria-hidden="true"></span><span>Reel Studio かんたんモード</span></div>`;
+}
+function proModeHref() {
+  const p = new URLSearchParams(location.search);
+  p.set("pro", "1");
+  return "/?" + p.toString();
+}
+function footerHtml() {
+  return `<div class="s-footer"><a href="${proModeHref()}">プロ向け画面</a></div>`;
+}
+
+const HIST_PILL = {
+  draft: ["下書き", "draft"],
+  generating: ["つくっています", "generating"],
+  ready: ["できあがり", "ready"],
+  rendering: ["しあげています", "rendering"],
+  failed: ["うまくいきませんでした", "failed"],
+};
+
+function renderHistoryList() {
+  if (state.projectsLoading) return `<div class="skeleton skeleton-row"></div><div class="skeleton skeleton-row"></div>`;
+  if (state.projectsError) return `<div class="s-error-banner">一覧を読み込めませんでした</div>`;
+  if (!state.projects.length) return `<div class="s-section-sub">まだ動画がありません。上のフォームから最初の1本を作ってみましょう。</div>`;
+  return `<div class="s-history-list">${state.projects.map((p) => {
+    const label = HIST_PILL[p.status] || ["-", p.status];
+    return `
+    <button type="button" class="s-history-card" data-open-project="${escapeHtml(p.id)}">
+      <div class="s-history-card__thumb" aria-hidden="true">🎬</div>
+      <div class="s-history-card__body">
+        <div class="s-history-card__title">${escapeHtml(p.theme)}</div>
+        <div class="s-history-card__meta"><span class="s-pill s-pill--${escapeHtml(label[1])}">${escapeHtml(label[0])}</span></div>
+      </div>
+    </button>`;
+  }).join("")}</div>`;
+}
+
+function styleCardHtml(value, title, desc) {
+  const pressed = state.style === value;
+  const art = value === "default"
+    ? `<svg width="40" height="28" viewBox="0 0 40 28" fill="none"><rect x="2" y="4" width="36" height="4" rx="2" fill="currentColor" opacity="0.85"/><rect x="2" y="12" width="26" height="4" rx="2" fill="currentColor" opacity="0.55"/><rect x="2" y="20" width="30" height="4" rx="2" fill="currentColor" opacity="0.35"/></svg>`
+    : `<svg width="28" height="28" viewBox="0 0 28 28" fill="none"><rect x="2" y="2" width="6" height="24" rx="3" fill="currentColor" opacity="0.85"/><rect x="11" y="2" width="6" height="18" rx="3" fill="currentColor" opacity="0.55"/><rect x="20" y="2" width="6" height="24" rx="3" fill="currentColor" opacity="0.35"/></svg>`;
+  return `
+    <button type="button" class="s-style-card" data-style="${value}" aria-pressed="${pressed}">
+      <div class="s-style-card__art" aria-hidden="true">${art}</div>
+      <div class="s-style-card__title">${escapeHtml(title)}</div>
+      <div class="s-style-card__desc">${escapeHtml(desc)}</div>
+    </button>`;
+}
+function backendCardHtml(value, emoji, title, note) {
+  const pressed = state.backend === value;
+  return `
+    <button type="button" class="s-backend-card" data-backend="${value}" aria-pressed="${pressed}">
+      <div class="s-backend-card__emoji" aria-hidden="true">${emoji}</div>
+      <div>${escapeHtml(title)}</div>
+      <div class="s-backend-card__note">${escapeHtml(note)}</div>
+    </button>`;
+}
+
+// ---------- 画面: ホーム ----------
+function renderHome() {
+  const el = document.getElementById("simple-app");
+  const chips = ["朝5分のストレッチ習慣", "スマホ副業のはじめかた", "毎日続く片付け術"];
+  el.innerHTML = `
+    ${topbarHtml()}
+    <div class="s-hero">
+      <h1>AIでショート動画をつくろう！</h1>
+      <p>テーマを1つ入れるだけ。台本も映像もAIが自動でつくります。</p>
+    </div>
+    <div class="s-card">
+      <div class="s-section-title">どんなテーマにする？</div>
+      <div class="s-input-wrap">
+        <textarea class="s-textarea" id="s-theme" placeholder="例: 朝5分のストレッチ習慣" maxlength="80">${escapeHtml(state.theme)}</textarea>
+        <div class="s-chips">
+          ${chips.map((c) => `<button type="button" class="s-chip" data-chip="${escapeHtml(c)}">${escapeHtml(c)}</button>`).join("")}
+        </div>
+      </div>
+
+      <div class="s-section-title">見た目のスタイル</div>
+      <div class="s-style-grid" role="group" aria-label="スタイル選択">
+        ${styleCardHtml("default", "ふつう", "読みやすい横書きテロップ")}
+        ${styleCardHtml("vertical_hook", "バズ風", "縦書きテロップ・速いカット")}
+      </div>
+
+      <div class="s-section-title" style="margin-top:16px;">映像タイプ</div>
+      <div class="s-backend-grid" role="group" aria-label="映像タイプ選択">
+        ${backendCardHtml("mock", "🧪", "おためし", "無料・れんしゅう用")}
+        ${backendCardHtml("higgsfield", "🎬", "本格AI映像", "クレジットを使う")}
+      </div>
+      <div class="s-hint">「クレジット」は動画を作るためのポイントです。初めての方は無料の「おためし」で流れを確認するのがおすすめです。</div>
+
+      ${state.submitError ? `<div class="s-error-banner" role="alert">${escapeHtml(state.submitError.message)}</div>` : ""}
+
+      <button type="button" class="s-cta" id="s-submit" style="margin-top:18px;" ${(!state.theme.trim() || state.submitting) ? "disabled" : ""}>
+        ${state.submitting ? "準備しています…" : "動画をつくる ✨"}
+      </button>
+    </div>
+
+    <div class="s-card">
+      <div class="s-section-title">これまでの動画</div>
+      ${renderHistoryList()}
+    </div>
+
+    ${footerHtml()}
+  `;
+
+  const themeInput = el.querySelector("#s-theme");
+  themeInput.addEventListener("input", (e) => { state.theme = e.target.value; syncSubmitButton(); });
+  el.querySelectorAll("[data-chip]").forEach((btn) => btn.addEventListener("click", () => setState({ theme: btn.dataset.chip })));
+  el.querySelectorAll("[data-style]").forEach((btn) => btn.addEventListener("click", () => setState({ style: btn.dataset.style })));
+  el.querySelectorAll("[data-backend]").forEach((btn) => btn.addEventListener("click", () => setState({ backend: btn.dataset.backend })));
+  el.querySelector("#s-submit").addEventListener("click", submitCreate);
+  el.querySelectorAll("[data-open-project]").forEach((c) => c.addEventListener("click", () => openPast(c.dataset.openProject)));
+}
+
+// ---------- 画面: 作成中 ----------
+const STEP_DEFS_FULL = [
+  { emoji: "🧠", label: "台本を考え中" },
+  { emoji: "🎬", label: "映像を作成中" },
+  { emoji: "✨", label: "仕上げ中" },
+];
+const STEP_DEFS_RENDER_ONLY = [
+  { emoji: "🎬", label: "映像を作成中" },
+  { emoji: "✨", label: "仕上げ中" },
+];
+
+function overallProgress(job) {
+  if (!job) return 0;
+  if (job.totalPhases === 2) return job.phase === "generate" ? job.progress * 0.5 : 50 + job.progress * 0.5;
+  return job.progress;
+}
+function activeStepIndex(job, steps) {
+  const pct = overallProgress(job);
+  const per = 100 / steps.length;
+  return clamp(Math.floor(pct / per), 0, steps.length - 1);
+}
+function encourageText(pct) {
+  if (pct >= 95) return "まもなく完成です！";
+  if (pct >= 70) return "あと少し！がんばれ！";
+  if (pct >= 35) return "順調に進んでいます";
+  return "はじめています…";
+}
+
+function renderCreating() {
+  const el = document.getElementById("simple-app");
+  const job = state.job || { phase: "generate", totalPhases: 2, progress: 0, message: "" };
+  const steps = job.totalPhases === 2 ? STEP_DEFS_FULL : STEP_DEFS_RENDER_ONLY;
+  const pct = Math.round(clamp(overallProgress(job), 0, 100));
+  const activeIdx = activeStepIndex(job, steps);
+  const theme = state.current ? state.current.theme : state.theme;
+
+  el.innerHTML = `
+    ${topbarHtml()}
+    <div class="s-card s-creating">
+      <h2>つくっています…</h2>
+      <div class="s-creating__theme">「${escapeHtml(theme || "")}」</div>
+      <div class="s-steps">
+        ${steps.map((s, i) => `
+          <div class="s-step ${i < activeIdx ? "is-done" : ""} ${i === activeIdx ? "is-active" : ""}">
+            <span class="s-step__emoji" aria-hidden="true">${i < activeIdx ? "✅" : s.emoji}</span>
+            <span>${escapeHtml(s.label)}${i === activeIdx ? "…" : ""}</span>
+          </div>
+        `).join("")}
+      </div>
+      <div class="s-progress-pct">${pct}%</div>
+      <div class="s-progress-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+        <div class="s-progress-bar__fill" style="width:${pct}%"></div>
+      </div>
+      <div class="s-encourage">${escapeHtml(encourageText(pct))}</div>
+    </div>
+    ${footerHtml()}
+  `;
+}
+
+// ---------- 画面: できあがり ----------
+function renderResult() {
+  const el = document.getElementById("simple-app");
+  const project = state.current;
+  const link = saveLink();
+  el.innerHTML = `
+    ${topbarHtml()}
+    <div class="s-card">
+      <div class="s-section-title">できあがりました！🎉</div>
+      <div class="s-section-sub">「${escapeHtml(project ? project.theme : "")}」</div>
+      <div class="s-video-wrap">
+        <div class="preview-frame">
+          ${link
+            ? `<video src="${escapeHtml(link)}" controls playsinline preload="metadata" aria-label="できあがった動画"></video>`
+            : `<div class="preview-frame__placeholder">${MOCK ? "おためしモードのため、実際の動画ファイルはありません。" : "動画を読み込めませんでした。"}</div>`}
+        </div>
+      </div>
+      <div class="s-result-actions">
+        ${link
+          ? `<a class="s-cta" href="${escapeHtml(link)}" download>ほぞんする 💾</a>`
+          : `<button type="button" class="s-cta" disabled>ほぞんする 💾</button>`}
+        <div class="s-result-actions-row">
+          <button type="button" class="s-cta-secondary" id="s-goedit">なおす ✏️</button>
+          <button type="button" class="s-cta-secondary" id="s-goagain">もういちど作る 🔁</button>
+        </div>
+      </div>
+    </div>
+    ${footerHtml()}
+  `;
+  el.querySelector("#s-goedit").addEventListener("click", goEdit);
+  el.querySelector("#s-goagain").addEventListener("click", goHomeFresh);
+}
+
+// ---------- 画面: かんたん編集 ----------
+function captionItemHtml(shot, i) {
+  if (state.editingCaptionId === shot.id) {
+    return `
+      <div class="s-caption-item" data-caption-id="${shot.id}">
+        <div class="s-caption-item__num">${i + 1}</div>
+        <textarea maxlength="120" aria-label="シーン${i + 1}のテロップ">${escapeHtml(shot.caption)}</textarea>
+      </div>`;
+  }
+  return `
+    <div class="s-caption-item" data-caption-id="${shot.id}" role="button" tabindex="0">
+      <div class="s-caption-item__num">${i + 1}</div>
+      <div class="s-caption-item__text">${shot.caption ? escapeHtml(shot.caption) : "(テロップなし・タップして入力)"}</div>
+    </div>`;
+}
+function sceneItemHtml(shot, i) {
+  return `
+    <div class="s-scene-item ${shot.enabled ? "" : "is-off"}">
+      <div class="s-scene-item__thumb" aria-hidden="true"></div>
+      <div class="s-scene-item__label">シーン${i + 1}: ${escapeHtml(shot.caption || "(無題)")}</div>
+      <button type="button" class="toggle" role="switch" aria-checked="${!!shot.enabled}" aria-label="シーン${i + 1}を使う" data-scene-toggle="${shot.id}"></button>
+    </div>`;
+}
+function musicMoodBtn(value, label, current) {
+  return `<button type="button" class="s-music-btn" data-mood="${value}" aria-pressed="${current === value}">${escapeHtml(label)}</button>`;
+}
+function volumeBtn(value, label, current) {
+  return `<button type="button" class="s-volume-btn" data-volume="${value}" aria-pressed="${current === value}">${escapeHtml(label)}</button>`;
+}
+
+function renderEdit() {
+  const el = document.getElementById("simple-app");
+  const plan = state.draftPlan;
+  const shots = (plan && plan.shots) || [];
+  const mood = currentMood();
+  const volumeKey = currentVolumeKey();
+  const sfxOn = sfxIsOn();
+  const canFinalize = shots.some((s) => s.enabled);
+
+  el.innerHTML = `
+    ${topbarHtml()}
+    <div class="s-card">
+      <div class="s-section-title">① ことば（テロップ）</div>
+      <div class="s-section-sub">タップすると書きかえられます</div>
+      <div class="s-edit-list">
+        ${shots.map((s, i) => captionItemHtml(s, i)).join("")}
+      </div>
+    </div>
+
+    <div class="s-card">
+      <div class="s-section-title">② シーン</div>
+      <div class="s-section-sub">オフにしたシーンはカットされます</div>
+      <div class="s-edit-list">
+        ${shots.map((s, i) => sceneItemHtml(s, i)).join("")}
+      </div>
+    </div>
+
+    <div class="s-card">
+      <div class="s-section-title">③ 音楽</div>
+      <div class="s-music-grid" role="group" aria-label="音楽の雰囲気">
+        ${musicMoodBtn("upbeat", "あかるい", mood)}
+        ${musicMoodBtn("calm", "おだやか", mood)}
+        ${musicMoodBtn("emotional", "かんどう", mood)}
+      </div>
+      <div class="s-section-sub">音の大きさ</div>
+      <div class="s-volume-grid" role="group" aria-label="音の大きさ">
+        ${volumeBtn("large", "大", volumeKey)}
+        ${volumeBtn("mid", "中", volumeKey)}
+        ${volumeBtn("small", "小", volumeKey)}
+      </div>
+    </div>
+
+    <div class="s-card">
+      <div class="s-section-title">④ 効果音</div>
+      <div class="s-sfx-row">
+        <span class="s-sfx-row__label">場面が変わるときに音を鳴らす</span>
+        <button type="button" class="toggle" id="s-sfx-toggle" role="switch" aria-checked="${sfxOn}" aria-label="効果音"></button>
+      </div>
+    </div>
+
+    ${state.dirty ? `<div class="s-hint">まだ保存していません。「この内容で仕上げる」を押すと反映されます。</div>` : ""}
+    <button type="button" class="s-cta s-edit-submit" id="s-finalize" ${(!canFinalize || state.savingEdit) ? "disabled" : ""}>
+      ${state.savingEdit ? "保存しています…" : "この内容で仕上げる ✨"}
+    </button>
+    ${footerHtml()}
+  `;
+
+  shots.forEach((s) => {
+    const item = el.querySelector(`[data-caption-id="${s.id}"]`);
+    if (!item) return;
+    if (state.editingCaptionId === s.id) {
+      const ta = item.querySelector("textarea");
+      ta.focus();
+      ta.selectionStart = ta.value.length;
+      ta.addEventListener("blur", () => { updateCaption(s.id, ta.value); stopEditCaption(); });
+    } else {
+      const activate = () => startEditCaption(s.id);
+      item.addEventListener("click", activate);
+      item.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activate(); } });
+    }
+  });
+
+  el.querySelectorAll("[data-scene-toggle]").forEach((btn) => btn.addEventListener("click", () => toggleScene(btn.dataset.sceneToggle)));
+  el.querySelectorAll("[data-mood]").forEach((btn) => btn.addEventListener("click", () => setMood(btn.dataset.mood)));
+  el.querySelectorAll("[data-volume]").forEach((btn) => btn.addEventListener("click", () => setVolume(btn.dataset.volume)));
+  el.querySelector("#s-sfx-toggle").addEventListener("click", toggleSfx);
+  el.querySelector("#s-finalize").addEventListener("click", finalizeEdit);
+}
+
+// ---------- 描画ディスパッチ ----------
+function render() {
+  switch (state.screen) {
+    case "creating": renderCreating(); break;
+    case "result": renderResult(); break;
+    case "edit": renderEdit(); break;
+    case "home":
+    default: renderHome(); break;
+  }
+}
+
+// ---------- 初期化（?open=<id> でQA時の状態を固定） ----------
+async function init() {
+  render();
+  await Promise.all([loadProjects(), loadAssets()]);
+
+  const openId = qsParams.get("open");
+  if (openId) await openPast(openId);
+  render();
+}
+
+init();

@@ -52,3 +52,43 @@
   --z-overlay: 500;
   --z-sticky: 100;
 }
+
+/* ---------------------------------------------------------------------
+ * かんたんモード用トークン（明るいテーマ）
+ * `.theme-simple` を <html> に付けたときだけ有効化する。プロモードの
+ * 既存ダークテーマ（:root の値）には一切影響しない。
+ * ------------------------------------------------------------------- */
+.theme-simple {
+  --bg: #F6F8FE;
+  --panel: #FFFFFF;
+  --panel-raised: #FFFFFF;
+  --border: #E4E9F4;
+  --border-strong: #C9D3EE;
+  --text: #1F2430;
+  --text-dim: #66708A;
+  --text-faint: #8891A8;
+
+  --accent: #5B7CFF;
+  --accent2: #9B6CFF;
+  --accent-fill: #5B7CFF;
+  --accent-fill-hover: #4A6AE8;
+  --accent2-fill: #9B6CFF;
+  --accent2-fill-hover: #8A5AE8;
+
+  --danger: #E5484D;
+  --danger-fill: #E5484D;
+  --success: #34C77B;
+  --warning: #FF8A5C;
+
+  --radius: 16px;
+  --radius-sm: 12px;
+  --radius-lg: 20px;
+
+  --shadow-1: 0 2px 8px rgba(31, 36, 48, 0.06);
+  --shadow-2: 0 8px 24px rgba(31, 36, 48, 0.10);
+  --shadow-3: 0 16px 40px rgba(31, 36, 48, 0.14);
+
+  --focus-ring: 0 0 0 2px #ffffff, 0 0 0 4px var(--accent);
+
+  color-scheme: light;
+}

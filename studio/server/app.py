@@ -23,7 +23,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -299,12 +299,28 @@ app.mount("/media/sfx", StaticFiles(directory=str(project_root() / "assets" / "s
 app.mount("/media/assets", StaticFiles(directory=str(project_root() / "assets")), name="media_assets")
 
 # ---------------------------------------------------------------------------
+# トップページの出し分け（かんたんモード既定 / ?pro=1 で従来のプロUI）
+# ---------------------------------------------------------------------------
+# 既定 "/" は studio/web/index.html（かんたんモード）。"?pro=1" のときだけ
+# studio/web/pro.html（既存の3ペインUI・変更なし）を返す。この明示ルートは
+# 下の StaticFiles マウントより「前」に登録されるため、Starletteのルーティング
+# （登録順に最初にマッチしたものを採用）により優先して処理される。
+_STUDIO_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+
+
+@app.get("/", include_in_schema=False)
+async def index_router(request: Request):
+    if request.query_params.get("pro") == "1":
+        return FileResponse(str(_STUDIO_WEB_DIR / "pro.html"))
+    return FileResponse(str(_STUDIO_WEB_DIR / "index.html"))
+
+
+# ---------------------------------------------------------------------------
 # SPA配信（studio/web/ を同一オリジンで配信。BUG-6）
 # ---------------------------------------------------------------------------
-# 上記の /api/* ルートおよび /media/* マウントは、いずれもこのモジュール内で
-# このマウントより「前」に登録されているため、Starletteのルーティング（登録順に
-# 最初にマッチしたものを採用）により優先して処理される。このマウントは
-# それらに一致しない残りすべてのパス（"/", "/app.js", "/styles/tokens.css" 等）
-# を studio/web/ 配下の静的ファイルとして返す最後の受け皿として機能する。
-_STUDIO_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+# 上記の /api/* ルート・/media/* マウント・"/" の明示ルートは、いずれも
+# このモジュール内でこのマウントより「前」に登録されているため優先して処理
+# される。このマウントはそれらに一致しない残りすべてのパス（"/app.js",
+# "/styles/tokens.css", "/simple/app.js" 等）を studio/web/ 配下の静的ファイル
+# として返す最後の受け皿として機能する。
 app.mount("/", StaticFiles(directory=str(_STUDIO_WEB_DIR), html=True), name="web_spa")
