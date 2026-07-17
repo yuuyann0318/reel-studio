@@ -191,7 +191,7 @@ async function finishRender(project) {
     screen: failed ? "edit" : "result",
   });
   loadProjects();
-  if (failed) showApiError(new Error(project.error || "仕上げに失敗しました"), "うまく仕上げられませんでした");
+  if (failed) showApiError(new Error(project.error || "仕上げに失敗しました"), "仕上げに失敗しました");
 }
 
 // ---------- 過去の動画を開く ----------
@@ -209,7 +209,7 @@ async function openPast(id) {
       setState({ screen: "result" });
     } else if (project.status === "failed") {
       setState({ screen: "edit" });
-      showApiError(new Error(project.error || "前回はうまくいきませんでした"), "このプロジェクトは失敗しています");
+      showApiError(new Error(project.error || "前回は失敗しました"), "このプロジェクトは失敗しています");
     } else {
       setState({ screen: "edit" });
     }
@@ -332,12 +332,14 @@ function footerHtml() {
   return `<div class="s-footer"><a href="${proModeHref()}">プロ向け画面</a></div>`;
 }
 
+const HIST_THUMB_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5M16 4v5"/></svg>`;
+
 const HIST_PILL = {
   draft: ["下書き", "draft"],
-  generating: ["つくっています", "generating"],
-  ready: ["できあがり", "ready"],
-  rendering: ["しあげています", "rendering"],
-  failed: ["うまくいきませんでした", "failed"],
+  generating: ["生成中", "generating"],
+  ready: ["完成", "ready"],
+  rendering: ["仕上げ中", "rendering"],
+  failed: ["失敗", "failed"],
 };
 
 function renderHistoryList() {
@@ -348,7 +350,7 @@ function renderHistoryList() {
     const label = HIST_PILL[p.status] || ["-", p.status];
     return `
     <button type="button" class="s-history-card" data-open-project="${escapeHtml(p.id)}">
-      <div class="s-history-card__thumb" aria-hidden="true">🎬</div>
+      <div class="s-history-card__thumb" aria-hidden="true">${HIST_THUMB_ICON}</div>
       <div class="s-history-card__body">
         <div class="s-history-card__title">${escapeHtml(p.theme)}</div>
         <div class="s-history-card__meta"><span class="s-pill s-pill--${escapeHtml(label[1])}">${escapeHtml(label[0])}</span></div>
@@ -369,15 +371,17 @@ function styleCardHtml(value, title, desc) {
       <div class="s-style-card__desc">${escapeHtml(desc)}</div>
     </button>`;
 }
-function backendCardHtml(value, emoji, title, note) {
+function backendCardHtml(value, iconSvg, title, note) {
   const pressed = state.backend === value;
   return `
     <button type="button" class="s-backend-card" data-backend="${value}" aria-pressed="${pressed}">
-      <div class="s-backend-card__emoji" aria-hidden="true">${emoji}</div>
+      <div class="s-backend-card__icon" aria-hidden="true">${iconSvg}</div>
       <div>${escapeHtml(title)}</div>
       <div class="s-backend-card__note">${escapeHtml(note)}</div>
     </button>`;
 }
+const ICON_FLASK = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v5.3L4.9 17a2 2 0 0 0 1.7 3h10.8a2 2 0 0 0 1.7-3L14 8.3V3"/><path d="M7.6 14h8.8"/></svg>`;
+const ICON_CLAPPER = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.2 5.1 5A1 1 0 0 1 6 4.3h11.8a1 1 0 0 1 .9.6L20 8.2"/><rect x="4" y="8.2" width="16" height="11.5" rx="1.5"/><path d="m8.3 4.6 1.8 3.6M13.1 4.4l1.8 3.6"/></svg>`;
 
 // ---------- 画面: ホーム ----------
 function renderHome() {
@@ -386,11 +390,11 @@ function renderHome() {
   el.innerHTML = `
     ${topbarHtml()}
     <div class="s-hero">
-      <h1>AIでショート動画をつくろう！</h1>
-      <p>テーマを1つ入れるだけ。台本も映像もAIが自動でつくります。</p>
+      <h1>ショート動画を自動作成</h1>
+      <p>テーマを入力するだけで、台本と映像をAIが自動生成します。</p>
     </div>
     <div class="s-card">
-      <div class="s-section-title">どんなテーマにする？</div>
+      <div class="s-section-title">テーマを入力</div>
       <div class="s-input-wrap">
         <textarea class="s-textarea" id="s-theme" placeholder="例: 朝5分のストレッチ習慣" maxlength="80">${escapeHtml(state.theme)}</textarea>
         <div class="s-chips">
@@ -406,15 +410,15 @@ function renderHome() {
 
       <div class="s-section-title" style="margin-top:16px;">映像タイプ</div>
       <div class="s-backend-grid" role="group" aria-label="映像タイプ選択">
-        ${backendCardHtml("mock", "🧪", "おためし", "無料・れんしゅう用")}
-        ${backendCardHtml("higgsfield", "🎬", "本格AI映像", "クレジットを使う")}
+        ${backendCardHtml("mock", ICON_FLASK, "デモ素材（無料）", "お試し・練習用")}
+        ${backendCardHtml("higgsfield", ICON_CLAPPER, "AI生成映像", "クレジットを消費")}
       </div>
-      <div class="s-hint">「クレジット」は動画を作るためのポイントです。初めての方は無料の「おためし」で流れを確認するのがおすすめです。</div>
+      <div class="s-hint">クレジットは動画生成に使うポイントです。まずは無料のデモ素材でお試しください。</div>
 
       ${state.submitError ? `<div class="s-error-banner" role="alert">${escapeHtml(state.submitError.message)}</div>` : ""}
 
       <button type="button" class="s-cta" id="s-submit" style="margin-top:18px;" ${(!state.theme.trim() || state.submitting) ? "disabled" : ""}>
-        ${state.submitting ? "準備しています…" : "動画をつくる ✨"}
+        ${state.submitting ? "準備しています…" : "動画を作成"}
       </button>
     </div>
 
@@ -437,14 +441,15 @@ function renderHome() {
 
 // ---------- 画面: 作成中 ----------
 const STEP_DEFS_FULL = [
-  { emoji: "🧠", label: "台本を考え中" },
-  { emoji: "🎬", label: "映像を作成中" },
-  { emoji: "✨", label: "仕上げ中" },
+  { label: "台本を作成中" },
+  { label: "映像を生成中" },
+  { label: "仕上げ中" },
 ];
 const STEP_DEFS_RENDER_ONLY = [
-  { emoji: "🎬", label: "映像を作成中" },
-  { emoji: "✨", label: "仕上げ中" },
+  { label: "映像を生成中" },
+  { label: "仕上げ中" },
 ];
+const STEP_ICON_DONE = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.2 11.7 13 4.5"/></svg>`;
 
 function overallProgress(job) {
   if (!job) return 0;
@@ -457,10 +462,15 @@ function activeStepIndex(job, steps) {
   return clamp(Math.floor(pct / per), 0, steps.length - 1);
 }
 function encourageText(pct) {
-  if (pct >= 95) return "まもなく完成です！";
-  if (pct >= 70) return "あと少し！がんばれ！";
+  if (pct >= 95) return "まもなく完成します";
+  if (pct >= 70) return "あと少しです";
   if (pct >= 35) return "順調に進んでいます";
-  return "はじめています…";
+  return "準備しています";
+}
+function stepIconHtml(i, activeIdx) {
+  if (i < activeIdx) return STEP_ICON_DONE;
+  if (i === activeIdx) return `<span class="s-step__spinner" aria-hidden="true"></span>`;
+  return `<span>${i + 1}</span>`;
 }
 
 function renderCreating() {
@@ -474,13 +484,13 @@ function renderCreating() {
   el.innerHTML = `
     ${topbarHtml()}
     <div class="s-card s-creating">
-      <h2>つくっています…</h2>
+      <h2>作成しています</h2>
       <div class="s-creating__theme">「${escapeHtml(theme || "")}」</div>
       <div class="s-steps">
         ${steps.map((s, i) => `
           <div class="s-step ${i < activeIdx ? "is-done" : ""} ${i === activeIdx ? "is-active" : ""}">
-            <span class="s-step__emoji" aria-hidden="true">${i < activeIdx ? "✅" : s.emoji}</span>
-            <span>${escapeHtml(s.label)}${i === activeIdx ? "…" : ""}</span>
+            <span class="s-step__icon" aria-hidden="true">${stepIconHtml(i, activeIdx)}</span>
+            <span>${escapeHtml(s.label)}</span>
           </div>
         `).join("")}
       </div>
@@ -502,22 +512,22 @@ function renderResult() {
   el.innerHTML = `
     ${topbarHtml()}
     <div class="s-card">
-      <div class="s-section-title">できあがりました！🎉</div>
+      <div class="s-section-title">動画が完成しました</div>
       <div class="s-section-sub">「${escapeHtml(project ? project.theme : "")}」</div>
       <div class="s-video-wrap">
         <div class="preview-frame">
           ${link
             ? `<video src="${escapeHtml(link)}" controls playsinline preload="metadata" aria-label="できあがった動画"></video>`
-            : `<div class="preview-frame__placeholder">${MOCK ? "おためしモードのため、実際の動画ファイルはありません。" : "動画を読み込めませんでした。"}</div>`}
+            : `<div class="preview-frame__placeholder">${MOCK ? "デモ素材モードのため、実際の動画ファイルはありません。" : "動画を読み込めませんでした。"}</div>`}
         </div>
       </div>
       <div class="s-result-actions">
         ${link
-          ? `<a class="s-cta" href="${escapeHtml(link)}" download>ほぞんする 💾</a>`
-          : `<button type="button" class="s-cta" disabled>ほぞんする 💾</button>`}
+          ? `<a class="s-cta" href="${escapeHtml(link)}" download>保存</a>`
+          : `<button type="button" class="s-cta" disabled>保存</button>`}
         <div class="s-result-actions-row">
-          <button type="button" class="s-cta-secondary" id="s-goedit">なおす ✏️</button>
-          <button type="button" class="s-cta-secondary" id="s-goagain">もういちど作る 🔁</button>
+          <button type="button" class="s-cta-secondary" id="s-goedit">編集する</button>
+          <button type="button" class="s-cta-secondary" id="s-goagain">もう一度作成</button>
         </div>
       </div>
     </div>
@@ -569,8 +579,8 @@ function renderEdit() {
   el.innerHTML = `
     ${topbarHtml()}
     <div class="s-card">
-      <div class="s-section-title">① ことば（テロップ）</div>
-      <div class="s-section-sub">タップすると書きかえられます</div>
+      <div class="s-section-title">① テロップ</div>
+      <div class="s-section-sub">タップして編集できます</div>
       <div class="s-edit-list">
         ${shots.map((s, i) => captionItemHtml(s, i)).join("")}
       </div>
@@ -587,9 +597,9 @@ function renderEdit() {
     <div class="s-card">
       <div class="s-section-title">③ 音楽</div>
       <div class="s-music-grid" role="group" aria-label="音楽の雰囲気">
-        ${musicMoodBtn("upbeat", "あかるい", mood)}
-        ${musicMoodBtn("calm", "おだやか", mood)}
-        ${musicMoodBtn("emotional", "かんどう", mood)}
+        ${musicMoodBtn("upbeat", "アップビート", mood)}
+        ${musicMoodBtn("calm", "落ち着いた", mood)}
+        ${musicMoodBtn("emotional", "エモーショナル", mood)}
       </div>
       <div class="s-section-sub">音の大きさ</div>
       <div class="s-volume-grid" role="group" aria-label="音の大きさ">
@@ -609,7 +619,7 @@ function renderEdit() {
 
     ${state.dirty ? `<div class="s-hint">まだ保存していません。「この内容で仕上げる」を押すと反映されます。</div>` : ""}
     <button type="button" class="s-cta s-edit-submit" id="s-finalize" ${(!canFinalize || state.savingEdit) ? "disabled" : ""}>
-      ${state.savingEdit ? "保存しています…" : "この内容で仕上げる ✨"}
+      ${state.savingEdit ? "保存しています…" : "この内容で仕上げる"}
     </button>
     ${footerHtml()}
   `;

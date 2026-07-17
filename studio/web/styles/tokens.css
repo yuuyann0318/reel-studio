@@ -59,34 +59,34 @@
  * 既存ダークテーマ（:root の値）には一切影響しない。
  * ------------------------------------------------------------------- */
 .theme-simple {
-  --bg: #F6F8FE;
+  --bg: #F7F8FC;
   --panel: #FFFFFF;
   --panel-raised: #FFFFFF;
-  --border: #E4E9F4;
-  --border-strong: #C9D3EE;
+  --border: #E3E6EE;
+  --border-strong: #C7CCDC;
   --text: #1F2430;
   --text-dim: #66708A;
   --text-faint: #8891A8;
 
-  --accent: #5B7CFF;
-  --accent2: #9B6CFF;
-  --accent-fill: #5B7CFF;
-  --accent-fill-hover: #4A6AE8;
-  --accent2-fill: #9B6CFF;
-  --accent2-fill-hover: #8A5AE8;
+  --accent: #4F6BFF;
+  --accent2: #8B6CE0;
+  --accent-fill: #4F6BFF;
+  --accent-fill-hover: #3D59EE;
+  --accent2-fill: #8B6CE0;
+  --accent2-fill-hover: #7A5BD0;
 
   --danger: #E5484D;
   --danger-fill: #E5484D;
-  --success: #34C77B;
-  --warning: #FF8A5C;
+  --success: #2FAE6D;
+  --warning: #E08A3C;
 
-  --radius: 16px;
-  --radius-sm: 12px;
-  --radius-lg: 20px;
+  --radius: 10px;
+  --radius-sm: 8px;
+  --radius-lg: 12px;
 
-  --shadow-1: 0 2px 8px rgba(31, 36, 48, 0.06);
-  --shadow-2: 0 8px 24px rgba(31, 36, 48, 0.10);
-  --shadow-3: 0 16px 40px rgba(31, 36, 48, 0.14);
+  --shadow-1: 0 1px 3px rgba(31, 36, 48, 0.05);
+  --shadow-2: 0 4px 12px rgba(31, 36, 48, 0.07);
+  --shadow-3: 0 10px 24px rgba(31, 36, 48, 0.10);
 
   --focus-ring: 0 0 0 2px #ffffff, 0 0 0 4px var(--accent);
 
