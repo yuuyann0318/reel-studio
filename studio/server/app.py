@@ -98,9 +98,12 @@ async def create_project(request: Request):
     backend_name = (body or {}).get("backend") or cfg.get("backend", "mock")
     if backend_name not in ("mock", "higgsfield", "cloudapi"):
         _bad_request("invalid_backend", "backend は mock/higgsfield/cloudapi のいずれかである必要があります")
+    style = (body or {}).get("style") or cfg.get("default_subtitle_style", "default")
+    if style not in projects.VALID_SUBTITLE_PRESETS:
+        _bad_request("invalid_style", "style は {} のいずれかである必要があります".format(projects.VALID_SUBTITLE_PRESETS))
 
-    project = projects.create_project(theme.strip(), target_duration_sec, backend_name, status="generating")
-    job_manager.start_generate(project["id"], theme.strip(), target_duration_sec, backend_name)
+    project = projects.create_project(theme.strip(), target_duration_sec, backend_name, status="generating", style=style)
+    job_manager.start_generate(project["id"], theme.strip(), target_duration_sec, backend_name, style=style)
     return {"id": project["id"]}
 
 

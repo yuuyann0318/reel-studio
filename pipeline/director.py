@@ -60,8 +60,15 @@ def _load_prompt(name):
         return f.read()
 
 
-def build_director_prompt(theme, target_duration_sec, target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC):
-    template = _load_prompt("director_prompt.txt")
+# スタイル名 -> プロンプトファイル名。未知のスタイル/未指定は既定(default)のプロンプトを使う。
+_STYLE_PROMPT_FILES = {
+    "default": "director_prompt.txt",
+    "vertical_hook": "director_prompt_vertical_hook.txt",
+}
+
+
+def build_director_prompt(theme, target_duration_sec, target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC, style="default"):
+    template = _load_prompt(_STYLE_PROMPT_FILES.get(style, _STYLE_PROMPT_FILES["default"]))
     return (
         template.replace("{THEME}", theme)
         .replace("{TARGET_DURATION}", "{:.0f}".format(target_duration_sec))
@@ -116,21 +123,28 @@ def _attempt_plan(prompt, config, retries_left, target_duration_sec, target_tole
 
 
 def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
-                  target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC):
+                  target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC, style="default"):
     """テーマから reel_plan を生成する。常に有効なplanを返す（AI失敗時はルールベース代替）。
 
     no_llm=True: claude呼び出しを一切行わず、決定論的テンプレートで即座に生成する
     （run.py の --no-llm オプション用）。
+    style: "default"（従来の企画・カット割り）| "vertical_hook"（縦書きテロップ・高速カット
+    向けのTTP構成。director_prompt_vertical_hook.txt を使い、shots数=尺÷2秒目安・各ショット
+    1.5〜2.5秒・5部構成のプロンプトに差し替える。claude不通時のルールベース代替も
+    style別のテンプレートを使う）。
     """
     config = config or {}
     if target_duration_sec is None:
         target_duration_sec = config.get("target_duration_sec", 30)
 
     if no_llm:
-        return plan_schema.build_rule_based_plan(theme, target_duration_sec=target_duration_sec)
-
-    prompt = build_director_prompt(theme, target_duration_sec, target_tolerance_sec)
-    plan = _attempt_plan(prompt, config, MAX_RETRIES, target_duration_sec, target_tolerance_sec)
-    if plan is not None:
+        plan = plan_schema.build_rule_based_plan(theme, target_duration_sec=target_duration_sec, style=style)
         return plan
-    return plan_schema.build_rule_based_plan(theme, target_duration_sec=target_duration_sec)
+
+    prompt = build_director_prompt(theme, target_duration_sec, target_tolerance_sec, style=style)
+    plan = _attempt_plan(prompt, config, MAX_RETRIES, target_duration_sec, target_tolerance_sec)
+    if plan is None:
+        plan = plan_schema.build_rule_based_plan(theme, target_duration_sec=target_duration_sec, style=style)
+    plan.setdefault("meta", {})
+    plan["meta"]["style"] = style
+    return plan

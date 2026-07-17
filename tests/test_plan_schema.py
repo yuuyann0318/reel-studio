@@ -90,3 +90,39 @@ def test_build_rule_based_plan_template_text_has_no_ng_words():
     full_text = plan["narration_script"] + "".join(s["caption_jp"] for s in plan["shots"])
     assert "絶対稼げる" not in full_text
     assert "100%成功" not in full_text
+
+
+# --- vertical_hookスタイル ---------------------------------------------------
+
+def test_build_rule_based_plan_vertical_hook_defaults_shot_count_to_duration_over_2sec():
+    plan = plan_schema.build_rule_based_plan("テストテーマ", target_duration_sec=15, style="vertical_hook")
+    assert plan["meta"]["style"] == "vertical_hook"
+    assert 6 <= len(plan["shots"]) <= 9
+    for shot in plan["shots"]:
+        assert 1.5 <= shot["duration_sec"] <= 2.5
+
+
+def test_build_rule_based_plan_vertical_hook_follows_5part_ttp_structure():
+    plan = plan_schema.build_rule_based_plan("在宅ワークの始め方", target_duration_sec=15, style="vertical_hook", shot_count=7)
+    captions = [s["caption_jp"] for s in plan["shots"]]
+    assert "今話題の" in captions[0]
+    assert captions[1] == "悔しくて調べまくった結果"
+    assert captions[-1] == "続きは保存して見返してね"
+
+
+def test_build_rule_based_plan_vertical_hook_avoids_double_prefix_when_theme_already_has_it():
+    plan = plan_schema.build_rule_based_plan("今話題のAI動画アプリを試した結果", target_duration_sec=15, style="vertical_hook")
+    assert plan["shots"][0]["caption_jp"].count("今話題の") == 1
+    assert plan["hook"].count("今話題の") == 1
+
+
+def test_build_rule_based_plan_unknown_style_normalizes_to_default():
+    plan = plan_schema.build_rule_based_plan("テストテーマ", target_duration_sec=20, style="not_a_real_style")
+    assert plan["meta"]["style"] == "default"
+
+
+def test_build_rule_based_plan_vertical_hook_template_text_has_no_ng_words():
+    plan = plan_schema.build_rule_based_plan("AIで副業を始める", target_duration_sec=15, style="vertical_hook")
+    full_text = plan["narration_script"] + plan["hook"] + "".join(s["caption_jp"] for s in plan["shots"])
+    assert "絶対稼げる" not in full_text
+    assert "100%成功" not in full_text

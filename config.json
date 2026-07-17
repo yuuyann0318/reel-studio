@@ -7,6 +7,7 @@
   "aspect": "9:16",
   "target_duration_sec": 30,
   "voice": "Kyoko",
+  "default_subtitle_style": "default",
   "brand_rules": {
     "ng_words": [
       "絶対稼げる",

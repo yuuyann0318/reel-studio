@@ -44,6 +44,54 @@ def test_create_project_rejects_invalid_backend():
     assert resp.json()["error"]["code"] == "invalid_backend"
 
 
+def test_create_project_rejects_invalid_style():
+    resp = client.post("/api/projects", json={"theme": "テスト", "style": "not_a_real_style"})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_style"
+
+
+def test_create_project_threads_style_into_start_generate(monkeypatch):
+    """POST /api/projects の style が job_manager.start_generate に渡ることを検証する。
+
+    directorの実行（claude呼び出し）を避けるため、start_generate自体をmonkeypatchして
+    実際のジョブは起動させず、呼び出し引数だけを確認する。
+    """
+    from studio.server import app as app_mod
+
+    captured = {}
+
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default"):
+        captured["project_id"] = project_id
+        captured["style"] = style
+        return project_id
+
+    monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
+
+    resp = client.post("/api/projects", json={"theme": "テスト:style疎通", "backend": "mock", "style": "vertical_hook"})
+    assert resp.status_code == 202
+    project_id = resp.json()["id"]
+    try:
+        assert captured["style"] == "vertical_hook"
+        assert captured["project_id"] == project_id
+    finally:
+        shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
+
+
+def test_create_project_accepts_vertical_hook_style():
+    # directorのclaude呼び出し（課金/低速）を実行しないよう、POST直後に同期的に書き込まれる
+    # project["style"]/plan.subtitle_style.presetのみを検証する（バックグラウンドの生成ジョブ
+    # 完了は待たない。project.create_project()がジョブ開始前にこれらを書くため検証できる）。
+    project = projects.create_project("テスト:vertical_hook作成", 15.0, "mock", status="draft", style="vertical_hook")
+    try:
+        assert project["style"] == "vertical_hook"
+        assert project["plan"]["subtitle_style"]["preset"] == "vertical_hook"
+        fetched = client.get("/api/projects/{}".format(project["id"])).json()
+        assert fetched["style"] == "vertical_hook"
+        assert fetched["plan"]["subtitle_style"]["preset"] == "vertical_hook"
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
 def test_put_plan_unknown_project_returns_404():
     resp = client.put("/api/projects/p_does_not_exist_xyz/plan", json={"shots": []})
     assert resp.status_code == 404

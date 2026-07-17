@@ -85,6 +85,14 @@ export function renderProjectList(container, state, actions) {
         </select>
         <div class="field-hint">迷ったら mock（実映像を消費せず動作確認できます）</div>
       </div>
+      <div class="field">
+        <label for="f-style">テロップ・カットのスタイル</label>
+        <select class="select" id="f-style" name="style">
+          <option value="default" ${(createForm.style || "default") === "default" ? "selected" : ""}>標準</option>
+          <option value="vertical_hook" ${createForm.style === "vertical_hook" ? "selected" : ""}>縦書きフック（高速カット）</option>
+        </select>
+        <div class="field-hint">縦書きフックは明朝体の縦組みテロップ＋約2秒刻みの高速カット構成</div>
+      </div>
       ${createError ? `<div class="field-hint" style="color:var(--danger)" role="alert">${escapeHtml(createError.message)}${createError.code ? ` (code: ${escapeHtml(createError.code)})` : ""}</div>` : ""}
       <div class="form-actions">
         <button type="submit" class="btn btn--primary btn--block" ${createSubmitting ? "disabled" : ""}>${createSubmitting ? "作成中…" : "生成開始"}</button>
@@ -127,6 +135,7 @@ export function renderProjectList(container, state, actions) {
         theme: fd.get("theme"),
         duration: Number(fd.get("duration")),
         backend: fd.get("backend"),
+        style: fd.get("style"),
       });
     });
   }

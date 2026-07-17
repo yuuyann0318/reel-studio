@@ -59,12 +59,12 @@ export const api = {
     return request(`/api/projects/${encodeURIComponent(id)}`);
   },
 
-  async createProject({ theme, duration, backend }) {
-    if (MOCK) return mock.createProject({ theme, duration, backend });
+  async createProject({ theme, duration, backend, style }) {
+    if (MOCK) return mock.createProject({ theme, duration, backend, style });
     return request("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ theme, duration, backend }),
+      body: JSON.stringify({ theme, duration, backend, style }),
     });
   },
 

@@ -15,6 +15,10 @@
   - コスト見積: `higgsfield generate cost <job_type> --prompt "..." --aspect-ratio 9:16
     --resolution 480p --duration 5 --json` → `{"credits": <int>}`。
   - 未認証時: stderrに "Not authenticated"（大小文字は揺れうる）を含む。
+  - モデル(seedance_2_0_mini)側のduration制約（BUG-10・実機確認）: `--duration` に
+    3秒等の短い値を渡すと `duration: Input should be greater than or equal to 4` という
+    バリデーションエラー(exit code 3)を返しジョブが投入されない。最小4秒が必要
+    （`_resolve_request_duration_sec()` でクランプして対処）。
 
 コマンド構築・レスポンス解釈は `_build_*_cmd()` / `_parse_*()` 関数に隔離してあり、
 CLI側の仕様変更が起きてもこれらの関数だけ直せば追従できる設計にしてある。
@@ -26,6 +30,7 @@ Python 3.9 互換構文のみ。
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -41,6 +46,32 @@ _NODE_BIN_FALLBACK = (
 _DEFAULT_MODEL = "seedance_2_0_mini"
 _DEFAULT_RESOLUTION = "480p"
 _DEFAULT_MAX_CREDITS_PER_SHOT = 10
+
+# ★BUG-10（実機確認・2026-07-17, higgsfield CLI 1.1.17, model=seedance_2_0_mini）:
+# directorが3秒ショットを計画し、そのduration_secをそのまま `--duration` に渡したところ、
+# CLIが `duration: Input should be greater than or equal to 4` というバリデーションエラー
+# (exit code 3) を返し、ジョブが1件も投入されずフルリール生成が失敗した。
+# モデル側の最小duration制約が4秒であることを実機エラーで確認したため定数化する。
+_MIN_REQUEST_DURATION_SEC = 4
+# 上限側は実機のエラーで確認したものではない（未検証）。暴走的なコスト増加・過大な
+# クレジット消費を防ぐための保守的なキャップとして設定する。実際の計画尺より長く
+# リクエストした分は、後段の render.build_normalize_clip_cmd（duration_sec指定）で
+# 計画どおりの尺にトリムして吸収する。
+_MAX_REQUEST_DURATION_SEC = 12
+
+
+def _resolve_request_duration_sec(shot):
+    """ショット尺(shot['duration_sec'])から、CLIへ実際にリクエストする秒数を決める。
+
+    副作用なし・テスト対象。ショット尺をそのままモデルへ渡すと、モデルの最小/最大
+    duration制約に反してCLIがバリデーションエラーで失敗することがある(BUG-10)。
+    ceil(ショット尺) を [_MIN_REQUEST_DURATION_SEC, _MAX_REQUEST_DURATION_SEC] にクランプ
+    して安全な値でリクエストし、実際の最終カット尺は plan.shots[].duration_sec を正として
+    後段のトリム処理に委ねる。
+    """
+    duration_sec = float(shot.get("duration_sec", 5))
+    requested = int(math.ceil(duration_sec))
+    return max(_MIN_REQUEST_DURATION_SEC, min(_MAX_REQUEST_DURATION_SEC, requested))
 
 
 class HiggsfieldAuthError(VisualBackendError):
@@ -85,8 +116,7 @@ def _build_create_cmd(cli_bin, model, shot, resolution):
     まま組み込むリスクを避けるため（--prompt/--aspect-ratio/--resolution/--duration
     の4つのみ実機確認済み)。
     """
-    duration_sec = int(round(float(shot.get("duration_sec", 5))))
-    duration_sec = max(1, duration_sec)
+    duration_sec = _resolve_request_duration_sec(shot)
     return [
         cli_bin, "generate", "create", model,
         "--prompt", shot.get("visual_prompt", ""),
@@ -99,8 +129,7 @@ def _build_create_cmd(cli_bin, model, shot, resolution):
 
 def _build_cost_cmd(cli_bin, model, shot, resolution):
     """コスト見積コマンドを構築する（副作用なし・テスト対象）。"""
-    duration_sec = int(round(float(shot.get("duration_sec", 5))))
-    duration_sec = max(1, duration_sec)
+    duration_sec = _resolve_request_duration_sec(shot)
     return [
         cli_bin, "generate", "cost", model,
         "--prompt", shot.get("visual_prompt", ""),

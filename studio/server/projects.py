@@ -40,8 +40,9 @@ SFX_MANIFEST = SFX_DIR / "manifest.json"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-DEFAULT_SUBTITLE_STYLE = {"font_size": 76, "accent_color": "#FFD84D", "position": "lower"}
+DEFAULT_SUBTITLE_STYLE = {"font_size": 76, "accent_color": "#FFD84D", "position": "lower", "preset": "default"}
 VALID_POSITIONS = ("lower", "center", "upper")  # studio/web/components/inspector.js のselect値と一致させる
+VALID_SUBTITLE_PRESETS = ("default", "vertical_hook")  # pipeline/subtitles.py SUBTITLE_STYLE_PRESETSと一致させる
 STATUSES = ("draft", "generating", "ready", "rendering", "failed")
 
 
@@ -93,8 +94,14 @@ def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def create_project(theme, target_duration_sec, backend_name, status="generating"):
-    """新規プロジェクトの雛形を作成し保存する。plan/shotsは生成ジョブが後で埋める。"""
+def create_project(theme, target_duration_sec, backend_name, status="generating", style="default"):
+    """新規プロジェクトの雛形を作成し保存する。plan/shotsは生成ジョブが後で埋める。
+
+    style: "default" | "vertical_hook"（縦書きテロップ・高速カットのTTPスタイル）。
+    directorの企画生成（shot数/尺の目安/構成）と、生成後のplan.subtitle_style.presetの
+    両方に反映される。不明な値は"default"に正規化する。
+    """
+    style = style if style in VALID_SUBTITLE_PRESETS else "default"
     project_id = new_project_id()
     pdir = project_dir(project_id)
     pdir.mkdir(parents=True, exist_ok=True)
@@ -108,12 +115,13 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
         "status": status,
         "backend": backend_name,
         "target_duration_sec": target_duration_sec,
+        "style": style,
         "plan": {
             "shots": [],
             "narration_text": "",
             "bgm": None,
             "sfx": [],
-            "subtitle_style": dict(DEFAULT_SUBTITLE_STYLE),
+            "subtitle_style": dict(DEFAULT_SUBTITLE_STYLE, preset=style),
         },
         "renders": [],
         "error": None,
@@ -389,6 +397,11 @@ def validate_plan(project_id, plan, ng_words=None):
             errors.append("plan.subtitle_style.position は {} のいずれかである必要があります".format(VALID_POSITIONS))
         else:
             normalized_style["position"] = position
+        preset = subtitle_style.get("preset", normalized_style["preset"])
+        if preset not in VALID_SUBTITLE_PRESETS:
+            errors.append("plan.subtitle_style.preset は {} のいずれかである必要があります".format(VALID_SUBTITLE_PRESETS))
+        else:
+            normalized_style["preset"] = preset
 
     # コンプライアンス検査（compliance.py流用）: 景表法NG表現・競合名義を弾く
     compat_plan = {

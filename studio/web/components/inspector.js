@@ -26,7 +26,7 @@ export function renderInspector(container, state, actions) {
   const selectedShot = shots.find((s) => s.id === state.selectedShotId) || null;
   const bgm = plan.bgm || { file: "", gain_db: -14, ducking: true };
   const sfxList = plan.sfx || [];
-  const style = plan.subtitle_style || { font_size: 48, accent_color: "#FFD84D", position: "lower" };
+  const style = plan.subtitle_style || { font_size: 48, accent_color: "#FFD84D", position: "lower", preset: "default" };
   const bgmAssets = state.assets.bgm || [];
   const sfxAssets = state.assets.sfx || [];
 
@@ -65,6 +65,14 @@ export function renderInspector(container, state, actions) {
 
     <div class="inspector-section">
       <h3>字幕スタイル</h3>
+      <div class="field">
+        <label for="style-preset">スタイル</label>
+        <select class="select" id="style-preset">
+          <option value="default" ${(style.preset || "default") === "default" ? "selected" : ""}>標準（横書き）</option>
+          <option value="vertical_hook" ${style.preset === "vertical_hook" ? "selected" : ""}>縦書きフック（高速カット）</option>
+        </select>
+        <div class="field-hint">縦書きフックは明朝体・白文字＋黒縁の縦組みテロップになります</div>
+      </div>
       <div class="field">
         <label for="style-font-size">フォントサイズ</label>
         <div class="slider-row">
@@ -149,6 +157,8 @@ export function renderInspector(container, state, actions) {
   });
 
   // --- 字幕スタイル ---
+  const presetSelect = container.querySelector("#style-preset");
+  if (presetSelect) presetSelect.addEventListener("change", (e) => actions.updateSubtitleStyle("preset", e.target.value));
   const fontSize = container.querySelector("#style-font-size");
   if (fontSize) {
     const label = fontSize.parentElement.querySelector(".slider-value");

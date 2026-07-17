@@ -64,6 +64,45 @@ def test_build_cost_cmd_has_expected_flags():
     assert "--duration" in cmd and "5" in cmd
 
 
+# --- BUG-10: モデル最小/最大duration制約に合わせたクランプ ---------------------
+
+def test_resolve_request_duration_sec_clamps_below_minimum_to_4_bug10():
+    # 実機で `duration: Input should be greater than or equal to 4` が発生した3秒ショット。
+    assert hb._resolve_request_duration_sec(_shot(duration_sec=3)) == 4
+
+
+def test_resolve_request_duration_sec_clamps_above_maximum_to_12_bug10():
+    assert hb._resolve_request_duration_sec(_shot(duration_sec=18)) == 12
+
+
+def test_resolve_request_duration_sec_ceils_fractional_seconds_bug10():
+    # ceil(4.1)=5。round(4.1)=4 になる旧実装との違いを明示する回帰テスト。
+    assert hb._resolve_request_duration_sec(_shot(duration_sec=4.1)) == 5
+
+
+def test_resolve_request_duration_sec_keeps_value_within_range_unchanged_bug10():
+    assert hb._resolve_request_duration_sec(_shot(duration_sec=7)) == 7
+
+
+def test_build_create_cmd_clamps_duration_below_minimum_to_4_bug10():
+    cmd = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(duration_sec=3), "480p")
+    idx = cmd.index("--duration")
+    assert cmd[idx + 1] == "4"
+
+
+def test_build_create_cmd_clamps_duration_above_maximum_to_12_bug10():
+    cmd = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(duration_sec=18), "480p")
+    idx = cmd.index("--duration")
+    assert cmd[idx + 1] == "12"
+
+
+def test_build_cost_cmd_clamps_duration_below_minimum_to_4_bug10():
+    # コスト見積とジョブ投入は同じduration値を使うべき（実際に課金される値と見積が一致する）。
+    cmd = hb._build_cost_cmd("higgsfield", "seedance_2_0_mini", _shot(duration_sec=3), "480p")
+    idx = cmd.index("--duration")
+    assert cmd[idx + 1] == "4"
+
+
 def test_build_wait_cmd_has_duration_style_timeout_interval():
     cmd = hb._build_wait_cmd("higgsfield", "job-123", timeout_sec=600, interval_sec=5)
     assert cmd == ["higgsfield", "generate", "wait", "job-123", "--timeout", "600s", "--interval", "5s", "--json"]

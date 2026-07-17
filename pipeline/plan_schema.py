@@ -177,13 +177,15 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
 _NG_PREFIXES_FOR_TEMPLATE = ("絶対稼げる", "100%成功")  # compliance.py のNGワードとは独立に、そもそもテンプレへ混入させない
 
 
-def build_rule_based_plan(theme, target_duration_sec=30, shot_count=5):
-    """テンプレートベースの決定論的フォールバックplan。claude CLI不通時 / --no-llm 指定時に使う。
+STYLE_NAMES = ("default", "vertical_hook")
 
-    景表法NG表現（絶対稼げる/100%成功等）は一切使わないテンプレート文言のみで構成する。
-    """
-    theme = (theme or "このテーマ").strip()
-    shot_count = max(3, int(shot_count))
+# vertical_hookは縦書きテロップで映えるよう短いcaptionを使う（8〜14字目安）。
+# テーマ文字列そのものは任意長のため、テンプレへ埋め込む際はここまでに切り詰める。
+_VERTICAL_HOOK_THEME_TRUNCATE = 14
+
+
+def _default_rule_based_plan(theme, target_duration_sec, shot_count):
+    shot_count = max(3, int(shot_count or 5))
     per_shot = round(float(target_duration_sec) / shot_count, 2)
     per_shot = max(MIN_SHOT_DURATION, min(MAX_SHOT_DURATION, per_shot))
 
@@ -226,6 +228,84 @@ def build_rule_based_plan(theme, target_duration_sec=30, shot_count=5):
                 "caption_jp": caption_templates[idx],
             }
         )
+    return concept, hook, narration_script, shots
+
+
+def _vertical_hook_caption_for_index(i, shot_count, theme_short):
+    """5部構成TTP（フック/自分ごと化/本題/注意喚起/締め）に沿ったcaptionを組み立てる。"""
+    main_points = ["やることは3つだけ", "最初の一歩がカギ", "コツはシンプル", "続けるほど伸びる", "ポイントを整理しよう"]
+    if i == 0:
+        if theme_short.startswith("今話題の"):
+            return theme_short[:MAX_CAPTION_CHARS]
+        return "今話題の{}".format(theme_short)[:MAX_CAPTION_CHARS]
+    if i == shot_count - 1:
+        return "続きは保存して見返してね"
+    if shot_count >= 4 and i == 1:
+        return "悔しくて調べまくった結果"
+    if shot_count >= 5 and i == shot_count - 2:
+        return "実はここに落とし穴が"
+    main_start = 2 if shot_count >= 4 else 1
+    return main_points[(i - main_start) % len(main_points)]
+
+
+def _vertical_hook_rule_based_plan(theme, target_duration_sec, shot_count):
+    # 高速カット構成: shots数の目安は尺÷2秒（下限3）。
+    if shot_count is None:
+        shot_count = max(3, int(round(float(target_duration_sec) / 2.0)))
+    shot_count = max(3, int(shot_count))
+    per_shot = round(float(target_duration_sec) / shot_count, 2)
+    per_shot = max(1.5, min(2.5, per_shot))  # vertical_hookは1.5〜2.5秒/ショットの高速カット目安
+
+    theme_short = theme[:_VERTICAL_HOOK_THEME_TRUNCATE]
+    hook_subject = theme_short if theme_short.startswith("今話題の") else "今話題の{}".format(theme_short)
+    concept = "「{}」を、今話題の切り口×自分ごと化のフックでテンポよく紹介する縦型ショート動画。".format(theme)
+    hook = "{}、実は今日から始められます。".format(hook_subject)
+    narration_script = (
+        "{}が今すごく話題になっていて、正直悔しくて調べまくりました。".format(theme)
+        + "結果からいうと、やることはシンプルで、最初の一歩さえ間違えなければ誰でも進められます。"
+        + "ただ、意外な落とし穴もあるので注意してください。"
+        + "気になった方は、保存していつでも見返してくださいね。"
+    )
+
+    motion_cycle = ["zoom_in", "pan_right", "zoom_out", "pan_left", "ken_burns"]
+    visual_templates = [
+        "abstract geometric background representing the theme '{}', soft gradient, clean minimal style, fast-paced".format(theme),
+        "abstract icon representing a relatable realization moment, simple flat design, soft gradient background",
+        "abstract icon representing a key point, simple flat design, soft gradient background",
+        "abstract icon representing a caution or surprising fact, simple flat design, soft gradient background",
+        "abstract uplifting geometric background, warm gradient, clean minimal style",
+    ]
+
+    shots = []
+    for i in range(shot_count):
+        shots.append(
+            {
+                "id": "s{}".format(i + 1),
+                "visual_prompt": visual_templates[i % len(visual_templates)],
+                "motion_preset": motion_cycle[i % len(motion_cycle)],
+                "duration_sec": per_shot,
+                "caption_jp": _vertical_hook_caption_for_index(i, shot_count, theme_short),
+            }
+        )
+    return concept, hook, narration_script, shots
+
+
+def build_rule_based_plan(theme, target_duration_sec=30, shot_count=None, style="default"):
+    """テンプレートベースの決定論的フォールバックplan。claude CLI不通時 / --no-llm 指定時に使う。
+
+    景表法NG表現（絶対稼げる/100%成功等）は一切使わないテンプレート文言のみで構成する。
+    style: "default"（従来のテンプレート、shot_count省略時は5） | "vertical_hook"
+    （縦書きテロップ・高速カット向けの5部構成TTPテンプレート、shot_count省略時は尺÷2秒目安）。
+    """
+    theme = (theme or "このテーマ").strip()
+    style = style if style in STYLE_NAMES else "default"
+
+    if style == "vertical_hook":
+        concept, hook, narration_script, shots = _vertical_hook_rule_based_plan(theme, target_duration_sec, shot_count)
+        reason = "--no-llm指定 または claude CLI不通のためテンプレートベース生成(vertical_hook)"
+    else:
+        concept, hook, narration_script, shots = _default_rule_based_plan(theme, target_duration_sec, shot_count)
+        reason = "--no-llm指定 または claude CLI不通のためテンプレートベース生成"
 
     return {
         "version": 1,
@@ -235,7 +315,8 @@ def build_rule_based_plan(theme, target_duration_sec=30, shot_count=5):
             "fallback_from": None,
             "fallback_reason": None,
             "attempt": 0,
-            "reason": "--no-llm指定 または claude CLI不通のためテンプレートベース生成",
+            "reason": reason,
+            "style": style,
         },
         "concept": concept,
         "hook": hook,

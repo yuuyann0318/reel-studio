@@ -42,7 +42,7 @@ const state = {
   job: null, // { id, kind:'generate'|'render', projectId, stage, progress, message, done }
 
   showCreateForm: false,
-  createForm: { theme: "", duration: 30, backend: "mock" },
+  createForm: { theme: "", duration: 30, backend: "mock", style: "default" },
   createSubmitting: false,
   createError: null,
 
@@ -170,11 +170,11 @@ function toggleCreateForm(force) {
   setState({ showCreateForm: typeof force === "boolean" ? force : !state.showCreateForm, createError: null });
 }
 
-async function submitCreateProject({ theme, duration, backend }) {
+async function submitCreateProject({ theme, duration, backend, style }) {
   setState({ createSubmitting: true, createError: null });
   try {
-    const { id } = await api.createProject({ theme, duration, backend });
-    setState({ createSubmitting: false, showCreateForm: false, createForm: { theme: "", duration: 30, backend: "mock" } });
+    const { id } = await api.createProject({ theme, duration, backend, style });
+    setState({ createSubmitting: false, showCreateForm: false, createForm: { theme: "", duration: 30, backend: "mock", style: "default" } });
     await loadProjects();
     await openProject(id); // status: generating のはずなので openProject 内で自動的に SSE 購読される
   } catch (err) {
@@ -245,7 +245,7 @@ function updateSfx(index, field, value) {
 
 function updateSubtitleStyle(field, value) {
   if (!state.draftPlan) return;
-  if (!state.draftPlan.subtitle_style) state.draftPlan.subtitle_style = { font_size: 48, accent_color: "#FFD84D", position: "lower" };
+  if (!state.draftPlan.subtitle_style) state.draftPlan.subtitle_style = { font_size: 48, accent_color: "#FFD84D", position: "lower", preset: "default" };
   state.draftPlan.subtitle_style[field] = value;
   setState({ dirty: true });
 }

@@ -99,13 +99,14 @@ class JobManager:
 
     # --- 公開API -----------------------------------------------------
 
-    def start_generate(self, project_id, theme, target_duration_sec, backend_name):
+    def start_generate(self, project_id, theme, target_duration_sec, backend_name, style="default"):
         job_id = project_id  # POST /api/projects はプロジェクトIDそのものをjob_idとして使う（設計判断）
         with self._lock:
             self._jobs[job_id] = {"job_id": job_id, "kind": "generate", "status": "queued"}
         self._queue.put(("generate", job_id, {
             "project_id": project_id, "theme": theme,
             "target_duration_sec": target_duration_sec, "backend_name": backend_name,
+            "style": style,
         }))
         return job_id
 
@@ -195,6 +196,7 @@ class JobManager:
         theme = payload["theme"]
         target_duration_sec = payload["target_duration_sec"]
         backend_name = payload["backend_name"]
+        style = payload.get("style") or "default"
         cfg = self.cfg
 
         def fail(message):
@@ -208,7 +210,7 @@ class JobManager:
 
         self._emit(job_id, "director", 5, "企画を生成中…")
         try:
-            plan = director.run_director(theme, cfg, target_duration_sec=target_duration_sec, no_llm=False)
+            plan = director.run_director(theme, cfg, target_duration_sec=target_duration_sec, no_llm=False, style=style)
         except Exception as exc:
             fail("企画生成に失敗しました: {}".format(exc))
             return
@@ -228,6 +230,37 @@ class JobManager:
         clips_dir = projects.clips_dir(project_id)
         clips_dir.mkdir(parents=True, exist_ok=True)
 
+        # ★BUG-10修正: director企画（shotsの内容）は、以降のビジュアル生成が途中で失敗しても
+        # project.json から失われてはいけない。ここで先にclip_path=Noneの状態でplanを保存し、
+        # ショットが1本も生成できずに失敗しても plan.shots に企画内容（prompt/caption/尺）が
+        # 残るようにする。以前は生成ループを抜けた後にまとめて project["plan"] を書いていた
+        # ため、途中失敗時は create_project() 時点の空のplan（shots:[]）のままになっていた。
+        bgm_file = _resolve_bgm_by_mood(plan.get("bgm_mood"))
+        planned_shots = [
+            {
+                "id": shot["id"],
+                "order": i,
+                "enabled": True,
+                "prompt": shot.get("visual_prompt", ""),
+                "caption": shot.get("caption_jp", ""),
+                "clip_path": None,
+                "source_duration": float(shot["duration_sec"]),
+                "trim": {"start": 0.0, "end": float(shot["duration_sec"])},
+            }
+            for i, shot in enumerate(shots)
+        ]
+        studio_plan = {
+            "shots": planned_shots,
+            "narration_text": plan.get("narration_script", ""),
+            "bgm": {"file": bgm_file, "gain_db": -14.0, "ducking": True} if bgm_file else None,
+            "sfx": [],
+            "subtitle_style": dict(projects.DEFAULT_SUBTITLE_STYLE, preset=style),
+        }
+        project = projects.get_project(project_id)
+        if project is not None:
+            project["plan"] = studio_plan
+            projects.save_project(project)
+
         self._emit(job_id, "visual", 25, "ショットを生成中… (0/{})".format(len(shots)))
         try:
             backend = get_backend(backend_name, cfg)
@@ -235,7 +268,6 @@ class JobManager:
             fail("ビジュアルバックエンドの初期化に失敗しました: {}".format(exc))
             return
 
-        studio_shots = []
         for i, shot in enumerate(shots):
             raw_path = clips_dir / "{}.raw.mp4".format(shot["id"])
             norm_path = clips_dir / "{}.mp4".format(shot["id"])
@@ -257,28 +289,20 @@ class JobManager:
                 except Exception:
                     pass
 
-            studio_shots.append({
-                "id": shot["id"],
-                "order": i,
-                "enabled": True,
-                "prompt": shot.get("visual_prompt", ""),
-                "caption": shot.get("caption_jp", ""),
-                "clip_path": projects.media_relpath_for_clip(project_id, "{}.mp4".format(shot["id"])),
-                "source_duration": float(shot["duration_sec"]),
-                "trim": {"start": 0.0, "end": float(shot["duration_sec"])},
-            })
+            # このショットの生成が成功したので、その場でclip_pathを確定して保存する
+            # （途中で後続ショットが失敗しても、ここまでの成功分は失われない）。
+            planned_shots[i]["clip_path"] = projects.media_relpath_for_clip(
+                project_id, "{}.mp4".format(shot["id"])
+            )
+            project = projects.get_project(project_id)
+            if project is not None:
+                project["plan"] = studio_plan
+                projects.save_project(project)
             progress = 25 + int(45 * (i + 1) / max(1, len(shots)))
             self._emit(job_id, "visual", progress, "ショットを生成中… ({}/{})".format(i + 1, len(shots)))
 
-        bgm_file = _resolve_bgm_by_mood(plan.get("bgm_mood"))
-        studio_plan = {
-            "shots": studio_shots,
-            "narration_text": plan.get("narration_script", ""),
-            "bgm": {"file": bgm_file, "gain_db": -14.0, "ducking": True} if bgm_file else None,
-            "sfx": [],
-            "subtitle_style": dict(projects.DEFAULT_SUBTITLE_STYLE),
-        }
-
+        # studio_plan["shots"] は planned_shots への参照のため、ここまでのループで
+        # 全ショットのclip_pathが確定済み（= 作り直す必要はない）。
         project = projects.get_project(project_id)
         project["plan"] = studio_plan
         project["status"] = "rendering"

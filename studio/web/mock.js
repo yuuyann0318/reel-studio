@@ -27,8 +27,8 @@ const SFX_ASSETS = [
   { file: "transition_01.wav", category: "transition", license: "synthetic-placeholder", duration_sec: 0.7 },
 ];
 
-function defaultSubtitleStyle() {
-  return { font_size: 72, accent_color: "#FFD84D", position: "lower" };
+function defaultSubtitleStyle(preset) {
+  return { font_size: 72, accent_color: "#FFD84D", position: "lower", preset: preset || "default" };
 }
 
 function buildShots(theme, count) {
@@ -121,7 +121,7 @@ function seed() {
   });
 }
 
-function startGenerateJob(projectId, theme, durationSec) {
+function startGenerateJob(projectId, theme, durationSec, style) {
   const stages = [
     { stage: "queued", message: "キューに登録しました", pct: 0 },
     { stage: "script", message: "台本を生成しています…", pct: 18 },
@@ -139,7 +139,10 @@ function startGenerateJob(projectId, theme, durationSec) {
     done: false,
   };
   job.onFinish = () => {
-    const shotCount = Math.max(3, Math.round(durationSec / 5));
+    // vertical_hookは高速カット構成（尺÷2秒目安）、それ以外は従来どおり尺÷5秒目安。
+    const shotCount = style === "vertical_hook"
+      ? Math.max(3, Math.round(durationSec / 2))
+      : Math.max(3, Math.round(durationSec / 5));
     const project = DB.projects.get(projectId);
     if (!project) return;
     project.status = "ready";
@@ -148,7 +151,7 @@ function startGenerateJob(projectId, theme, durationSec) {
       narration_text: `${theme}についての台本です。`,
       bgm: { file: "calm_01.mp3", gain_db: -14, ducking: true },
       sfx: [{ file: "whoosh_01.wav", at_sec: 2.0, gain_db: -8 }],
-      subtitle_style: defaultSubtitleStyle(),
+      subtitle_style: defaultSubtitleStyle(style),
     };
   };
   DB.jobs.set(job.id, job);
@@ -202,7 +205,7 @@ export async function getProject(id) {
   return JSON.parse(JSON.stringify(p));
 }
 
-export async function createProject({ theme, duration, backend }) {
+export async function createProject({ theme, duration, backend, style }) {
   await delay(150);
   if (!theme || !theme.trim()) {
     throw new ApiError("VALIDATION_ERROR", "テーマを入力してください", 422);
@@ -216,8 +219,9 @@ export async function createProject({ theme, duration, backend }) {
     plan: null,
     renders: [],
     backend: backend || "mock",
+    style: style || "default",
   });
-  startGenerateJob(id, theme.trim(), duration || 30);
+  startGenerateJob(id, theme.trim(), duration || 30, style || "default");
   return { id };
 }
 
