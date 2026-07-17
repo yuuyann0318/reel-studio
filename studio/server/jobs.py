@@ -419,6 +419,7 @@ class JobManager:
 
         project = projects.get_project(project_id)
         project["status"] = "ready"
+        project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
@@ -483,6 +484,7 @@ class JobManager:
 
         project = projects.get_project(project_id)
         project["status"] = "ready"
+        project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
@@ -595,6 +597,7 @@ class JobManager:
 
         project = projects.get_project(project_id)
         project["status"] = "ready"
+        project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
