@@ -38,7 +38,7 @@
     "fish_audio": {
       "api_key_env": "FISH_AUDIO_API_KEY",
       "model": "s2.1-pro-free",
-      "reference_id": "",
+      "reference_id": "0089dce5fefb4c6ba9b9f2f0debe1ddc",
       "format": "wav",
       "timeout_sec": 60
     }
