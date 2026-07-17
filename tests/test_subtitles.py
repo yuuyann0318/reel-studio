@@ -23,14 +23,18 @@ def test_wrap_caption_kinsoku_avoids_forbidden_line_start():
 
 def test_wrap_caption_kinsoku_bug2_does_not_split_word_mid_way():
     """BUG-2: 「毎日5分で散らかる前にリセット」が「リセ」/「ット」のように語中分割されない。
-    文節境界（助詞「に」の後）で改行し、「リセット」は1行にまとまる。"""
+
+    行長バランス選択（|1行目-2行目|最小）により、文節境界候補[5, 11]のうち
+    diff最小のi=5（5文字/10文字, diff=5）が選ばれる（i=11はdiff=7で不採用）。
+    「リセット」は語中分割されず1行にまとまる、という不変条件は維持する。"""
     text = "毎日5分で散らかる前にリセット"
     lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
     assert len(lines) == 2
+    assert "".join(lines) == text
     assert "リセット" in lines[1] or "リセット" in lines[0]
     assert "リセ" != lines[0][-2:]  # 「リセ」で行が終わっていない(=「ット」だけ次行に落ちていない)
-    assert lines[1] == "リセット"
-    assert lines[0] == "毎日5分で散らかる前に"
+    assert lines[0] == "毎日5分で"
+    assert lines[1] == "散らかる前にリセット"
 
 
 def test_find_bunsetsu_break_prefers_particle_boundary():
@@ -55,7 +59,8 @@ def test_wrap_caption_kinsoku_bug5_does_not_regress_bug2():
     text = "毎日5分で散らかる前にリセット"
     lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
     assert len(lines) == 2
-    assert lines[1] == "リセット"
+    assert "".join(lines) == text
+    assert "リセット" in lines[1]  # 「リセット」が語中分割されず1行にまとまっている
 
 
 def test_wrap_caption_kinsoku_bug5_breaks_at_natural_position():
@@ -118,3 +123,29 @@ def test_generate_ass_contains_header_and_dialogue():
 
 def test_hex_to_ass_bgr_conversion():
     assert subtitles.hex_to_ass_bgr("#FFD400") == "&H00D4FF&"
+
+
+def test_wrap_caption_kinsoku_balanced_break_representative_example():
+    """行長バランス選択の代表例: 候補[6,9,13]のうちdiff最小(=0)のi=9が選ばれ、
+    2行がぴったり9文字ずつに揃う（「上品モダン」の行長揃え）。"""
+    text = "毎日30分の運動を続けると体が変わる"
+    lines = subtitles.wrap_caption_kinsoku(text, max_chars=13, max_lines=2)
+    assert "".join(lines) == text
+    assert lines == ["毎日30分の運動を", "続けると体が変わる"]
+    assert len(lines[0]) == len(lines[1]) == 9
+
+
+def test_generate_ass_all_dialogue_lines_have_fad_and_pop_override():
+    """legacy generate_ass()（CLI経路）も build_dialogue_line 共通化により、
+    全DialogueにASSのフェード+ポップイン({\\fad(...)\\fscx94\\fscy94\\t(0,120,\\fscx100\\fscy100)})
+    が付与される。"""
+    pieces = [
+        {"out_start": 0.0, "out_end": 2.0, "lines": ["テスト1"], "emphasis": [], "style": "base"},
+        {"out_start": 2.0, "out_end": 4.0, "lines": ["テスト2"], "emphasis": [], "style": "big"},
+    ]
+    ass_text = subtitles.generate_ass(pieces)
+    dialogue_lines = [l for l in ass_text.splitlines() if l.startswith("Dialogue:")]
+    assert len(dialogue_lines) == 2
+    for line in dialogue_lines:
+        assert "\\fad(160,120)" in line
+        assert "\\fscx94\\fscy94\\t(0,120,\\fscx100\\fscy100)" in line

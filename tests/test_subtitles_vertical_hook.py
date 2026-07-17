@@ -103,3 +103,66 @@ def test_build_telop_pieces_from_shots_includes_raw_caption_field():
     shots = [{"id": "s1", "duration_sec": 2.0, "caption_jp": "今日から始めよう"}]
     pieces = subtitles.build_telop_pieces_from_shots(shots)
     assert pieces[0]["caption"] == "今日から始めよう"
+
+
+# --- vertical_hookの「上品モダン+視認性最強」拡張: fad/列stagger/自動アクセント -----------
+
+def test_build_vertical_hook_dialogue_lines_has_vertical_fad_tag():
+    lines = subtitles.build_vertical_hook_dialogue_lines(0.0, 3.0, "今話題のAI動画", anchor="right")
+    assert len(lines) == 1
+    assert "\\fad(140,100)" in lines[0]
+
+
+def test_build_vertical_hook_dialogue_lines_second_column_start_delayed_by_stagger():
+    """2列目以降のStartは1列につき+0.09秒ずつ遅らせる（列単位でリズムを作る演出）。"""
+    text = "あいうえおかきくけこさし"  # 12文字 -> 2列
+    lines = subtitles.build_vertical_hook_dialogue_lines(0.0, 3.0, text, anchor="right")
+    assert len(lines) == 2
+    assert lines[0].startswith("Dialogue: 0,0:00:00.00,")
+    assert lines[1].startswith("Dialogue: 0,0:00:00.09,")
+
+
+def test_build_vertical_hook_dialogue_lines_stagger_clamped_when_duration_is_very_short():
+    """表示尺が極端に短いcaptionでは、2列目のStart遅延がout_end-0.3を超えないようクランプされる。
+
+    out_start=0.0, out_end=0.35 のとき、素の遅延(0.09s)ではなく
+    クランプ後の 0.35-0.3=0.05s が使われる。"""
+    text = "あいうえおかきくけこさし"  # 12文字 -> 2列
+    lines = subtitles.build_vertical_hook_dialogue_lines(0.0, 0.35, text, anchor="right")
+    assert len(lines) == 2
+    assert lines[0].startswith("Dialogue: 0,0:00:00.00,")
+    assert lines[1].startswith("Dialogue: 0,0:00:00.05,")
+
+
+def test_build_vertical_hook_dialogue_lines_applies_color_map_per_column_with_reset():
+    """color_mapは列（別Dialogueイベント）ごとに\\cタグを張り直す必要がある（\\Nを跨いで持続
+    するが列をまたいでは持続しないため）。長音「ー」置換後(｜)でも、置換前captionの
+    span indexがそのまま使えることを確認する。"""
+    caption = "結果ーすごい"
+    accent_bgr = subtitles.hex_to_ass_bgr("#FFD84D")
+    color_map = subtitles._color_map_from_spans(len(caption), [(0, 2)], accent_bgr)  # 「結果」に着色
+    lines = subtitles.build_vertical_hook_dialogue_lines(0.0, 2.0, caption, anchor="right", color_map=color_map)
+    assert len(lines) == 1
+    text = lines[0]
+    assert "{{\\c{}}}結{{\\c{}}}".format(accent_bgr, subtitles._WHITE_RESET) in text
+    assert "{{\\c{}}}果{{\\c{}}}".format(accent_bgr, subtitles._WHITE_RESET) in text
+    assert "｜" in text  # 長音は置換後も残る(着色対象外=無色のまま)
+    assert "{{\\c{}}}｜".format(accent_bgr) not in text  # ｜自体は着色されていない
+
+
+def test_generate_vertical_hook_ass_reflects_custom_accent_color_from_subtitle_style():
+    pieces = [
+        {"out_start": 0.0, "out_end": 2.0, "lines": [], "emphasis": [], "style": "base", "caption": "3日間で変わる"},
+    ]
+    ass_text = subtitles.generate_vertical_hook_ass(pieces, subtitle_style={"accent_color": "#00FF00"})
+    accent_bgr = subtitles.hex_to_ass_bgr("#00FF00")
+    assert "\\c{}".format(accent_bgr) in ass_text
+
+
+def test_generate_vertical_hook_ass_default_accent_color_is_ffd84d_when_unspecified():
+    pieces = [
+        {"out_start": 0.0, "out_end": 2.0, "lines": [], "emphasis": [], "style": "base", "caption": "3日間で変わる"},
+    ]
+    ass_text = subtitles.generate_vertical_hook_ass(pieces)
+    default_bgr = subtitles.hex_to_ass_bgr(subtitles.DEFAULT_SUBTITLE_STYLE["accent_color"])
+    assert "\\c{}".format(default_bgr) in ass_text

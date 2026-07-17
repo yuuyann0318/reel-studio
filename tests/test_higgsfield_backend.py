@@ -349,6 +349,75 @@ def test_run_cli_raises_generic_error_for_other_failures(monkeypatch):
     assert not isinstance(excinfo.value, hb.HiggsfieldTimeoutError)
 
 
+def test_run_cli_raises_japanese_credit_error_when_stderr_says_not_enough_credits(monkeypatch):
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        return _FakeProc(returncode=1, stderr=b'Error: {"error": "not_enough_credits", "credits_required": 10}')
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(VisualBackendError) as excinfo:
+        hb._run_cli(["higgsfield", "generate", "create", "m", "--json"], timeout_sec=10)
+    message = str(excinfo.value)
+    assert "クレジットが不足しています" in message
+    assert "https://higgsfield.ai/" in message
+    assert "続きから作成する" in message
+    assert isinstance(excinfo.value, hb.HiggsfieldCreditError)  # 専用例外クラスで送出される
+    assert not isinstance(excinfo.value, hb.HiggsfieldAuthError)
+    assert not isinstance(excinfo.value, hb.HiggsfieldTimeoutError)
+
+
+def test_submit_job_does_not_retry_credit_error_even_when_stderr_also_contains_connection_text(monkeypatch):
+    """独立レビュー対応: stderrに"connection"（transientパターン）と"not_enough_credits"が
+    同居していても、例外型(HiggsfieldCreditError)で明示的に判定するためリトライされない
+    （日本語ラップ後のメッセージにstderr原文が埋め込まれ、そこに"connection"という文字列が
+    混入していても_is_transient_errorのメッセージ一致に引きずられない）ことを検証する。
+    """
+    backend = hb.HiggsfieldBackend(_cfg())
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        return _FakeProc(
+            returncode=1,
+            stderr=b'Error: connection unstable: {"error": "not_enough_credits"}',
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        hb.time, "sleep",
+        lambda sec: (_ for _ in ()).throw(
+            AssertionError("connectionが混入したクレジット不足エラーはsleep(リトライ)してはいけない")
+        ),
+    )
+
+    with pytest.raises(hb.HiggsfieldCreditError):
+        backend.submit_job(_shot())
+
+    assert len(calls) == 1  # 再試行していない
+
+
+def test_submit_job_does_not_retry_credit_error(monkeypatch):
+    """クレジット不足はユーザーのチャージが必要で自動復旧しないため、安全リトライ(nsfw)や
+    transientリトライの対象にせず即座に失敗させる（sleepが呼ばれない=リトライしていない）。"""
+    backend = hb.HiggsfieldBackend(_cfg())
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        return _FakeProc(returncode=1, stderr=b'Error: {"error": "not_enough_credits"}')
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        hb.time, "sleep",
+        lambda sec: (_ for _ in ()).throw(AssertionError("クレジット不足エラーはsleep(リトライ)してはいけない")),
+    )
+
+    with pytest.raises(hb.HiggsfieldCreditError) as excinfo:
+        backend.submit_job(_shot())
+
+    assert len(calls) == 1  # 再試行していない
+    assert "クレジットが不足しています" in str(excinfo.value)
+
+
 def test_run_cli_file_not_found_gives_install_hint(monkeypatch):
     def fake_run(cmd, stdout, stderr, shell, timeout):
         raise FileNotFoundError()

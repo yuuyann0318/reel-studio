@@ -791,7 +791,8 @@ def _render_project(project_id, plan, cfg):
     tts_meta = tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg)
 
     telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=telop_shots[0]["id"] if telop_shots else None)
-    ass_text = subtitles.generate_ass_with_style(telop_pieces, plan.get("subtitle_style"))
+    product_name = ((projects.get_project(project_id) or {}).get("product") or {}).get("name")
+    ass_text = subtitles.generate_ass_with_style(telop_pieces, plan.get("subtitle_style"), product_name=product_name)
     ass_path = work_dir / "subtitles.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 

@@ -114,6 +114,17 @@ class HiggsfieldCostLimitError(VisualBackendError):
     """見積コストが max_credits_per_shot を超えるため、ジョブを投入せず中断した場合。"""
 
 
+class HiggsfieldCreditError(VisualBackendError):
+    """クレジット残高不足（`not_enough_credits`）で失敗した場合。
+
+    ユーザー側の対処(チャージ)が必要で自動復旧しないため、専用の例外クラスとして
+    _call_with_retry で例外型により明示的にリトライ対象から除外する(メッセージ文字列
+    への_is_transient_error適用に依存しない。日本語ラップ後のメッセージにstderrの
+    原文が埋め込まれると、stderrに"connection"等のtransientパターン文字列がたまたま
+    含まれていた場合に誤ってリトライ対象と判定されてしまう脆さがあったため)。
+    """
+
+
 class HiggsfieldSafetyRejectedError(VisualBackendError):
     """安全フィルタ(nsfw/moderation/flagged)によりジョブが拒否された場合（1回の試行内部で使う中間例外）。
 
@@ -249,6 +260,18 @@ def _is_auth_error(stderr_text):
     return "not authenticated" in (stderr_text or "").lower()
 
 
+# ★クレジット切れ（実機で `not_enough_credits` を含むエラーを返すことを想定・日本語化）:
+# 残高不足はユーザー側の対処（チャージ）が必要で自動復旧しないため、transient/nsfw
+# いずれのリトライ対象にも当たらないことを保証した上で（_TRANSIENT_ERROR_PATTERNS /
+# _SAFETY_REJECTION_MARKERS のどちらにも"not_enough_credits"は一致しない）、
+# 即座に分かりやすい日本語エラーへ差し替える。
+_CREDIT_ERROR_MARKER = "not_enough_credits"
+
+
+def _is_credit_error(stderr_text):
+    return _CREDIT_ERROR_MARKER in (stderr_text or "").lower()
+
+
 def _is_timeout_error(stderr_text):
     lowered = (stderr_text or "").lower()
     return "timed out" in lowered or "timeout" in lowered
@@ -326,6 +349,10 @@ def _call_with_retry(fn, label, max_retries=2, backoff_sec=_DEFAULT_RETRY_BACKOF
     """fn()を実行し、一時的エラーの場合のみ指数バックオフで最大max_retries回まで再試行する。
 
     - `HiggsfieldAuthError`（認証切れ）は一時的エラーではないため即座に再送出する（再試行しない）。
+    - `HiggsfieldCreditError`（クレジット不足）も例外型で明示的に非リトライとして即座に
+      再送出する（メッセージ文字列への `_is_transient_error` 適用には依存しない。日本語
+      ラップ後のメッセージにstderr原文が埋め込まれ、そこに偶然"connection"等のtransient
+      パターンが含まれるケースでも誤ってリトライされないようにするため）。
     - それ以外の `VisualBackendError` は、メッセージが `_is_transient_error` に一致する場合のみ
       リトライ対象。一致しない場合（バリデーションエラー等）は即座に再送出する。
     - `sleep_fn` はテストでmonkeypatchできるよう外部注入可能にしてある（未指定時は `time.sleep`
@@ -336,6 +363,8 @@ def _call_with_retry(fn, label, max_retries=2, backoff_sec=_DEFAULT_RETRY_BACKOF
         try:
             return fn()
         except HiggsfieldAuthError:
+            raise
+        except HiggsfieldCreditError:
             raise
         except VisualBackendError as exc:
             if not _is_transient_error(str(exc)):
@@ -369,6 +398,11 @@ def _run_cli(cmd, timeout_sec):
                 "higgsfieldの認証が切れています。`higgsfield auth login` を実行してください。stderr: {}".format(
                     stderr_text[:300]
                 )
+            )
+        if _is_credit_error(stderr_text):
+            raise HiggsfieldCreditError(
+                "Higgsfieldのクレジットが不足しています。https://higgsfield.ai/ でチャージしてから"
+                "「続きから作成する」を押してください。(詳細: {})".format(stderr_text[:300])
             )
         if _is_timeout_error(stderr_text):
             raise HiggsfieldTimeoutError(
