@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """higgsfield_backend の単体テスト（subprocessをモック・実CLI呼び出しなし）。"""
+import json
 import subprocess
 
 import pytest
@@ -298,3 +299,341 @@ def test_fetch_result_raises_when_no_result_url():
     backend = hb.HiggsfieldBackend(_cfg())
     with pytest.raises(VisualBackendError):
         backend.fetch_result("job-1", "/tmp/out.mp4", result_url=None)
+
+
+# --- 一時的エラーの判定 -------------------------------------------------------
+
+def test_is_transient_error_matches_no_response_received():
+    assert hb._is_transient_error("Error: request failed (no response received)") is True
+
+
+def test_is_transient_error_matches_connection_case_insensitive():
+    assert hb._is_transient_error("Connection RESET by peer") is True
+
+
+def test_is_transient_error_false_for_validation_error():
+    assert hb._is_transient_error("duration: Input should be greater than or equal to 4") is False
+
+
+def test_is_transient_error_false_for_unrelated_error():
+    assert hb._is_transient_error("model not found") is False
+
+
+# --- リトライ: (a) createが一時エラー→リトライ→成功 -----------------------------
+
+def test_submit_job_retries_on_transient_error_then_succeeds(monkeypatch):
+    backend = hb.HiggsfieldBackend(_cfg())
+    calls = []
+    sleeps = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _FakeProc(returncode=3, stderr=b"Error: request failed (no response received)")
+        return _FakeProc(returncode=0, stdout=b'["job-success-1"]')
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: sleeps.append(sec))
+
+    job_id = backend.submit_job(_shot())
+
+    assert job_id == "job-success-1"
+    assert len(calls) == 2
+    assert all(c[2] == "create" for c in calls)  # createコマンドが2回とも呼ばれた(create自体の再試行)
+    assert sleeps == [5]  # 1回目のリトライは5秒バックオフ
+
+
+def test_submit_job_gives_up_after_max_retries_and_reports_attempt_count(monkeypatch):
+    backend = hb.HiggsfieldBackend(_cfg())
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        return _FakeProc(returncode=3, stderr=b"Error: request failed (no response received)")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: None)
+
+    with pytest.raises(VisualBackendError) as excinfo:
+        backend.submit_job(_shot())
+
+    assert len(calls) == 3  # 初回 + 最大2回リトライ = 計3回
+    assert "3" in str(excinfo.value)  # 試行回数がメッセージに含まれる
+
+
+# --- リトライ: (b) 認証エラーは非リトライ -------------------------------------
+
+def test_submit_job_does_not_retry_auth_error(monkeypatch):
+    backend = hb.HiggsfieldBackend(_cfg())
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        return _FakeProc(returncode=1, stderr=b"Error: Not authenticated. Run `higgsfield auth login`.")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: (_ for _ in ()).throw(AssertionError("認証エラーはsleepしてはいけない")))
+
+    with pytest.raises(hb.HiggsfieldAuthError):
+        backend.submit_job(_shot())
+
+    assert len(calls) == 1  # 再試行していない
+
+
+def test_submit_job_does_not_retry_validation_error(monkeypatch):
+    backend = hb.HiggsfieldBackend(_cfg())
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        return _FakeProc(returncode=3, stderr=b"duration: Input should be greater than or equal to 4")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: (_ for _ in ()).throw(AssertionError("バリデーションエラーはsleepしてはいけない")))
+
+    with pytest.raises(VisualBackendError):
+        backend.submit_job(_shot())
+
+    assert len(calls) == 1  # 再試行していない
+
+
+# --- リトライ: (c) wait失敗はwaitのみ再試行(createは1回のみ=課金1回) -------------
+
+def test_generate_retries_wait_only_without_resubmitting_create(monkeypatch, tmp_path):
+    """createは1回しか呼ばれない(=二重課金しない)ことを、実際のCLI呼び出しレベルで検証する。"""
+    backend = hb.HiggsfieldBackend(_cfg())
+    out_path = str(tmp_path / "out.mp4")
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            return _FakeProc(returncode=0, stdout=b'["job-once"]')
+        if cmd[2] == "wait":
+            wait_calls = [c for c in calls if c[2] == "wait"]
+            if len(wait_calls) == 1:
+                return _FakeProc(returncode=3, stderr=b"Error: request failed (no response received)")
+            return _FakeProc(
+                returncode=0,
+                stdout=b'{"status": "completed", "result_url": "https://example.com/a.mp4"}',
+            )
+        raise AssertionError("想定外のコマンド: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: None)
+    monkeypatch.setattr(hb, "_download_url", lambda url, path, curl_bin=None, timeout_sec=120: None)
+
+    meta = backend.generate(_shot(), out_path)
+
+    create_calls = [c for c in calls if c[2] == "create"]
+    wait_calls = [c for c in calls if c[2] == "wait"]
+    assert len(create_calls) == 1  # createは1回のみ=課金1回
+    assert len(wait_calls) == 2  # waitは1回失敗→1回リトライで成功
+    assert meta["job_id"] == "job-once"
+    assert meta["status"] == "completed"
+
+
+# --- 安全フィルタ(nsfw)誤検知への段階的リトライ(2026-07-17実機確認) --------------
+
+# (a) nsfw検知判定(文字列バリエーション) --------------------------------------
+
+def test_is_safety_rejection_detects_nsfw_status_message():
+    assert hb._is_safety_rejection('Error: job 2296cac2-abc ended with status "nsfw"') is True
+
+
+def test_is_safety_rejection_detects_moderation_case_insensitive():
+    assert hb._is_safety_rejection("Content flagged by MODERATION system") is True
+
+
+def test_is_safety_rejection_detects_flagged_marker():
+    assert hb._is_safety_rejection("this request was flagged") is True
+
+
+def test_is_safety_rejection_false_for_unrelated_error():
+    assert hb._is_safety_rejection("model not found") is False
+
+
+def test_is_safety_rejection_false_for_ordinary_job_failure():
+    assert hb._is_safety_rejection("content policy violation") is False
+
+
+# --- プロンプト言い換えの組み立て --------------------------------------------
+
+def test_build_safety_retry_prompt_first_attempt_keeps_original():
+    assert hb._build_safety_retry_prompt("calm ocean sunrise", 1) == "calm ocean sunrise"
+
+
+def test_build_safety_retry_prompt_second_attempt_adds_safe_prefix():
+    result = hb._build_safety_retry_prompt("calm ocean sunrise", 2)
+    assert result == "wholesome, family-friendly, safe-for-work, calm ocean sunrise"
+
+
+def test_build_safety_retry_prompt_third_attempt_uses_abstract_fallback():
+    result = hb._build_safety_retry_prompt("calm ocean sunrise", 3)
+    assert "abstract geometric shapes" in result
+    assert "vertical 9:16" in result
+    assert "calm ocean sunrise" not in result
+
+
+# (b) 1回目nsfw→安全プレフィックス付きで2回目成功(createに渡るプロンプトを実際にアサート) --
+
+def test_generate_retries_with_safety_prompt_after_nsfw_rejection_then_succeeds(monkeypatch, tmp_path):
+    backend = hb.HiggsfieldBackend(_cfg())
+    out_path = str(tmp_path / "out.mp4")
+    calls = []
+    create_prompts = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            idx = cmd.index("--prompt")
+            create_prompts.append(cmd[idx + 1])
+            job_id = "job-attempt-{}".format(len(create_prompts))
+            return _FakeProc(returncode=0, stdout=json.dumps([job_id]).encode("utf-8"))
+        if cmd[2] == "wait":
+            job_id = cmd[3]
+            if job_id == "job-attempt-1":
+                return _FakeProc(returncode=1, stderr=b'Error: job job-attempt-1 ended with status "nsfw"')
+            return _FakeProc(
+                returncode=0,
+                stdout=b'{"status": "completed", "result_url": "https://example.com/a.mp4"}',
+            )
+        raise AssertionError("想定外のコマンド: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: None)
+    monkeypatch.setattr(hb, "_download_url", lambda url, path, curl_bin=None, timeout_sec=120: None)
+
+    shot = _shot(
+        visual_prompt="bold warning-style graphic with a soft yellow gradient background and a simple exclamation icon"
+    )
+    meta = backend.generate(shot, out_path)
+
+    assert len(create_prompts) == 2  # 安全リトライで2回目のcreateが発火した
+    assert create_prompts[0] == shot["visual_prompt"]
+    assert create_prompts[1] == "wholesome, family-friendly, safe-for-work, " + shot["visual_prompt"]
+    assert meta["status"] == "completed"
+    assert meta["job_id"] == "job-attempt-2"
+    assert meta["safety_retry_attempt"] == 2
+
+
+# (c) 3回全滅→日本語エラー ----------------------------------------------------
+
+def test_generate_raises_japanese_error_after_three_safety_rejections(monkeypatch, tmp_path):
+    backend = hb.HiggsfieldBackend(_cfg())
+    out_path = str(tmp_path / "out.mp4")
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            return _FakeProc(returncode=0, stdout=b'["job-x"]')
+        if cmd[2] == "wait":
+            return _FakeProc(returncode=1, stderr=b'Error: job job-x ended with status "nsfw"')
+        raise AssertionError("想定外のコマンド: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: None)
+
+    shot = _shot(
+        visual_prompt=(
+            "bold warning-style graphic with a soft yellow gradient background and a simple "
+            "exclamation icon, clean modern design, vertical 9:16, extra padding text for length"
+        )
+    )
+    with pytest.raises(VisualBackendError) as excinfo:
+        backend.generate(shot, out_path)
+
+    message = str(excinfo.value)
+    assert "安全フィルタ" in message
+    assert shot["visual_prompt"][:80] in message
+
+    create_calls = [c for c in calls if c[2] == "create"]
+    assert len(create_calls) == 3  # 初回 + 安全リトライ2回 = 計3回
+
+
+# (d) 通常エラーは安全リトライしない -------------------------------------------
+
+def test_generate_does_not_retry_with_safety_prompt_for_ordinary_failure(monkeypatch, tmp_path):
+    backend = hb.HiggsfieldBackend(_cfg())
+    out_path = str(tmp_path / "out.mp4")
+    calls = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            return _FakeProc(returncode=0, stdout=b'["job-y"]')
+        if cmd[2] == "wait":
+            return _FakeProc(
+                returncode=0,
+                stdout=b'{"status": "failed", "error": "content policy violation"}',
+            )
+        raise AssertionError("想定外のコマンド: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        hb.time, "sleep",
+        lambda sec: (_ for _ in ()).throw(AssertionError("通常失敗で安全リトライのsleepは不要")),
+    )
+
+    with pytest.raises(hb.HiggsfieldJobFailedError):
+        backend.generate(_shot(), out_path)
+
+    create_calls = [c for c in calls if c[2] == "create"]
+    assert len(create_calls) == 1  # 安全リトライは発火しない=createは1回のみ
+
+
+# (e) transientリトライとの非干渉 ----------------------------------------------
+
+def test_transient_retry_still_works_inside_a_safety_retry_attempt(monkeypatch, tmp_path):
+    """1回目nsfw(安全リトライ発火)→2回目(安全プレフィックス版)のwaitが一時的エラーで
+    1回失敗してから、既存のtransientリトライ機構で同一プロンプトのまま自動復旧することを検証する。
+    安全リトライ(プロンプト差し替え)とtransientリトライ(同一プロンプト再試行)が別レイヤーとして
+    正しく共存することの確認。
+    """
+    backend = hb.HiggsfieldBackend(_cfg())
+    out_path = str(tmp_path / "out.mp4")
+    calls = []
+    create_prompts = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        calls.append(cmd)
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            idx = cmd.index("--prompt")
+            create_prompts.append(cmd[idx + 1])
+            job_id = "job-attempt-{}".format(len(create_prompts))
+            return _FakeProc(returncode=0, stdout=json.dumps([job_id]).encode("utf-8"))
+        if cmd[2] == "wait":
+            job_id = cmd[3]
+            wait_calls_for_job = [c for c in calls if c[2] == "wait" and c[3] == job_id]
+            if job_id == "job-attempt-1":
+                return _FakeProc(returncode=1, stderr=b'Error: job job-attempt-1 ended with status "nsfw"')
+            if len(wait_calls_for_job) == 1:
+                return _FakeProc(returncode=3, stderr=b"Error: request failed (no response received)")
+            return _FakeProc(
+                returncode=0,
+                stdout=b'{"status": "completed", "result_url": "https://example.com/a.mp4"}',
+            )
+        raise AssertionError("想定外のコマンド: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb.time, "sleep", lambda sec: None)
+    monkeypatch.setattr(hb, "_download_url", lambda url, path, curl_bin=None, timeout_sec=120: None)
+
+    meta = backend.generate(_shot(), out_path)
+
+    assert len(create_prompts) == 2  # 安全リトライは1回だけ発火(createは計2回)
+    wait_job2_calls = [c for c in calls if c[2] == "wait" and c[3] == "job-attempt-2"]
+    assert len(wait_job2_calls) == 2  # job-attempt-2に対してtransientリトライが1回働いた
+    assert meta["status"] == "completed"
+    assert meta["job_id"] == "job-attempt-2"

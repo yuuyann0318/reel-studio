@@ -89,6 +89,11 @@ export const api = {
     return request(`/api/projects/${encodeURIComponent(id)}/render`, { method: "POST" });
   },
 
+  async resumeProject(id) {
+    if (MOCK) return mock.resumeProject ? mock.resumeProject(id) : mock.startRender(id);
+    return request(`/api/projects/${encodeURIComponent(id)}/resume`, { method: "POST" });
+  },
+
   async getBgmAssets() {
     if (MOCK) return mock.getBgmAssets();
     return request("/api/assets/bgm");

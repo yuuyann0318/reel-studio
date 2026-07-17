@@ -151,6 +151,69 @@ def test_render_conflict_returns_409_while_status_is_rendering():
         shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# BUG-invalid_plan回帰: 生成途中失敗（一部ショットのclip_path=None）でも保存できること、
+# かつrender開始時は未生成ショットをshot id付き400で拒否すること
+# ---------------------------------------------------------------------------
+
+def _put_plan_with_unrendered_shot(project_id, extra_shot_overrides=None):
+    project = projects.get_project(project_id)
+    plan = project["plan"]
+    shot = {
+        "id": "s11", "order": 0, "enabled": True, "prompt": "abstract", "caption": "未生成キャプション",
+        "clip_path": None, "source_duration": 5.0, "trim": {"start": 0.0, "end": 5.0},
+    }
+    if extra_shot_overrides:
+        shot.update(extra_shot_overrides)
+    plan["shots"] = [shot]
+    return client.put("/api/projects/{}/plan".format(project_id), json=plan)
+
+
+def test_put_plan_saves_successfully_with_unrendered_shot_clip_path_null():
+    project = projects.create_project("途中失敗テスト", 10.0, "mock", status="failed")
+    try:
+        resp = _put_plan_with_unrendered_shot(project["id"])
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["plan"]["shots"][0]["clip_path"] is None
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+def test_render_rejects_unrendered_enabled_shots_with_400_listing_shot_ids():
+    project = projects.create_project("未生成render拒否テスト", 10.0, "mock", status="draft")
+    try:
+        put_resp = _put_plan_with_unrendered_shot(project["id"])
+        assert put_resp.status_code == 200, put_resp.text
+
+        render_resp = client.post("/api/projects/{}/render".format(project["id"]))
+        assert render_resp.status_code == 400
+        body = render_resp.json()
+        assert body["error"]["code"] == "unrendered_shots"
+        assert "s11" in body["error"]["message"]
+
+        # ステータスは "rendering" に遷移させず、再送信を妨げない
+        reloaded = projects.get_project(project["id"])
+        assert reloaded["status"] != "rendering"
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+def test_render_ignores_unrendered_shot_when_disabled():
+    project = projects.create_project("無効ショットは無視テスト", 10.0, "mock", status="draft")
+    try:
+        put_resp = _put_plan_with_unrendered_shot(project["id"], extra_shot_overrides={"enabled": False})
+        assert put_resp.status_code == 200, put_resp.text
+
+        render_resp = client.post("/api/projects/{}/render".format(project["id"]))
+        # 有効ショットが1本もないため別のエラー（unrendered_shots以外）にはなるが、
+        # 少なくとも「無効ショットの未生成」を理由にした400にはならないことを確認する。
+        if render_resp.status_code == 400:
+            assert render_resp.json()["error"]["code"] != "unrendered_shots"
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
 def _drain_sse_until_done(path, timeout_sec=120):
     """SSEストリームを読み、`{"done":true,...}` イベントが来るまでブロックして返す。"""
     import time

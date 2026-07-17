@@ -15,7 +15,9 @@ project.json:
     "subtitle_style": {"font_size","accent_color","position"},
   },
   "renders": [{"path","ts","ok"}],
-  "error": str|None
+  "error": str|None,
+  "error_history": [{"ts","kind":"generate"|"render"|"resume","message"}],
+  "director": {"model_used","source","quality"}|None
 }
 
 Python 3.9 互換構文のみ。
@@ -125,8 +127,21 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
         },
         "renders": [],
         "error": None,
+        "error_history": [],
+        "director": None,
     }
     save_project(project)
+    return project
+
+
+def append_error_history(project, kind, message):
+    """project辞書に失敗履歴を追記する（project["error"]の上書きで元の原因が消えないようにする）。
+
+    project["error"]は常に「直近の」失敗理由を指すが、error_historyは追記のみで
+    上書きしない。呼び出し側は追記後にsave_project()すること（このヘルパー自体は保存しない）。
+    """
+    history = project.setdefault("error_history", [])
+    history.append({"ts": _now_iso(), "kind": kind, "message": message})
     return project
 
 
@@ -146,9 +161,14 @@ def get_project(project_id):
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
+        project = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
+    # 旧project.json（本機能追加前に作成されたもの）にはerror_history/directorが
+    # 無いため、既定値を補って呼び出し側が常に安全に扱えるようにする。
+    project.setdefault("error_history", [])
+    project.setdefault("director", None)
+    return project
 
 
 def list_projects():
@@ -240,6 +260,32 @@ def _is_number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def unrendered_enabled_shot_ids(plan):
+    """有効(enabled)かつclip_path未生成（None/空）のショットidを順序どおり返す。
+
+    render開始前のガード（POST /api/projects/{id}/render）専用の軽量チェック。
+    validate_plan()とは別関数にしているのは、PUT /plan（下書き保存）では
+    未生成ショットの保存自体は許可しつつ、render開始だけは拒否したいため
+    （＝許容範囲がエンドポイントによって異なる）。
+    """
+    if not isinstance(plan, dict):
+        return []
+    shots = plan.get("shots")
+    if not isinstance(shots, list):
+        return []
+    ids = []
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        if not shot.get("enabled", True):
+            continue
+        if not shot.get("clip_path"):
+            sid = shot.get("id")
+            if sid:
+                ids.append(sid)
+    return ids
+
+
 def validate_plan(project_id, plan, ng_words=None):
     """plan（Studio形式）を検証する。Returns (ok:bool, errors:list[str], normalized:dict|None)。
 
@@ -282,16 +328,21 @@ def validate_plan(project_id, plan, ng_words=None):
             errors.append("plan.shots[{}(id={})].enabled は真偽値である必要があります".format(i, sid))
             continue
 
-        clip_path = shot.get("clip_path")
-        if not clip_path or not isinstance(clip_path, str):
-            errors.append("plan.shots[{}(id={})].clip_path は非空文字列である必要があります".format(i, sid))
-            continue
-        resolved_clip = resolve_clip_path(project_id, clip_path)
-        if not resolved_clip.exists():
-            errors.append(
-                "plan.shots[{}(id={})].clip_path が参照するファイルが存在しません: {}".format(i, sid, clip_path)
-            )
-            continue
+        # clip_path は None/空文字を許容する（= まだビジュアル生成が完了していないショット。
+        # BUG-10対応でjobs.pyはdirector企画をclip_path=Noneのまま先行保存する設計のため、
+        # ここで非空を必須にするとサーバ自身が書いたデータをサーバ自身が拒否してしまう）。
+        # 非空の場合のみ、参照ファイルの実在チェックを行う。
+        clip_path = shot.get("clip_path") or None
+        if clip_path is not None:
+            if not isinstance(clip_path, str):
+                errors.append("plan.shots[{}(id={})].clip_path は文字列またはnullである必要があります".format(i, sid))
+                continue
+            resolved_clip = resolve_clip_path(project_id, clip_path)
+            if not resolved_clip.exists():
+                errors.append(
+                    "plan.shots[{}(id={})].clip_path が参照するファイルが存在しません: {}".format(i, sid, clip_path)
+                )
+                continue
 
         source_duration = shot.get("source_duration")
         if not _is_number(source_duration) or source_duration <= 0:

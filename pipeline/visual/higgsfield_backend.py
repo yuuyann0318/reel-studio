@@ -34,6 +34,7 @@ import math
 import os
 import shutil
 import subprocess
+import time
 
 from pipeline.config import load_config
 from pipeline.visual.base import VisualBackend, VisualBackendError
@@ -88,6 +89,14 @@ class HiggsfieldJobFailedError(VisualBackendError):
 
 class HiggsfieldCostLimitError(VisualBackendError):
     """見積コストが max_credits_per_shot を超えるため、ジョブを投入せず中断した場合。"""
+
+
+class HiggsfieldSafetyRejectedError(VisualBackendError):
+    """安全フィルタ(nsfw/moderation/flagged)によりジョブが拒否された場合（1回の試行内部で使う中間例外）。
+
+    generate() 内の安全リトライループがこれを捕捉してプロンプトを差し替え再試行する。
+    最終試行でも拒否された場合は generate() が日本語の VisualBackendError に変換して送出する。
+    """
 
 
 def _resolve_cli_bin(configured):
@@ -220,6 +229,103 @@ def _is_timeout_error(stderr_text):
     return "timed out" in lowered or "timeout" in lowered
 
 
+# ★一時的接続失敗への耐性（実機確認・2026-07-17）: `higgsfield generate create` が
+# `Error: request failed (no response received)` という一時的な接続失敗(exit 3)で
+# 落ちることがあり、直後にCLIを叩くと正常に通る。14ショット中1回でも起きると全体が
+# 失敗していたため、指数バックオフ付きリトライで吸収する。認証エラー
+# (`_is_auth_error`)やバリデーションエラー(例: "Input should be")はここに該当せず、
+# 再試行しても無駄なので即座に失敗させる。
+_TRANSIENT_ERROR_PATTERNS = (
+    "no response received",
+    "request failed",
+    "timed out",
+    "timeout",
+    "connection",
+)
+
+# リトライ回数・バックオフ秒数(5秒→15秒)。要素数=最大リトライ回数。
+_DEFAULT_RETRY_BACKOFF_SEC = (5, 15)
+
+
+def _is_transient_error(text):
+    """例外メッセージ(str化したもの)が一時的エラーのパターンに一致するか判定する。"""
+    lowered = (text or "").lower()
+    return any(pattern in lowered for pattern in _TRANSIENT_ERROR_PATTERNS)
+
+
+# ★安全フィルタ誤検知への耐性（実機確認・2026-07-17）: 完全に無害なプロンプト
+# （例: "bold warning-style graphic with a soft yellow gradient background and a
+# simple exclamation icon, clean modern design, vertical 9:16"）で
+# `Error: job <uuid> ended with status "nsfw"` が返ることがある(安全フィルタの誤検知)。
+# これは_TRANSIENT_ERROR_PATTERNSには一致しない(同一プロンプトの単純再試行は無意味な
+# ため、意図的にtransient扱いにしない)。代わりにプロンプトを段階的に安全側へ言い換えて
+# create からやり直す専用リトライを generate() 内に持つ。
+_SAFETY_REJECTION_MARKERS = ("nsfw", "moderation", "flagged")
+
+# 安全リトライで使う言い換えプロンプト。2回目は元プロンプトに安全側の接頭辞を付加、
+# 3回目(最終)は常に安全な抽象的ビジュアルへ完全差し替えする(動画として破綻しない汎用画)。
+_SAFETY_RETRY_PREFIX = "wholesome, family-friendly, safe-for-work, "
+_SAFETY_RETRY_FALLBACK_PROMPT = (
+    "abstract geometric shapes, soft gradient background, clean minimal modern design, vertical 9:16"
+)
+_MAX_SAFETY_ATTEMPTS = 3
+
+
+def _is_safety_rejection(text):
+    """wait結果のstatus/errorやCLIの非ゼロ終了エラーメッセージが、安全フィルタ(nsfw/moderation/
+    flagged)による拒否を示しているか判定する（副作用なし・テスト対象）。
+
+    例: `Error: job <uuid> ended with status "nsfw"` や、statusフィールドそのものが
+    "nsfw"/"moderation"/"flagged" のケースの両方をこの1関数でカバーする。
+    """
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _SAFETY_REJECTION_MARKERS)
+
+
+def _build_safety_retry_prompt(original_prompt, attempt):
+    """安全フィルタ拒否後の再試行プロンプトを組み立てる（副作用なし・テスト対象）。
+
+    attempt: 1始まりの試行回数。
+      1回目: 元プロンプトのまま。
+      2回目: 元プロンプトの先頭に安全側の接頭辞を付加。
+      3回目(最終): 常に安全な抽象プロンプトへ完全差し替え。
+    """
+    if attempt <= 1:
+        return original_prompt
+    if attempt == 2:
+        return _SAFETY_RETRY_PREFIX + original_prompt
+    return _SAFETY_RETRY_FALLBACK_PROMPT
+
+
+def _call_with_retry(fn, label, max_retries=2, backoff_sec=_DEFAULT_RETRY_BACKOFF_SEC, sleep_fn=None):
+    """fn()を実行し、一時的エラーの場合のみ指数バックオフで最大max_retries回まで再試行する。
+
+    - `HiggsfieldAuthError`（認証切れ）は一時的エラーではないため即座に再送出する（再試行しない）。
+    - それ以外の `VisualBackendError` は、メッセージが `_is_transient_error` に一致する場合のみ
+      リトライ対象。一致しない場合（バリデーションエラー等）は即座に再送出する。
+    - `sleep_fn` はテストでmonkeypatchできるよう外部注入可能にしてある（未指定時は `time.sleep`
+      をその都度参照するため、`time.sleep` 自体をmonkeypatchしても効く）。
+    """
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except HiggsfieldAuthError:
+            raise
+        except VisualBackendError as exc:
+            if not _is_transient_error(str(exc)):
+                raise
+            if attempt >= max_retries:
+                raise VisualBackendError(
+                    "{}が一時的エラーで失敗しました(試行{}回・最大{}回のリトライを含む): {}".format(
+                        label, attempt + 1, max_retries, str(exc)[:500]
+                    )
+                )
+            sleep = sleep_fn or time.sleep
+            sleep(backoff_sec[min(attempt, len(backoff_sec) - 1)])
+            attempt += 1
+
+
 def _run_cli(cmd, timeout_sec):
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, timeout=timeout_sec)
@@ -289,16 +395,28 @@ class HiggsfieldBackend(VisualBackend):
         return _parse_cost(stdout)
 
     def submit_job(self, shot: dict) -> str:
-        cmd = _build_create_cmd(self.cli_bin, self.model, shot, self.resolution)
-        stdout = _run_cli(cmd, timeout_sec=60)
-        return _parse_job_id(stdout)
+        # ★job_id取得前（=まだジョブが投入できていない/課金が確定していない段階）の
+        # 一時的エラーのみをここでリトライする。二重課金防止のため、job_id取得後は
+        # このメソッドを呼び直さない（wait側の再試行は wait_for_result 内で完結させる）。
+        def _do():
+            cmd = _build_create_cmd(self.cli_bin, self.model, shot, self.resolution)
+            stdout = _run_cli(cmd, timeout_sec=60)
+            return _parse_job_id(stdout)
+
+        return _call_with_retry(_do, label="higgsfield generate create")
 
     def wait_for_result(self, job_id: str) -> dict:
-        cmd = _build_wait_cmd(self.cli_bin, job_id, self.poll_timeout_sec, self.poll_interval_sec)
-        # Python側subprocessタイムアウトはCLI自身の--timeoutより余裕を持たせる（CLI側の
-        # タイムアウト処理を正としつつ、CLIが応答不能になった場合の保険として使う）。
-        stdout = _run_cli(cmd, timeout_sec=self.poll_timeout_sec + 60)
-        return _parse_wait_result(stdout)
+        # ★waitのみ再試行（二重課金防止）: createは既に成功しjob_idを取得済みのため、
+        # ここで一時的エラーが起きてもcreateをやり直さず、同じjob_idに対するwaitだけを
+        # 再試行する。
+        def _do():
+            cmd = _build_wait_cmd(self.cli_bin, job_id, self.poll_timeout_sec, self.poll_interval_sec)
+            # Python側subprocessタイムアウトはCLI自身の--timeoutより余裕を持たせる（CLI側の
+            # タイムアウト処理を正としつつ、CLIが応答不能になった場合の保険として使う）。
+            stdout = _run_cli(cmd, timeout_sec=self.poll_timeout_sec + 60)
+            return _parse_wait_result(stdout)
+
+        return _call_with_retry(_do, label="higgsfield generate wait(job_id={})".format(job_id))
 
     def fetch_result(self, job_id: str, out_path: str, result_url=None) -> None:
         if not result_url:
@@ -319,7 +437,14 @@ class HiggsfieldBackend(VisualBackend):
 
     # -- 統合フロー --------------------------------------------------------
 
-    def generate(self, shot: dict, out_path: str) -> dict:
+    def _generate_once(self, shot: dict, out_path: str) -> dict:
+        """1回分の生成試行(cost見積→submit→wait→fetch)。
+
+        安全フィルタ拒否(nsfw/moderation/flagged)を検知した場合は
+        `HiggsfieldSafetyRejectedError` を送出する(generate()の安全リトライループが捕捉する)。
+        それ以外の失敗(認証切れ/コスト超過/通常のジョブ失敗/タイムアウト)は従来どおり
+        該当の例外型でそのまま送出する。
+        """
         cost = self.estimate_cost(shot)
         if cost > self.max_credits_per_shot:
             raise HiggsfieldCostLimitError(
@@ -330,14 +455,27 @@ class HiggsfieldBackend(VisualBackend):
                 )
             )
 
-        job_id = self.submit_job(shot)
-        result = self.wait_for_result(job_id)
+        try:
+            job_id = self.submit_job(shot)
+            result = self.wait_for_result(job_id)
+        except HiggsfieldAuthError:
+            raise
+        except VisualBackendError as exc:
+            if _is_safety_rejection(str(exc)):
+                raise HiggsfieldSafetyRejectedError(str(exc))
+            raise
+
         status = result["status"]
 
         if status == "failed":
+            error_text = result.get("error") or "不明なエラー"
+            if _is_safety_rejection(error_text):
+                raise HiggsfieldSafetyRejectedError(error_text)
             raise HiggsfieldJobFailedError(
-                "higgsfield ジョブ失敗 (job_id={}): {}".format(job_id, result.get("error") or "不明なエラー")
+                "higgsfield ジョブ失敗 (job_id={}): {}".format(job_id, error_text)
             )
+        if _is_safety_rejection(status):
+            raise HiggsfieldSafetyRejectedError("status={}".format(status))
         if status != "completed":
             raise HiggsfieldTimeoutError(
                 "higgsfield ジョブが完了ステータスになりませんでした (job_id={}, status={})".format(
@@ -354,3 +492,31 @@ class HiggsfieldBackend(VisualBackend):
             "credits_estimated": cost,
             "result_url": result.get("result_url"),
         }
+
+    def generate(self, shot: dict, out_path: str) -> dict:
+        # ★安全フィルタ誤検知対策(2026-07-17実機確認): nsfw等で拒否されたら、プロンプトを
+        # 段階的に安全側へ言い換えてcreateからやり直す。nsfw失敗はクレジット未消課金のため
+        # (実測で残高確認済み)、createの再試行は二重課金にならない。
+        original_prompt = shot.get("visual_prompt", "")
+        last_safety_error = None
+        for attempt in range(1, _MAX_SAFETY_ATTEMPTS + 1):
+            attempt_shot = dict(shot)
+            attempt_shot["visual_prompt"] = _build_safety_retry_prompt(original_prompt, attempt)
+            try:
+                meta = self._generate_once(attempt_shot, out_path)
+            except HiggsfieldSafetyRejectedError as exc:
+                last_safety_error = exc
+                if attempt < _MAX_SAFETY_ATTEMPTS:
+                    continue
+                raise VisualBackendError(
+                    "映像AIの安全フィルタで拒否されました(誤検知の可能性)。シーンの説明"
+                    "(visual_prompt)を変えて再試行してください: {}"
+                    "(安全リトライ{}回すべて拒否・最終試行のエラー: {})".format(
+                        original_prompt[:80], _MAX_SAFETY_ATTEMPTS, str(last_safety_error)[:300]
+                    )
+                )
+            meta["safety_retry_attempt"] = attempt
+            meta["prompt_used"] = attempt_shot["visual_prompt"]
+            return meta
+        # 理論上到達しない(ループは必ずreturnかraiseで抜ける)。
+        raise VisualBackendError("higgsfield: 安全リトライ処理で予期しない状態になりました。")

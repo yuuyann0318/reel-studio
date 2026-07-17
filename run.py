@@ -127,7 +127,7 @@ def _timed_stage(report, name):
     return _Ctx()
 
 
-def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg):
+def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default"):
     report = {
         "theme": theme,
         "target_duration_sec": target_duration_sec,
@@ -147,10 +147,14 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg):
     plan = None
     try:
         with _timed_stage(report, "director"):
-            plan = director.run_director(theme, cfg, target_duration_sec=target_duration_sec, no_llm=no_llm)
+            plan = director.run_director(
+                theme, cfg, target_duration_sec=target_duration_sec, no_llm=no_llm, quality=quality, style=style
+            )
             (run_dir / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
             report["stages"]["director"]["source"] = plan.get("meta", {}).get("source")
             report["stages"]["director"]["model_used"] = plan.get("meta", {}).get("model_used")
+            report["stages"]["director"]["quality"] = plan.get("meta", {}).get("quality")
+            report["stages"]["director"]["style"] = plan.get("meta", {}).get("style", style)
             report["stages"]["director"]["shot_count"] = len(plan.get("shots", []))
     except Exception:
         _write_report(report)
@@ -323,13 +327,25 @@ def main(argv=None) -> int:
     parser.add_argument("--backend", default=None, choices=["mock", "higgsfield", "cloudapi"], help="ビジュアル生成バックエンド")
     parser.add_argument("--aspect", default="9:16", choices=["9:16"], help="現状9:16のみ対応")
     parser.add_argument("--no-llm", action="store_true", help="claude CLIを使わず決定論的テンプレートで企画生成する")
+    parser.add_argument(
+        "--quality", default=None, choices=["supreme", "single"],
+        help="AIディレクターの生成品質。supreme=3段多段生成(既定) / single=従来の一発出し。未指定はconfig.jsonのdirector_quality",
+    )
+    parser.add_argument(
+        "--style", default="default", choices=["default", "vertical_hook"],
+        help="AIディレクターの企画スタイル。default=従来の企画・カット割り(既定) / "
+             "vertical_hook=縦書きテロップ・高速カット向けのTTP構成",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config()
     target_duration_sec = args.duration if args.duration is not None else cfg.get("target_duration_sec", 30)
     backend_name = args.backend or cfg.get("backend", "mock")
+    quality = args.quality or cfg.get("director_quality", "supreme")
 
-    report = run_pipeline(args.theme, target_duration_sec, backend_name, args.no_llm, cfg)
+    report = run_pipeline(
+        args.theme, target_duration_sec, backend_name, args.no_llm, cfg, quality=quality, style=args.style
+    )
 
     print("[run] run_id={}".format(report.get("run_id")))
     for name, info in report["stages"].items():

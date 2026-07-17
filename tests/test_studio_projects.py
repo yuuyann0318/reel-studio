@@ -180,3 +180,60 @@ def test_resolve_clip_path_uses_projects_root_parent():
     resolved = projects.resolve_clip_path(project["id"], clip_path)
     assert resolved.exists()
     assert resolved == projects.clips_dir(project["id"]) / "s1.mp4"
+
+
+# ---------------------------------------------------------------------------
+# BUG-invalid_plan回帰: クリップ未生成ショット（clip_path=None）を含むplanの保存
+# （生成途中失敗プロジェクトをStudioで保存できることの再現テスト）
+# ---------------------------------------------------------------------------
+
+def test_validate_plan_accepts_unrendered_shot_with_null_clip_path():
+    project = _make_project_with_clip()
+    shot = _base_shot(project)
+    shot["clip_path"] = None
+    plan = {"shots": [shot], "narration_text": "こんにちは"}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert ok, errors
+    assert normalized["shots"][0]["clip_path"] is None
+
+
+def test_validate_plan_accepts_unrendered_shot_with_empty_clip_path():
+    project = _make_project_with_clip()
+    shot = _base_shot(project)
+    shot["clip_path"] = ""
+    plan = {"shots": [shot], "narration_text": ""}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert ok, errors
+    assert normalized["shots"][0]["clip_path"] is None
+
+
+def test_validate_plan_still_rejects_nonexistent_clip_file_when_clip_path_present():
+    project = _make_project_with_clip()
+    shot = _base_shot(project, clip_path=projects.media_relpath_for_clip(project["id"], "does_not_exist.mp4"))
+    plan = {"shots": [shot], "narration_text": ""}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert not ok
+    assert any("存在しません" in e for e in errors)
+
+
+def test_validate_plan_still_validates_trim_and_duration_for_unrendered_shot():
+    project = _make_project_with_clip()
+    shot = _base_shot(project, start=0.0, end=999.0)
+    shot["clip_path"] = None
+    plan = {"shots": [shot], "narration_text": ""}
+    ok, errors, normalized = projects.validate_plan(project["id"], plan)
+    assert not ok
+    assert any("trim範囲" in e for e in errors)
+
+
+def test_unrendered_enabled_shot_ids_lists_enabled_shots_without_clip():
+    project = _make_project_with_clip()
+    s1 = _base_shot(project)
+    s1["id"], s1["order"] = "s1", 0
+    s2 = _base_shot(project)
+    s2["id"], s2["order"], s2["clip_path"] = "s2", 1, None
+    s3 = _base_shot(project)
+    s3["id"], s3["order"], s3["clip_path"], s3["enabled"] = "s3", 2, None, False
+    plan = {"shots": [s1, s2, s3], "narration_text": ""}
+    ids = projects.unrendered_enabled_shot_ids(plan)
+    assert ids == ["s2"]

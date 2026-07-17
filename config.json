@@ -1,13 +1,14 @@
 {
   "backend": "mock",
   "claude_bin": "/Users/yuuya/.local/bin/claude",
-  "claude_model": "claude-fable-5",
+  "claude_model": "claude-opus-4-8",
   "claude_timeout_sec": 600,
   "resolution": [1080, 1920],
   "aspect": "9:16",
   "target_duration_sec": 30,
   "voice": "Kyoko",
   "default_subtitle_style": "default",
+  "director_quality": "supreme",
   "brand_rules": {
     "ng_words": [
       "絶対稼げる",

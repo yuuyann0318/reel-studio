@@ -213,6 +213,40 @@ body.theme-simple {
   margin-top: 10px;
 }
 
+/* ---------- 台本メタ / エラー履歴（続きから生成） ---------- */
+.s-director-note {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: #F5F6FA;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+}
+.s-director-note--warn {
+  color: #B23A3F;
+  background: #FDEEEE;
+  border-color: #F5C9CB;
+}
+.s-error-history { margin-top: 10px; }
+.s-error-history__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.s-error-history__item {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: #F5F6FA;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  word-break: break-word;
+}
+.s-error-history__item:last-child { margin-bottom: 0; }
+
 /* ---------- 過去の動画 ---------- */
 .s-history-list { display: flex; flex-direction: column; gap: 10px; }
 .s-history-card {

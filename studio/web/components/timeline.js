@@ -63,7 +63,7 @@ export function renderTimeline(container, state, actions) {
            aria-label="ショット${i + 1}: ${escapeHtml(shot.caption)}${shot.enabled ? "" : "（無効）"}">
         <div class="trim-handle trim-handle--left" data-shot-id="${escapeHtml(shot.id)}" data-edge="start"></div>
         <div class="shot-block__thumb">
-          ${!shot.enabled ? `<span class="shot-block__badge">無効</span>` : ""}
+          ${!shot.enabled ? `<span class="shot-block__badge">無効</span>` : !shot.clip_path ? `<span class="shot-block__badge">未生成</span>` : ""}
         </div>
         <div class="shot-block__label">${i + 1}. ${escapeHtml(shot.caption)}</div>
         <div class="trim-handle trim-handle--right" data-shot-id="${escapeHtml(shot.id)}" data-edge="end"></div>

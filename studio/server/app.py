@@ -31,7 +31,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from pipeline import render
 from pipeline.config import load_config, project_root, output_dir
 from studio.server import projects
-from studio.server.jobs import job_manager, RenderConflictError
+from studio.server.jobs import job_manager, RenderConflictError, ResumeNotAllowedError, UnrenderedShotsError
 
 app = FastAPI(title="Reel Studio API")
 
@@ -174,7 +174,11 @@ async def get_project(project_id: str):
     project = projects.get_project(project_id)
     if project is None:
         _not_found("プロジェクトが見つかりません: {}".format(project_id))
-    return project
+    # unrendered_shot_ids はディスクに保存しない計算値（＝「続きから生成」ボタンの表示可否を
+    # フロントが判定するための一覧）。project.jsonのフィールドはそのまま(既存フィールドは壊さない)。
+    response = dict(project)
+    response["unrendered_shot_ids"] = projects.unrendered_enabled_shot_ids(project.get("plan") or {})
+    return response
 
 
 @app.put("/api/projects/{project_id}/plan")
@@ -184,6 +188,12 @@ async def update_plan(project_id: str, request: Request):
     project = projects.get_project(project_id)
     if project is None:
         _not_found("プロジェクトが見つかりません: {}".format(project_id))
+    if project.get("status") in ("generating", "rendering"):
+        # 実行中プロジェクトへのplan書き換えを禁止する: try_start_render()の受理判定
+        # （unrendered_enabled_shot_ids）〜ワーカー実行の間にPUT /planで有効ショットの
+        # clip_pathをnullへ書き換えられるレースを塞ぐ（jobs.py _run_render 側の
+        # 再チェックと合わせた二重の防御）。
+        _conflict("このプロジェクトは処理中のため編集できません。完了後に再度お試しください")
 
     plan = await request.json()
     cfg = load_config()
@@ -211,6 +221,36 @@ async def render_project(project_id: str):
         job_id = job_manager.try_start_render(project_id)
     except RenderConflictError:
         _conflict("このプロジェクトは処理中です。完了後に再度お試しください")
+        return
+    except UnrenderedShotsError as exc:
+        return _error_response(
+            400, "unrendered_shots",
+            "クリップが未生成の有効なショットがあります。先に生成をやり直すか無効化してください: {}".format(
+                ", ".join(exc.shot_ids)
+            ),
+        )
+    if job_id is None:
+        _not_found("プロジェクトが見つかりません: {}".format(project_id))
+    return {"job_id": job_id}
+
+
+@app.post("/api/projects/{project_id}/resume", status_code=202)
+async def resume_project(project_id: str):
+    """続きから生成: enabledかつclip_path未生成のショットだけを作り直し、揃ったら書き出しまで進める。
+
+    status が generating/rendering の場合は409（try_start_render と同じ排他ロジック）。
+    存在しなければ404。
+    """
+    if not projects.is_safe_project_id(project_id):
+        _bad_request("invalid_project_id", "project_idの形式が不正です")
+
+    try:
+        job_id = job_manager.try_start_resume(project_id)
+    except RenderConflictError:
+        _conflict("このプロジェクトは処理中です。完了後に再度お試しください")
+        return
+    except ResumeNotAllowedError:
+        _conflict("このプロジェクトは失敗状態ではないため、続きから生成は不要です")
         return
     if job_id is None:
         _not_found("プロジェクトが見つかりません: {}".format(project_id))

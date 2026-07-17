@@ -17,6 +17,12 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+# ジョブ種別 "resume" を追加（続きから生成）:
+#   status が failed で、有効(enabled)ショットの一部にclip_path=nullが残っているプロジェクトに対し、
+#   未生成ショットだけをバックエンドで生成し直し、揃ったら_render_projectで書き出しまで進める。
+#   途中でサーバが再起動した場合（generating/rendering のまま止まっていた場合）は、
+#   JobManager初期化時のスタック回復でstatus="failed"に倒し、resumeで再開できるようにする。
+
 import json
 import re
 import shutil
@@ -85,6 +91,21 @@ class RenderConflictError(Exception):
     """既に generating/rendering 中のプロジェクトへの重複render要求。"""
 
 
+class ResumeNotAllowedError(Exception):
+    """failed以外のプロジェクトへのresume要求（再開の必要がない状態）。"""
+
+
+class UnrenderedShotsError(Exception):
+    """有効(enabled)ショットにclip_path未生成のものが含まれるrender要求。
+
+    render開始前に明確なエラーとして拒否する（jobワーカー内でこっそり失敗させない）。
+    """
+
+    def __init__(self, shot_ids):
+        self.shot_ids = list(shot_ids)
+        super().__init__("未生成のショットがあります: {}".format(", ".join(self.shot_ids)))
+
+
 class JobManager:
     def __init__(self):
         self.cfg = load_config()
@@ -94,8 +115,40 @@ class JobManager:
         self._sub_lock = threading.Lock()
         self._subscribers = {}
         self._project_status_lock = threading.Lock()  # render開始時のstatus確認+書換をアトミックにする
+        self._recover_stuck_projects()
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
         self._worker.start()
+
+    # --- 起動時のスタック回復 -------------------------------------------
+
+    def _recover_stuck_projects(self):
+        """サーバ起動時、status が generating/rendering のまま残っているプロジェクトを回復する。
+
+        以前のプロセスがクラッシュ/再起動で終了すると、ワーカースレッド（メモリ上の状態）が
+        消えるため project.json 上の status だけが generating/rendering のまま永久に残り、
+        UIが「処理中」表示で固まってしまう。かつ従来はここから再開する手段がUI/APIどちらにも
+        無かった。ここで明確に failed へ倒し、resume で再開できることを案内する。
+        """
+        try:
+            summaries = projects.list_projects()
+        except Exception:
+            return
+        for summary in summaries:
+            project_id = summary.get("id")
+            if not project_id:
+                continue
+            project = projects.get_project(project_id)
+            if project is None:
+                continue
+            prior_status = project.get("status")
+            if prior_status not in ("generating", "rendering"):
+                continue
+            kind = "generate" if prior_status == "generating" else "render"
+            message = "サーバ再起動により処理が中断されました。続きから生成で再開できます。"
+            project["status"] = "failed"
+            project["error"] = message
+            projects.append_error_history(project, kind, message)
+            projects.save_project(project)
 
     # --- 公開API -----------------------------------------------------
 
@@ -131,9 +184,39 @@ class JobManager:
                 return None
             if project.get("status") in ("generating", "rendering"):
                 raise RenderConflictError(project_id)
+            unrendered_ids = projects.unrendered_enabled_shot_ids(project.get("plan") or {})
+            if unrendered_ids:
+                raise UnrenderedShotsError(unrendered_ids)
             project["status"] = "rendering"
             projects.save_project(project)
             return self.start_render(project_id)
+
+    def start_resume(self, project_id):
+        job_id = _new_job_id()
+        with self._lock:
+            self._jobs[job_id] = {"job_id": job_id, "kind": "resume", "status": "queued"}
+        self._queue.put(("resume", job_id, {"project_id": project_id}))
+        return job_id
+
+    def try_start_resume(self, project_id):
+        """続きから生成の受理判定+status遷移+enqueueをアトミックに行う（try_start_renderと同じ設計）。
+
+        Returns: job_id（受理）/ None（プロジェクトが存在しない）。
+        Raises: RenderConflictError（既にgenerating/rendering中）/
+                ResumeNotAllowedError（failed以外＝再開の必要がない状態。ready等に
+                resumeが通ると不要な全体再レンダリングとrenders履歴の重複が起きるため拒否）。
+        """
+        with self._project_status_lock:
+            project = projects.get_project(project_id)
+            if project is None:
+                return None
+            if project.get("status") in ("generating", "rendering"):
+                raise RenderConflictError(project_id)
+            if project.get("status") != "failed":
+                raise ResumeNotAllowedError(project_id)
+            project["status"] = "generating"
+            projects.save_project(project)
+            return self.start_resume(project_id)
 
     def subscribe(self, job_id):
         q = Queue()
@@ -181,6 +264,8 @@ class JobManager:
             try:
                 if kind == "generate":
                     self._run_generate(job_id, payload)
+                elif kind == "resume":
+                    self._run_resume(job_id, payload)
                 else:
                     self._run_render(job_id, payload)
             except Exception as exc:  # 予期しない例外はジョブ失敗として握りつぶす（ワーカーは止めない）
@@ -204,6 +289,7 @@ class JobManager:
             if project is not None:
                 project["status"] = "failed"
                 project["error"] = message
+                projects.append_error_history(project, "generate", message)
                 projects.save_project(project)
             self._emit(job_id, "error", 100, message)
             self._finish(job_id, ok=False, path=None)
@@ -215,6 +301,20 @@ class JobManager:
             fail("企画生成に失敗しました: {}".format(exc))
             return
         self._emit(job_id, "director", 20, "企画生成が完了しました（source={}）".format(plan.get("meta", {}).get("source")))
+
+        # 台本メタ（どのモデルで作られたか・AI生成かルールベース代替か）をprojectに永続化する。
+        # UI（かんたんモード）はこれを見て「台本AI: <model_used>」または
+        # 「台本: 自動テンプレ(AI接続失敗)」の注意表示を出す。
+        plan_meta = plan.get("meta") or {}
+        director_meta = {
+            "model_used": plan_meta.get("model_used"),
+            "source": plan_meta.get("source"),
+            "quality": plan_meta.get("quality"),
+        }
+        project = projects.get_project(project_id)
+        if project is not None:
+            project["director"] = director_meta
+            projects.save_project(project)
 
         ng_words = list(compliance.DEFAULT_NG_WORDS)
         for w in (cfg.get("brand_rules") or {}).get("ng_words") or []:
@@ -338,6 +438,7 @@ class JobManager:
             if project is not None:
                 project["status"] = "failed"
                 project["error"] = message
+                projects.append_error_history(project, "render", message)
                 projects.save_project(project)
             self._emit(job_id, "error", 100, message)
             self._finish(job_id, ok=False, path=None)
@@ -357,6 +458,16 @@ class JobManager:
             fail("編集内容の検証に失敗しました: {}".format("; ".join(errors)))
             return
 
+        # try_start_render() の受理時点と、このワーカーが実際に実行される時点との間に
+        # PUT /plan で有効ショットの clip_path が null に書き換えられるレースがあり得る
+        # （validate_plan は clip_path=None を許容するため、これ自体は検証を通ってしまう）。
+        # ここで再度チェックし、TypeError（Path(None)）として_render_projectの奥深くで
+        # 素の例外を出す前に、明確な失敗メッセージでジョブを止める。
+        unrendered_ids = projects.unrendered_enabled_shot_ids(normalized)
+        if unrendered_ids:
+            fail("クリップが未生成の有効なショットがあります: {}".format(", ".join(unrendered_ids)))
+            return
+
         project["status"] = "rendering"
         projects.save_project(project)
 
@@ -368,6 +479,118 @@ class JobManager:
             out_path, out_duration = _render_project(project_id, normalized, cfg)
         except Exception as exc:
             fail("レンダリングに失敗しました: {}".format(exc))
+            return
+
+        project = projects.get_project(project_id)
+        project["status"] = "ready"
+        project["renders"] = (project.get("renders") or []) + [
+            {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
+        ]
+        projects.save_project(project)
+
+        self._emit(job_id, "render", 100, "完成しました（尺 {:.1f}秒）".format(out_duration))
+        self._finish(job_id, ok=True, path=out_path)
+
+    # --- resume（続きから生成: 未生成ショットだけ作り直して最後まで進める） ----------
+
+    def _run_resume(self, job_id, payload):
+        """failed状態のプロジェクトについて、clip_path未生成の有効ショットだけを生成し直し、
+        揃ったら_render_projectで書き出しまで進める（クレジット消費済みの既存クリップは再生成しない）。
+        """
+        project_id = payload["project_id"]
+        cfg = self.cfg
+
+        def fail(message):
+            project = projects.get_project(project_id)
+            if project is not None:
+                project["status"] = "failed"
+                project["error"] = message
+                projects.append_error_history(project, "resume", message)
+                projects.save_project(project)
+            self._emit(job_id, "error", 100, message)
+            self._finish(job_id, ok=False, path=None)
+
+        project = projects.get_project(project_id)
+        if project is None:
+            fail("プロジェクトが見つかりません: {}".format(project_id))
+            return
+
+        plan = project.get("plan") or {}
+        shots = plan.get("shots") or []
+        pending_ids = set(projects.unrendered_enabled_shot_ids(plan))
+        pending_shots = [s for s in shots if s.get("id") in pending_ids]
+
+        clips_dir = projects.clips_dir(project_id)
+        clips_dir.mkdir(parents=True, exist_ok=True)
+
+        self._emit(job_id, "visual", 25, "続きのショットを生成中… (0/{})".format(len(pending_shots)))
+        try:
+            backend = get_backend(project.get("backend") or "mock", cfg)
+        except Exception as exc:
+            fail("ビジュアルバックエンドの初期化に失敗しました: {}".format(exc))
+            return
+
+        succeeded_ids = []
+        for i, shot in enumerate(pending_shots):
+            shot_id = shot.get("id")
+            # studio plan の shot（id/order/enabled/prompt/caption/clip_path/source_duration/trim）を
+            # バックエンドが期待する shot 形（id/visual_prompt/motion_preset/duration_sec/caption_jp）へ
+            # マッピングする。studio plan には motion_preset が無いため既定値"static"で補う
+            # （既存project=本機能追加前に作られたものでも安全に動くようにするための既定値）。
+            backend_shot = {
+                "id": shot_id,
+                "visual_prompt": shot.get("prompt") or "",
+                "motion_preset": shot.get("motion_preset") or "static",
+                "duration_sec": shot.get("source_duration") or 5.0,
+                "caption_jp": shot.get("caption") or "",
+            }
+            raw_path = clips_dir / "{}.raw.mp4".format(shot_id)
+            norm_path = clips_dir / "{}.mp4".format(shot_id)
+            try:
+                backend.generate(backend_shot, str(raw_path))
+                cmd = render.build_normalize_clip_cmd(
+                    cfg["ffmpeg_bin"], str(raw_path), str(norm_path), duration_sec=backend_shot["duration_sec"]
+                )
+                res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
+                if res["returncode"] != 0:
+                    raise RuntimeError(res["stderr"][-500:])
+            except Exception as exc:
+                fail(
+                    "ショット{}の生成に失敗しました（続きから生成）。ここまでに成功したショット: {}. エラー: {}".format(
+                        shot_id, ", ".join(succeeded_ids) if succeeded_ids else "なし", exc
+                    )
+                )
+                return
+            finally:
+                try:
+                    if raw_path.exists():
+                        raw_path.unlink()
+                except Exception:
+                    pass
+
+            # このショットの生成が成功したので、その場でclip_pathを確定して保存する
+            # （generateの初回生成と同じ思想: 途中で後続ショットが失敗しても、ここまでの成功分は失われない）。
+            current = projects.get_project(project_id)
+            if current is not None:
+                for s in (current.get("plan") or {}).get("shots") or []:
+                    if s.get("id") == shot_id:
+                        s["clip_path"] = projects.media_relpath_for_clip(project_id, "{}.mp4".format(shot_id))
+                projects.save_project(current)
+            succeeded_ids.append(shot_id)
+            progress = 25 + int(45 * (i + 1) / max(1, len(pending_shots)))
+            self._emit(job_id, "visual", progress, "続きのショットを生成中… ({}/{})".format(i + 1, len(pending_shots)))
+
+        project = projects.get_project(project_id)
+        project["status"] = "rendering"
+        projects.save_project(project)
+
+        self._emit(job_id, "tts", 75, "ナレーションを生成中…")
+        self._emit(job_id, "subtitles", 80, "字幕を生成中…")
+        self._emit(job_id, "render", 85, "レンダリング中…")
+        try:
+            out_path, out_duration = _render_project(project_id, project["plan"], cfg)
+        except Exception as exc:
+            fail("レンダリングに失敗しました（続きから生成）: {}".format(exc))
             return
 
         project = projects.get_project(project_id)

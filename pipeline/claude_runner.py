@@ -5,8 +5,10 @@
 （同一パターン: subprocess.Popen / shell=False / start_new_session=True /
 SIGTERM→5秒→SIGKILL / エンベロープJSON→result文字列→最初の{〜最後の}救済抽出）。
 
-モデルフォールバックチェーン: ["claude-fable-5", "fable-5", None]（None=--model省略）。
+モデルフォールバックチェーン: ["claude-opus-4-8", "claude-fable-5", None]（None=--model省略）。
 config.claude_model に疎通確定モデルを先頭へ差し込む。
+2026-07-17実機確認: `claude --model claude-opus-4-8` は受理され、応答エンベロープの
+modelUsage キーも "claude-opus-4-8" になることを確認済み（自己申告ではなく実測）。
 """
 from __future__ import annotations
 
@@ -19,7 +21,7 @@ from typing import Optional
 from pipeline.config import load_config
 
 _KILL_GRACE_SEC = 5
-_MODEL_FALLBACK_CHAIN = ["claude-fable-5", "fable-5", None]
+_MODEL_FALLBACK_CHAIN = ["claude-opus-4-8", "claude-fable-5", None]
 
 
 def _kill_tree(proc):

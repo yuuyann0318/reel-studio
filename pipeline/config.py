@@ -23,6 +23,7 @@ _DEFAULTS = {
     "target_duration_sec": 30,
     "voice": "Kyoko",
     "default_subtitle_style": "default",  # "default" | "vertical_hook"（Studio新規作成時の既定スタイル）
+    "director_quality": "supreme",  # "supreme"（3段多段生成） | "single"（従来の一発出し）
     "brand_rules": {"ng_words": []},
     "higgsfield": {
         "cli_bin": "higgsfield",

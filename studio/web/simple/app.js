@@ -306,6 +306,49 @@ async function finalizeEdit() {
   await beginRender(state.current.id, { totalPhases: 1 });
 }
 
+// ---------- 続きから生成（途中で止まった動画の再開） ----------
+function canResume(project) {
+  return !!project && project.status === "failed" && (project.unrendered_shot_ids || []).length > 0;
+}
+
+async function resumeGenerate() {
+  const project = state.current;
+  if (!project) return;
+  stopJobSub();
+  stopPoll();
+  setState({
+    screen: "creating",
+    job: { phase: "render", totalPhases: 1, stage: "queued", progress: 0, message: "続きから作成しています…" },
+  });
+  try {
+    const { job_id } = await api.resumeProject(project.id);
+    unsubscribeJob = api.subscribeJobEvents(job_id, {
+      onMessage: (d) => {
+        if (!state.job) return;
+        setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
+      },
+      onDone: async () => {
+        stopJobSub();
+        try {
+          const refreshed = await api.getProject(project.id);
+          await finishRender(refreshed);
+        } catch (err) {
+          showApiError(err, "最新状態の取得に失敗しました");
+          setState({ screen: "edit", job: null });
+        }
+      },
+      onError: (err) => {
+        showApiError(err, "続きからの作成でエラーが発生しました");
+        stopJobSub();
+        setState({ screen: "edit", job: null });
+      },
+    });
+  } catch (err) {
+    showApiError(err, "続きからの作成を開始できませんでした");
+    setState({ screen: "edit", job: null });
+  }
+}
+
 // ---------- できあがり画面の操作 ----------
 function goEdit() { setState({ screen: "edit", editingCaptionId: null }); }
 function goHomeFresh() {
@@ -330,6 +373,32 @@ function proModeHref() {
 }
 function footerHtml() {
   return `<div class="s-footer"><a href="${proModeHref()}">プロ向け画面</a></div>`;
+}
+
+// 台本メタ（どのAIで作られたか / AI接続失敗で自動テンプレになったか）の小さな表示。
+// プロジェクト詳細（かんたん編集画面）向け。専門用語を避け、失敗時のみ目立たせる。
+function directorMetaHtml(project) {
+  const director = project && project.director;
+  if (!director) return "";
+  if (director.source === "ai") {
+    return `<div class="s-director-note">台本AI: ${escapeHtml(director.model_used || "不明")}</div>`;
+  }
+  return `<div class="s-director-note s-director-note--warn">
+    <strong>注意:</strong> 台本はAI接続に失敗したため、自動テンプレで作成されています
+  </div>`;
+}
+
+// 失敗の原因履歴（最新2件）。project["error"]は最新の失敗理由で上書きされるが、
+// error_historyはこれまでの失敗をすべて追記で残しているため、経緯を確認できる。
+function errorHistoryHtml(project) {
+  const history = (project && project.error_history) || [];
+  if (!history.length) return "";
+  const recent = history.slice(-2).slice().reverse();
+  return `
+    <div class="s-error-history">
+      <div class="s-error-history__title">これまでのエラー</div>
+      ${recent.map((h) => `<div class="s-error-history__item">${escapeHtml(h.message)}</div>`).join("")}
+    </div>`;
 }
 
 const HIST_THUMB_ICON = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M8 4v5M16 4v5"/></svg>`;
@@ -511,6 +580,7 @@ function renderResult() {
   const link = saveLink();
   el.innerHTML = `
     ${topbarHtml()}
+    ${directorMetaHtml(project)}
     <div class="s-card">
       <div class="s-section-title">動画が完成しました</div>
       <div class="s-section-sub">「${escapeHtml(project ? project.theme : "")}」</div>
@@ -576,8 +646,18 @@ function renderEdit() {
   const sfxOn = sfxIsOn();
   const canFinalize = shots.some((s) => s.enabled);
 
+  const resumable = canResume(state.current);
+
   el.innerHTML = `
     ${topbarHtml()}
+    ${directorMetaHtml(state.current)}
+    ${state.current && state.current.status === "failed" ? `
+      <div class="s-card">
+        <div class="s-section-title">前回は完成しませんでした</div>
+        <div class="s-section-sub">${escapeHtml((state.current && state.current.error) || "")}</div>
+        ${errorHistoryHtml(state.current)}
+        ${resumable ? `<button type="button" class="s-cta-secondary" id="s-resume" style="margin-top:10px;">続きから作成する</button>` : ""}
+      </div>` : ""}
     <div class="s-card">
       <div class="s-section-title">① テロップ</div>
       <div class="s-section-sub">タップして編集できます</div>
@@ -644,6 +724,8 @@ function renderEdit() {
   el.querySelectorAll("[data-volume]").forEach((btn) => btn.addEventListener("click", () => setVolume(btn.dataset.volume)));
   el.querySelector("#s-sfx-toggle").addEventListener("click", toggleSfx);
   el.querySelector("#s-finalize").addEventListener("click", finalizeEdit);
+  const resumeBtn = el.querySelector("#s-resume");
+  if (resumeBtn) resumeBtn.addEventListener("click", resumeGenerate);
 }
 
 // ---------- 描画ディスパッチ ----------

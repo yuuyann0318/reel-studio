@@ -75,3 +75,75 @@ def test_run_pipeline_qa_failure_makes_report_not_ok(monkeypatch):
 
     exit_code = 0 if report.get("ok") else 1
     assert exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# --style: run.py の CLI引数がdirector.run_directorへ配線されていることの検証
+# ---------------------------------------------------------------------------
+
+def test_run_pipeline_passes_style_to_director(monkeypatch):
+    """style引数がdirector.run_directorへ届くことを、director呼び出し直後に例外を
+    投げて後続ステージ(ffmpeg等)を実行させずに検証する(高速・実生成なし)。"""
+    cfg = load_config()
+    captured = {}
+
+    def _fake_run_director(theme, config, **kwargs):
+        captured["style"] = kwargs.get("style")
+        raise RuntimeError("stop-after-capture")
+
+    monkeypatch.setattr(run.director, "run_director", _fake_run_director)
+
+    report = run.run_pipeline("styleテスト", 6.0, "mock", True, cfg, quality="single", style="vertical_hook")
+
+    assert captured["style"] == "vertical_hook"
+    assert report["stages"]["director"]["ok"] is False
+
+
+def test_run_pipeline_defaults_style_to_default_when_unspecified(monkeypatch):
+    cfg = load_config()
+    captured = {}
+
+    def _fake_run_director(theme, config, **kwargs):
+        captured["style"] = kwargs.get("style")
+        raise RuntimeError("stop-after-capture")
+
+    monkeypatch.setattr(run.director, "run_director", _fake_run_director)
+
+    run.run_pipeline("styleデフォルトテスト", 6.0, "mock", True, cfg, quality="single")
+
+    assert captured["style"] == "default"
+
+
+def test_main_argparse_style_default_is_default(monkeypatch):
+    captured = {}
+
+    def _fake_run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default"):
+        captured["style"] = style
+        return {"run_id": "r1", "stages": {}, "ok": True, "output_path": None, "qa": None}
+
+    monkeypatch.setattr(run, "run_pipeline", _fake_run_pipeline)
+
+    exit_code = run.main(["--theme", "t", "--backend", "mock", "--no-llm"])
+
+    assert exit_code == 0
+    assert captured["style"] == "default"
+
+
+def test_main_argparse_style_vertical_hook_is_forwarded(monkeypatch):
+    captured = {}
+
+    def _fake_run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default"):
+        captured["style"] = style
+        return {"run_id": "r1", "stages": {}, "ok": True, "output_path": None, "qa": None}
+
+    monkeypatch.setattr(run, "run_pipeline", _fake_run_pipeline)
+
+    exit_code = run.main(["--theme", "t", "--backend", "mock", "--no-llm", "--style", "vertical_hook"])
+
+    assert exit_code == 0
+    assert captured["style"] == "vertical_hook"
+
+
+def test_main_argparse_style_rejects_invalid_choice():
+    with pytest.raises(SystemExit):
+        run.main(["--theme", "t", "--style", "not_a_real_style"])

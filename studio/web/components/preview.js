@@ -71,10 +71,11 @@ export function renderPreview(container, state, actions) {
 
   const showOverlay = isGenerating || isRendering;
   let frameInnerHtml;
+  const isUnrenderedShot = previewMode === "shot" && selectedShot && !selectedShot.clip_path;
   if (!mediaSrc) {
     frameInnerHtml = `
       <div class="preview-frame__placeholder">
-        ${showOverlay ? "" : MOCK ? "モックプレビュー（実映像なし）" : "映像を読み込めません"}
+        ${showOverlay ? "" : isUnrenderedShot ? "このショットはまだクリップが生成されていません" : MOCK ? "モックプレビュー（実映像なし）" : "映像を読み込めません"}
       </div>
       ${!showOverlay && previewMode === "shot" && selectedShot ? `<div class="preview-caption preview-caption--${subtitleStyle.position || "lower"}" style="font-size:${fontPx}px; color:${escapeHtml(subtitleStyle.accent_color || "#FFD84D")};">${escapeHtml(selectedShot.caption || "")}</div>` : ""}
       ${showOverlay ? "" : `
