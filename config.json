@@ -3,7 +3,10 @@
   "claude_bin": "/Users/yuuya/.local/bin/claude",
   "claude_model": "claude-opus-4-8",
   "claude_timeout_sec": 600,
-  "resolution": [1080, 1920],
+  "resolution": [
+    1080,
+    1920
+  ],
   "aspect": "9:16",
   "target_duration_sec": 30,
   "voice": "Kyoko",
@@ -48,5 +51,12 @@
     "min_short_side": 400,
     "local_dir": "assets/products/inbox",
     "timeout_sec": 20
+  },
+  "reference": {
+    "cache_dir": "assets/reference_cache",
+    "yt_dlp_bin": ".venv/bin/yt-dlp",
+    "download_timeout_sec": 120,
+    "asr_timeout_sec": 120,
+    "max_video_sec": 180
   }
 }

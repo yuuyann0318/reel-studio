@@ -67,6 +67,23 @@ def test_create_project_rejects_invalid_product_url(bad_url):
     assert resp.json()["error"]["code"] == "invalid_product_url"
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "not-a-url",
+        "ftp://example.com/video",
+        "javascript:alert(1)",
+        "",
+        "   ",
+        123,
+    ],
+)
+def test_create_project_rejects_invalid_reference_url(bad_url):
+    resp = client.post("/api/projects", json={"theme": "テスト", "backend": "mock", "reference_url": bad_url})
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "invalid_reference_url"
+
+
 def test_create_project_omits_product_url_when_not_provided(monkeypatch):
     """product_urlを指定しない従来どおりの呼び出しは、job_manager.start_generateへ
     product_url=Noneで渡り、既存の非商品モードの挙動を壊さないこと。"""
@@ -74,8 +91,10 @@ def test_create_project_omits_product_url_when_not_provided(monkeypatch):
 
     captured = {}
 
-    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
+                              product_url=None, reference_url=None):
         captured["product_url"] = product_url
+        captured["reference_url"] = reference_url
         return project_id
 
     monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
@@ -85,6 +104,7 @@ def test_create_project_omits_product_url_when_not_provided(monkeypatch):
     project_id = resp.json()["id"]
     try:
         assert captured["product_url"] is None
+        assert captured["reference_url"] is None
     finally:
         shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
 
@@ -99,10 +119,12 @@ def test_create_project_threads_style_into_start_generate(monkeypatch):
 
     captured = {}
 
-    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
+                              product_url=None, reference_url=None):
         captured["project_id"] = project_id
         captured["style"] = style
         captured["product_url"] = product_url
+        captured["reference_url"] = reference_url
         return project_id
 
     monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
@@ -125,9 +147,11 @@ def test_create_project_threads_product_url_into_start_generate_and_persists_non
 
     captured = {}
 
-    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
+                              product_url=None, reference_url=None):
         captured["project_id"] = project_id
         captured["product_url"] = product_url
+        captured["reference_url"] = reference_url
         return project_id
 
     monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
@@ -138,8 +162,39 @@ def test_create_project_threads_product_url_into_start_generate_and_persists_non
     project_id = resp.json()["id"]
     try:
         assert captured["product_url"] == product_url
+        assert captured["reference_url"] is None
         fetched = client.get("/api/projects/{}".format(project_id)).json()
         assert fetched["product"] is None
+    finally:
+        shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
+
+
+def test_create_project_threads_reference_url_into_start_generate_and_persists_none_before_job_runs(monkeypatch):
+    """POST /api/projects の reference_url が job_manager.start_generate に渡ること、
+    かつジョブ完了前（202直後）は project["reference"] が None のまま保存されていること
+    （実際の解析結果はジョブが analyze_reference 実行後に書き込む）。"""
+    from studio.server import app as app_mod
+
+    captured = {}
+
+    def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
+                              product_url=None, reference_url=None):
+        captured["project_id"] = project_id
+        captured["reference_url"] = reference_url
+        return project_id
+
+    monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
+
+    reference_url = "https://www.tiktok.com/@example/video/123456"
+    resp = client.post(
+        "/api/projects", json={"theme": "テスト:参考動画URL疎通", "backend": "mock", "reference_url": reference_url}
+    )
+    assert resp.status_code == 202
+    project_id = resp.json()["id"]
+    try:
+        assert captured["reference_url"] == reference_url
+        fetched = client.get("/api/projects/{}".format(project_id)).json()
+        assert fetched["reference"] is None
     finally:
         shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
 

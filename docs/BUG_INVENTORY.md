@@ -81,3 +81,20 @@ higgsfield-auto-reel の独立レビュー(codex)＋目視検収で確定した�
 
 ### 同時に実施した機能追加（不具合ではない）
 - **Premiere Pro連携(Phase A+B)**: 「Premiereで編集」ボタン→ reel.xml(FCP7 xmeml・V1トリム済みクリップ列+A1ナレ+A2 BGM+A3 SFX+V3赤丸プレースホルダ)+captions.srt(編集可能字幕)+narration.wav(Fish Audio)+README+スタイル仕様を書き出し。pymiereセットアップ済み環境では自動でPremiereに組み上げ+.prproj保存(未セットアップは手動importフォールバック)。参考TikTok動画のTTP編集プロファイル(assets/profiles/ttp_reference.json)を新設し、文言コピーは薬機法検査で遮断(構成・様式のみ再現)。実機検証: KINUI実プロジェクトでパッケージ生成・xmeml妥当性・%20パスエンコード・タイミング一致を確認。**pymiere Link拡張の導入(永続変更)はユーザー本人実行待ち**(bin/setup_premiere_link.sh)。
+
+## 2026-07-20夜: 参考動画TTP機能追加時の棚卸し（6周目）
+
+発見経路: 窓口実機E2E + 独立レビュー(exec-sonnet) + Codex再レビュー。**全件コミット前に修正済み**。pytest 570 passed。
+
+| ID | 重大度 | 発見経路 | 症状 | 修正内容 | 状態 |
+|---|---|---|---|---|---|
+| BUG-30 | 高 | 窓口実機E2E | yt-dlpの音声抽出が同梱ffmpegを見つけられず全件失敗(--ffmpeg-location未指定)。 | cfgのffmpeg_binから--ffmpeg-locationを自動指定。実機で19.3秒音声の抽出成功を確認。 | 修正済み・実機検証済み |
+| BUG-31 | 高 | Codex再レビュー | 修正版で--ffmpeg-locationが"--"セパレータの後に付き、オプションがURL扱いされ実運用で常時失敗する順序バグ。 | オプションを"--"より前に配置。実機検証済み。 | 修正済み・実機検証済み |
+| BUG-32 | 高 | 独立レビュー | ingest CLIが型検証せず、文字列duration_sec等の不正specがキャッシュされ、TTP生成時にdirectorがTypeErrorでクラッシュ(実機再現済み)。 | validate_reference_spec流用の型検証をCLIに追加(telops/rhythm/beats数値検証)。 | 修正済み・検証済み |
+| BUG-33 | 中 | 独立レビュー | ①telops文字列時の1文字ずつ箇条書き化 ②キャッシュパス解決のCWD依存不一致 ③一時ディレクトリの全パスリーク ④DI差し替え時の無関係ディレクトリ削除リスク(Codex検出)。 | ①isinstanceガード ②project_root基準に統一 ③finallyでrmtree ④href_reference_接頭辞の所有チェック。 | 修正済み・検証済み |
+| BUG-34 | 低中 | 独立レビュー | 丸写し検査が全角/半角ゆれをすり抜け・yt-dlp argvのオプション注入余地・尺上書きがproject.jsonに未永続(窓口発見)。 | NFKC正規化・"--"+スキーム検証・上書き値の永続化。 | 修正済み・検証済み |
+
+### 同時に実施した機能追加（不具合ではない）
+- **参考動画TTP機能**: 「参考動画リンク(任意)」にTikTok URL→yt-dlp音声抽出→Fish Audio ASR→Opusによるビート/リズム解析→共有キャッシュ(assets/reference_cache)→directorに{REFERENCE_TTP_BLOCK}注入(anglesスキップ・丸写し15字検査+矯正リトライ・法令適合翻訳)。実機E2E: KINUI参考動画で**ビート順/尺(18秒ぴったり)/口調/CTA型を再現しつつ文言は完全別物・薬機法違反表現(「毛穴消えた」)は体験表現に翻訳**されたことを窓口目視検収。fail-open(解析失敗は通常モード続行)。
+- **vidIQ取り込み経路**: bin/ingest_reference.py(型検証付き)で窓口のvidIQ解析をキャッシュ投入可能(KINUI分は投入済み)。
+- **既知の制約**: Fish Audio ASRは残高不足(402)のため実機未検証(ユーザーのチャージ待ち。402は日本語エラーでfail-open動作を実機確認済み)。キャッシュの上限/TTLなし(残課題)。

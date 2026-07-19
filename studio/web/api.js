@@ -59,10 +59,11 @@ export const api = {
     return request(`/api/projects/${encodeURIComponent(id)}`);
   },
 
-  async createProject({ theme, duration, backend, style, productUrl }) {
-    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl });
+  async createProject({ theme, duration, backend, style, productUrl, referenceUrl }) {
+    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl, referenceUrl });
     const body = { theme, duration, backend, style };
     if (productUrl) body.product_url = productUrl; // 空/未指定なら送らない（通常モードのまま）
+    if (referenceUrl) body.reference_url = referenceUrl; // 空/未指定なら送らない（通常の台本生成のまま）
     return request("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

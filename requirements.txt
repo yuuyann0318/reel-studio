@@ -4,3 +4,5 @@ uvicorn
 python-multipart
 httpx
 pymiere
+yt-dlp
+curl_cffi

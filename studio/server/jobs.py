@@ -77,6 +77,25 @@ def _parse_loudnorm_json(stderr_text):
         return None
 
 
+def _default_analyze_reference(url, cfg, progress_cb=None):
+    """pipeline.reference.analyze_reference への遅延importラッパー。
+
+    pipeline/reference.py は別ワーカーが並行実装中のモジュールのため、jobs.py の
+    import時点（モジュール読み込み時）にトップレベルで `from pipeline import reference` を
+    行うと、未実装/未マージの間はjobs.py自体のimportが壊れてしまう。ここで実際に参考動画URLが
+    指定され解析が必要になった時点（関数呼び出し時）にのみimportすることでそれを避ける。
+
+    モジュール変数 `analyze_reference`（このラッパー関数）自体をテストでmonkeypatchすれば、
+    pipeline.reference の実装有無やネットワークアクセスに関わらず、_run_generate側の
+    分岐ロジック（成功/cached/失敗のfail-open処理）だけを単体テストできる。
+    """
+    from pipeline import reference as reference_mod
+    return reference_mod.analyze_reference(url, cfg, progress_cb=progress_cb)
+
+
+analyze_reference = _default_analyze_reference
+
+
 def _resolve_bgm_by_mood(mood):
     if not mood or mood == "none":
         return None
@@ -185,14 +204,15 @@ class JobManager:
 
     # --- 公開API -----------------------------------------------------
 
-    def start_generate(self, project_id, theme, target_duration_sec, backend_name, style="default", product_url=None):
+    def start_generate(self, project_id, theme, target_duration_sec, backend_name, style="default", product_url=None,
+                        reference_url=None):
         job_id = project_id  # POST /api/projects はプロジェクトIDそのものをjob_idとして使う（設計判断）
         with self._lock:
             self._jobs[job_id] = {"job_id": job_id, "kind": "generate", "status": "queued"}
         self._queue.put(("generate", job_id, {
             "project_id": project_id, "theme": theme,
             "target_duration_sec": target_duration_sec, "backend_name": backend_name,
-            "style": style, "product_url": product_url,
+            "style": style, "product_url": product_url, "reference_url": reference_url,
         }))
         return job_id
 
@@ -443,6 +463,59 @@ class JobManager:
             else:
                 self._emit(job_id, "product", 5, "商品画像を取得できなかったため通常モードで続行します")
 
+        # --- 参考動画の解析（fail-open。参考動画リンク指定時のみ・director企画生成の直前） ------
+        # 成功時はdirector側へ reference=spec を渡し、参考動画の構成・テンポを企画に反映させる。
+        # 解析に失敗（analyze_referenceがok:Falseを返す/例外を送出）してもfailさせない: 警告
+        # メッセージをemitしたうえで通常の台本生成のまま続行する（product_urlと同じ「パイプライン
+        # 全体が必ず完成すること」を優先する既存設計を踏襲。BUG-10コメント参照）。
+        reference_spec = None
+        reference_url = payload.get("reference_url")
+        if reference_url:
+            self._emit(job_id, "reference", 4, "参考動画を解析中…")
+            try:
+                ref_result = analyze_reference(reference_url, cfg, progress_cb=None)
+            except Exception as exc:
+                ref_result = {
+                    "ok": False, "spec": None, "source": None, "cached": False, "warnings": [],
+                    "error": "参考動画の解析中に予期しないエラーが発生しました: {}".format(exc),
+                }
+            if ref_result.get("ok"):
+                if ref_result.get("cached"):
+                    self._emit(job_id, "reference", 5, "解析結果を再利用します")
+                reference_spec = ref_result.get("spec")
+                spec_duration = (reference_spec or {}).get("duration_sec")
+                if spec_duration:
+                    # spec["duration_sec"] を 15〜60秒にclampしてtarget_duration_secを上書きする
+                    # （参考動画の尺を優先しつつ、あまりに極端な値でパイプライン全体が壊れないようにする）。
+                    target_duration_sec = max(15.0, min(60.0, float(spec_duration)))
+                    # project.json側の表示値も上書き後の実効値に揃える（directorへは18秒で渡るのに
+                    # projectのtarget_duration_secが作成時の値のまま、という不整合の防止。実機E2Eで発見）。
+                    _proj = projects.get_project(project_id)
+                    if _proj is not None:
+                        _proj["target_duration_sec"] = target_duration_sec
+                        projects.save_project(_proj)
+                reference_meta = {
+                    "url": reference_url,
+                    "ok": True,
+                    "source": ref_result.get("source"),
+                    "cached": bool(ref_result.get("cached")),
+                    "duration_sec": (reference_spec or {}).get("duration_sec"),
+                    "beats_count": len((reference_spec or {}).get("beats") or []),
+                    "warnings": ref_result.get("warnings") or [],
+                }
+            else:
+                reason = ref_result.get("error") or "不明なエラー"
+                self._emit(
+                    job_id, "reference", 5,
+                    "参考動画を解析できなかったため通常の台本生成で続行します: {}".format(reason),
+                )
+                reference_meta = {"url": reference_url, "ok": False, "error": reason}
+                reference_spec = None
+            project = projects.get_project(project_id)
+            if project is not None:
+                project["reference"] = reference_meta
+                projects.save_project(project)
+
         self._emit(job_id, "director", 5, "企画を生成中…")
         director_product = None
         if product_url:
@@ -454,7 +527,7 @@ class JobManager:
         try:
             plan = director.run_director(
                 theme, cfg, target_duration_sec=target_duration_sec, no_llm=False, style=style,
-                product=director_product,
+                product=director_product, reference=reference_spec,
             )
         except Exception as exc:
             fail("企画生成に失敗しました: {}".format(exc))

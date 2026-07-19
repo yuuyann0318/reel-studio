@@ -17,7 +17,9 @@ project.json:
   "renders": [{"path","ts","ok"}],
   "error": str|None,
   "error_history": [{"ts","kind":"generate"|"render"|"resume","message"}],
-  "director": {"model_used","source","quality"}|None
+  "director": {"model_used","source","quality"}|None,
+  "reference": {"url","ok","source","cached","duration_sec","beats_count","warnings"}|
+               {"url","ok":False,"error"}|None
 }
 
 Python 3.9 互換構文のみ。
@@ -113,7 +115,8 @@ def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def create_project(theme, target_duration_sec, backend_name, status="generating", style="default", product_url=None):
+def create_project(theme, target_duration_sec, backend_name, status="generating", style="default", product_url=None,
+                    reference_url=None):
     """新規プロジェクトの雛形を作成し保存する。plan/shotsは生成ジョブが後で埋める。
 
     style: "default" | "vertical_hook"（縦書きテロップ・高速カットのTTPスタイル）。
@@ -122,6 +125,10 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
     product_url: 商品アフィリエイト動画モードの入口（任意）。実際の商品情報・取得画像は
     生成ジョブ（jobs.py _run_generate）が collect_product_images 実行後に project["product"]
     へ書き込む。ここでは常に None で初期化する（呼び出し側の透過渡しのためだけに受け取る）。
+    reference_url: 参考動画リンクの入口（任意）。実際の解析結果（pipeline.reference.analyze_reference
+    の戻り値の要約）は生成ジョブ（jobs.py _run_generate）が解析実行後に project["reference"]
+    へ書き込む（成功/失敗いずれもfail-openで書き込む）。ここでは常に None で初期化する
+    （product_urlと同じく、呼び出し側の透過渡しのためだけに受け取る）。
     """
     style = style if style in VALID_SUBTITLE_PRESETS else "default"
     project_id = new_project_id()
@@ -150,6 +157,7 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
         "error_history": [],
         "director": None,
         "product": None,
+        "reference": None,
         "tts": None,
     }
     save_project(project)
@@ -186,11 +194,12 @@ def get_project(project_id):
         project = json.loads(p.read_text(encoding="utf-8"))
     except Exception:
         return None
-    # 旧project.json（本機能追加前に作成されたもの）にはerror_history/director/product/ttsが
+    # 旧project.json（本機能追加前に作成されたもの）にはerror_history/director/product/reference/ttsが
     # 無いため、既定値を補って呼び出し側が常に安全に扱えるようにする。
     project.setdefault("error_history", [])
     project.setdefault("director", None)
     project.setdefault("product", None)
+    project.setdefault("reference", None)
     project.setdefault("tts", None)
     return project
 

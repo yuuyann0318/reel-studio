@@ -24,6 +24,7 @@ const state = {
 
   theme: "",
   productUrl: "", // 商品リンク（任意）。貼ると商品アフィリエイト動画モードになる
+  referenceUrl: "", // 参考動画リンク（任意）。貼るとその動画の構成・テンポを再現した台本になる
   style: "default", // 'default' | 'vertical_hook'
   backend: "mock", // 'mock' | 'higgsfield'
   submitting: false,
@@ -77,11 +78,13 @@ async function submitCreate() {
   const theme = state.theme.trim();
   if (!theme) return;
   const productUrl = (state.productUrl || "").trim();
+  const referenceUrl = (state.referenceUrl || "").trim();
   setState({ submitting: true, submitError: null });
   try {
     const { id } = await api.createProject({
       theme, duration: 30, backend: state.backend, style: state.style,
       productUrl: productUrl || undefined, // 空なら送らない（通常モードのまま）
+      referenceUrl: referenceUrl || undefined, // 空なら送らない（通常の台本生成のまま）
     });
     setState({ submitting: false });
     await beginGenerate(id);
@@ -403,7 +406,7 @@ function goHomeFresh() {
   stopJobSub(); stopPoll();
   setState({
     screen: "home", current: null, draftPlan: null, job: null, premiereExport: null,
-    theme: "", productUrl: "", submitError: null,
+    theme: "", productUrl: "", referenceUrl: "", submitError: null,
   });
   loadProjects();
 }
@@ -487,6 +490,22 @@ function productThumbsHtml(project) {
         ? `<div class="s-hint" style="margin-top:10px;">${escapeHtml(product.warnings.join(" / "))}</div>`
         : ""}
     </div>`;
+}
+
+// 参考動画リンクの解析結果の小さな表示。project["reference"] は
+// {"url","ok":true,"source","cached","duration_sec","beats_count","warnings"} または
+// {"url","ok":false,"error"} または null（参考動画リンク未指定）。
+// 解析に失敗していても生成自体は通常の台本で続行済み（fail-open）のため、注意表示に留める。
+function referenceInfoHtml(project) {
+  const reference = project && project.reference;
+  if (!reference) return "";
+  if (reference.ok) {
+    const note = reference.cached ? "構成を再現・キャッシュ利用" : "構成を再現";
+    return `<div class="s-director-note">参考動画: ${escapeHtml(reference.url)}（${escapeHtml(note)}）</div>`;
+  }
+  return `<div class="s-director-note s-director-note--warn">
+    <strong>注意:</strong> 参考動画を解析できなかったため、通常の台本で作成しました（${escapeHtml(reference.error || "")}）
+  </div>`;
 }
 
 // 失敗の原因履歴（最新2件）。project["error"]は最新の失敗理由で上書きされるが、
@@ -578,6 +597,12 @@ function renderHome() {
         <div class="s-hint" style="margin-top:8px;">貼ると商品画像を自動で取得して動画の主役にします。assets/products/inbox に入れた画像も使われます</div>
       </div>
 
+      <div class="s-section-title">参考動画リンク（任意）</div>
+      <div class="s-input-wrap">
+        <input type="url" class="s-url-input" id="s-reference-url" placeholder="https://www.tiktok.com/@example/video/123" maxlength="500" value="${escapeHtml(state.referenceUrl)}">
+        <div class="s-hint" style="margin-top:8px;">TikTokのURLを貼ると、その動画の構成・テンポを再現した台本になります（文言はコピーしません）</div>
+      </div>
+
       <div class="s-section-title">見た目のスタイル</div>
       <div class="s-style-grid" role="group" aria-label="スタイル選択">
         ${styleCardHtml("default", "ふつう", "読みやすい横書きテロップ")}
@@ -610,6 +635,8 @@ function renderHome() {
   themeInput.addEventListener("input", (e) => { state.theme = e.target.value; syncSubmitButton(); });
   const productUrlInput = el.querySelector("#s-product-url");
   productUrlInput.addEventListener("input", (e) => { state.productUrl = e.target.value; });
+  const referenceUrlInput = el.querySelector("#s-reference-url");
+  referenceUrlInput.addEventListener("input", (e) => { state.referenceUrl = e.target.value; });
   el.querySelectorAll("[data-chip]").forEach((btn) => btn.addEventListener("click", () => setState({ theme: btn.dataset.chip })));
   el.querySelectorAll("[data-style]").forEach((btn) => btn.addEventListener("click", () => setState({ style: btn.dataset.style })));
   el.querySelectorAll("[data-backend]").forEach((btn) => btn.addEventListener("click", () => setState({ backend: btn.dataset.backend })));
@@ -713,6 +740,7 @@ function renderResult() {
     ${topbarHtml()}
     ${directorMetaHtml(project)}
     ${ttsMetaHtml(project)}
+    ${referenceInfoHtml(project)}
     ${productThumbsHtml(project)}
     <div class="s-card">
       <div class="s-section-title">動画が完成しました</div>
@@ -789,6 +817,7 @@ function renderEdit() {
     ${topbarHtml()}
     ${directorMetaHtml(state.current)}
     ${ttsMetaHtml(state.current)}
+    ${referenceInfoHtml(state.current)}
     ${productThumbsHtml(state.current)}
     ${state.current && state.current.status === "failed" ? `
       <div class="s-card">
