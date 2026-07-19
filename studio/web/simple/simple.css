@@ -407,6 +407,20 @@ body.theme-simple {
 .s-result-actions-row { display: flex; gap: 10px; }
 .s-result-actions-row .s-cta-secondary { flex: 1; }
 
+/* ---------- Premiereで編集（書き出しパッケージ） ---------- */
+.s-premiere-banner {
+  font-size: 12.5px;
+  color: var(--text-dim);
+  background: #F5F6FA;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  line-height: 1.6;
+}
+.s-premiere-banner__title { font-weight: 700; color: var(--text); margin-bottom: 4px; }
+.s-premiere-banner__path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.s-premiere-banner__hint { margin-top: 4px; }
+
 /* ---------- かんたん編集 ---------- */
 .s-edit-list { display: flex; flex-direction: column; gap: 14px; }
 

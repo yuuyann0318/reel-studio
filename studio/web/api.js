@@ -96,6 +96,14 @@ export const api = {
     return request(`/api/projects/${encodeURIComponent(id)}/resume`, { method: "POST" });
   },
 
+  async premiereExport(id) {
+    // mock.js は premiereExport 未実装（実バックエンドの書き出しパッケージ生成をシミュレートしない）。
+    // 存在しないジョブIDを返し、subscribeJobEvents側の「ジョブが見つかりません」経路で
+    // 安全に失敗させる（クラッシュはしない）。
+    if (MOCK) return mock.premiereExport ? mock.premiereExport(id) : { job_id: `mock-premiere-${id}` };
+    return request(`/api/projects/${encodeURIComponent(id)}/premiere-export`, { method: "POST" });
+  },
+
   async getBgmAssets() {
     if (MOCK) return mock.getBgmAssets();
     return request("/api/assets/bgm");

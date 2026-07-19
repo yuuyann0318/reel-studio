@@ -41,6 +41,9 @@ from pipeline import subtitles
 from pipeline import tts as tts_mod
 from pipeline.config import load_config, project_root
 from pipeline.visual import get_backend
+from premiere import driver as premiere_driver
+from premiere import package as premiere_package
+from premiere import setup_check as premiere_setup_check
 from studio.server import projects
 
 ASSETS_DIR = project_root() / "assets"
@@ -97,6 +100,19 @@ class ResumeNotAllowedError(Exception):
     """failed以外のプロジェクトへのresume要求（再開の必要がない状態）。"""
 
 
+class PremiereExportNotAllowedError(Exception):
+    """ready以外のプロジェクトへのPremiere書き出し要求（完成前は書き出せない）。"""
+
+
+class PremiereExportInProgressError(PremiereExportNotAllowedError):
+    """同一project_idのPremiere書き出しが既に実行中（受理済み〜完了前）の重複要求。
+
+    PremiereExportNotAllowedErrorのサブクラスとして定義する。studio/server/app.py の
+    `except PremiereExportNotAllowedError:`（409応答）はPythonの例外捕捉がサブクラスにも
+    及ぶため、app.py側を無改修のままこのエラーも409として扱える。
+    """
+
+
 class UnrenderedShotsError(Exception):
     """有効(enabled)ショットにclip_path未生成のものが含まれるrender要求。
 
@@ -117,6 +133,12 @@ class JobManager:
         self._sub_lock = threading.Lock()
         self._subscribers = {}
         self._project_status_lock = threading.Lock()  # render開始時のstatus確認+書換をアトミックにする
+        # 実行中のpremiere_exportジョブのproject_id集合（_project_status_lockで保護）。
+        # try_start_premiere_exportで追加し、_run_premiere_exportの完了/失敗時(finally)で
+        # 必ず解放する。build_package()は呼び出しごとにTTS再合成等の副作用を伴うため、
+        # 同一project_idの二重投入をここで409相当のエラーとして拒否する（BUG修正:
+        # premiere_export二重実行レース）。
+        self._premiere_exports_in_progress = set()
         # ★BUG-21修正: 以前はここで self._recover_stuck_projects() を呼んでいたが、
         # それだと「studio.server.jobs を import しただけ」（pytest収集時のimportや
         # 他プロセスからのimport等）で本物の projects/ ディレクトリを走査し、
@@ -255,6 +277,42 @@ class JobManager:
             projects.save_project(project)
             return self.start_resume(project_id)
 
+    def start_premiere_export(self, project_id):
+        job_id = _new_job_id()
+        with self._lock:
+            self._jobs[job_id] = {"job_id": job_id, "kind": "premiere_export", "status": "queued"}
+        self._queue.put(("premiere_export", job_id, {"project_id": project_id}))
+        return job_id
+
+    def try_start_premiere_export(self, project_id):
+        """「Premiereで編集」ボタンの受理判定+enqueueをアトミックに行う（try_start_render等と同じ設計）。
+
+        Premiere書き出しはproject.statusを変更しない読み取り専用の副産物生成のため、
+        try_start_render/try_start_resumeのようにstatusを書き換えることはしないが、
+        受理判定は同じ_project_status_lockの下で行い、render/resume等の状態遷移と
+        レースしないようにする。
+
+        重複実行ガード: 同一project_idのpremiere_exportジョブが既に受理済み〜完了前であれば
+        PremiereExportInProgressError（PremiereExportNotAllowedErrorのサブクラス。409相当）
+        で拒否する。build_package()は毎回TTSを再合成しタイムスタンプ付きpackage_dirを作る
+        非冪等な処理のため、同一プロジェクトへの二重投入は無駄な競合を招く
+        （BUG修正: premiere_export二重実行レース）。
+
+        Returns: job_id（受理）/ None（プロジェクトが存在しない）。
+        Raises: PremiereExportNotAllowedError（status != "ready"。完成前は書き出せない）/
+                PremiereExportInProgressError（同一project_idが既に実行中）。
+        """
+        with self._project_status_lock:
+            project = projects.get_project(project_id)
+            if project is None:
+                return None
+            if project.get("status") != "ready":
+                raise PremiereExportNotAllowedError(project_id)
+            if project_id in self._premiere_exports_in_progress:
+                raise PremiereExportInProgressError(project_id)
+            self._premiere_exports_in_progress.add(project_id)
+            return self.start_premiere_export(project_id)
+
     def subscribe(self, job_id):
         q = Queue()
         with self._sub_lock:
@@ -303,6 +361,8 @@ class JobManager:
                     self._run_generate(job_id, payload)
                 elif kind == "resume":
                     self._run_resume(job_id, payload)
+                elif kind == "premiere_export":
+                    self._run_premiere_export(job_id, payload)
                 else:
                     self._run_render(job_id, payload)
             except Exception as exc:  # 予期しない例外はジョブ失敗として握りつぶす（ワーカーは止めない）
@@ -734,6 +794,106 @@ class JobManager:
 
         self._emit(job_id, "render", 100, "完成しました（尺 {:.1f}秒）".format(out_duration))
         self._finish(job_id, ok=True, path=out_path)
+
+
+    # --- premiere_export（「Premiereで編集」ボタン: 書き出しパッケージ生成） ----------
+
+    def _run_premiere_export(self, job_id, payload):
+        """readyなプロジェクトのplanから、Premiere Pro読み込み用の書き出しパッケージ一式
+        （reel.xml/captions.srt/narration.wav/style/README_import.md）を生成する（Phase A）。
+
+        セットアップが整っている環境（premiere.setup_check.check_setup()がready）では、
+        続けてpremiere.driver.run_import()でPremiereへの自動インポート（新規プロジェクト作成
+        + reel.xml/captions.srt読み込み + キャプショントラック化 + .prproj保存）まで試みる
+        （Phase B）。未セットアップ、またはPhase Bが何らかの理由で失敗した場合でも、
+        Phase Aのパッケージ自体は有効なのでジョブは常に ok:true で終える
+        （＝Phase Aのパッケージ+READMEへ静かにフォールバックする）。
+
+        既存のgenerate/render/resumeと異なり、project.status/renders は変更しない
+        （読み取り専用の副産物生成のため、成功・失敗いずれでも"ready"のまま不変）。
+        Phase A自体が失敗した場合のみerror_historyに記録する（既存パターンを踏襲しつつ、
+        statusは倒さない）。
+
+        try_start_premiere_export()が受理時に_premiere_exports_in_progressへ追加した
+        project_idを、成功/失敗/途中の予期しない例外いずれの終了経路でも必ずfinallyで
+        解放する（同一project_idへの次回のpremiere_export要求を永久にブロックしないため）。
+        """
+        project_id = payload["project_id"]
+
+        def fail(message):
+            project = projects.get_project(project_id)
+            if project is not None:
+                projects.append_error_history(project, "premiere_export", message)
+                projects.save_project(project)
+            self._emit(job_id, "error", 100, message)
+            self._finish(job_id, ok=False, path=None)
+
+        try:
+            project = projects.get_project(project_id)
+            if project is None:
+                fail("プロジェクトが見つかりません: {}".format(project_id))
+                return
+
+            self._emit(job_id, "package", 10, "書き出しパッケージを準備中…")
+
+            def _progress(pct, message):
+                pct_clamped = max(10, min(90, int(pct)))
+                self._emit(job_id, "package", pct_clamped, message)
+
+            try:
+                result = premiere_package.build_package(project_id, progress_cb=_progress)
+            except Exception as exc:
+                fail("Premiere書き出しパッケージの作成に失敗しました: {}".format(exc))
+                return
+
+            self._emit(job_id, "package", 100, "書き出しが完了しました")
+
+            # --- Phase B: セットアップが整っていればPremiereへ自動インポートを試みる ---
+            setup = premiere_setup_check.check_setup()
+            auto_result = None
+            if setup["ready"]:
+                def _premiere_progress(pct, message):
+                    pct_clamped = max(90, min(98, int(pct)))
+                    self._emit(job_id, "premiere", pct_clamped, message)
+
+                try:
+                    auto_result = premiere_driver.run_import(
+                        result["package_dir"], project_id, progress_cb=_premiere_progress
+                    )
+                except Exception as exc:  # run_import自体は例外を捕捉する設計だが、念のため二重防御する
+                    auto_result = {
+                        "ok": False, "prproj_path": None, "caption_track_created": False,
+                        "detail": "Premiere自動インポート中に予期しないエラーが発生しました: {}".format(exc),
+                    }
+
+            auto_ok = bool(auto_result and auto_result.get("ok"))
+
+            # premiere_exports履歴（project.jsonへ追記。status/rendersは不変のまま）
+            export_record = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "package_dir": result["package_dir"],
+                "prproj_path": (auto_result or {}).get("prproj_path"),
+                "auto": auto_ok,
+            }
+            project_for_history = projects.get_project(project_id)
+            if project_for_history is not None:
+                project_for_history["premiere_exports"] = (
+                    project_for_history.get("premiere_exports") or []
+                ) + [export_record]
+                projects.save_project(project_for_history)
+
+            if auto_ok:
+                final_message = "Premiereに組み上げました"
+            else:
+                final_message = "パッケージを書き出しました（READMEから手動で読み込めます）"
+            self._emit(job_id, "premiere", 99, final_message)
+            self._publish(job_id, {
+                "done": True, "ok": True, "path": result["package_dir"],
+                "auto": auto_ok, "message": final_message,
+            })
+        finally:
+            with self._project_status_lock:
+                self._premiere_exports_in_progress.discard(project_id)
 
 
 # ---------------------------------------------------------------------------

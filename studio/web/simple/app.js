@@ -35,7 +35,8 @@ const state = {
   savingEdit: false,
   editingCaptionId: null,
 
-  job: null, // { phase:'generate'|'render', totalPhases, stage, progress, message }
+  job: null, // { phase:'generate'|'render'|'premiere_export', totalPhases, stage, progress, message }
+  premiereExport: null, // { path } | null（「Premiereで編集」書き出し完了後の書き出し先パス）
 };
 
 let unsubscribeJob = null;
@@ -193,6 +194,7 @@ async function finishRender(project) {
     draftPlan: project.plan ? deepClone(project.plan) : null,
     dirty: false,
     job: null,
+    premiereExport: null,
     screen: failed ? "edit" : "result",
   });
   loadProjects();
@@ -354,11 +356,55 @@ async function resumeGenerate() {
   }
 }
 
+// ---------- Premiereで編集（書き出しパッケージの生成） ----------
+async function beginPremiereExport() {
+  const project = state.current;
+  if (!project) return;
+  stopJobSub();
+  stopPoll();
+  setState({
+    screen: "creating",
+    premiereExport: null,
+    job: { phase: "premiere_export", totalPhases: 1, stage: "queued", progress: 0, message: "" },
+  });
+  try {
+    const { job_id } = await api.premiereExport(project.id);
+    unsubscribeJob = api.subscribeJobEvents(job_id, {
+      onMessage: (d) => {
+        if (!state.job) return;
+        setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
+      },
+      onDone: (d) => {
+        stopJobSub();
+        setState({
+          screen: "result",
+          job: null,
+          premiereExport: d.ok && d.path
+            ? { path: d.path, auto: !!d.auto, message: d.message || "" }
+            : null,
+        });
+        if (!d.ok) showApiError(new Error("Premiereへの書き出しに失敗しました"), "書き出しに失敗しました");
+      },
+      onError: (err) => {
+        showApiError(err, "Premiereへの書き出し中にエラーが発生しました");
+        stopJobSub();
+        setState({ screen: "result", job: null });
+      },
+    });
+  } catch (err) {
+    showApiError(err, "Premiereへの書き出しを開始できませんでした");
+    setState({ screen: "result", job: null });
+  }
+}
+
 // ---------- できあがり画面の操作 ----------
 function goEdit() { setState({ screen: "edit", editingCaptionId: null }); }
 function goHomeFresh() {
   stopJobSub(); stopPoll();
-  setState({ screen: "home", current: null, draftPlan: null, job: null, theme: "", productUrl: "", submitError: null });
+  setState({
+    screen: "home", current: null, draftPlan: null, job: null, premiereExport: null,
+    theme: "", productUrl: "", submitError: null,
+  });
   loadProjects();
 }
 function saveLink() {
@@ -581,6 +627,9 @@ const STEP_DEFS_RENDER_ONLY = [
   { label: "映像を生成中" },
   { label: "仕上げ中" },
 ];
+const STEP_DEFS_PREMIERE = [
+  { label: "Premiere用ファイルを準備中" },
+];
 const STEP_ICON_DONE = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.2 11.7 13 4.5"/></svg>`;
 
 function overallProgress(job) {
@@ -608,7 +657,9 @@ function stepIconHtml(i, activeIdx) {
 function renderCreating() {
   const el = document.getElementById("simple-app");
   const job = state.job || { phase: "generate", totalPhases: 2, progress: 0, message: "" };
-  const steps = job.totalPhases === 2 ? STEP_DEFS_FULL : STEP_DEFS_RENDER_ONLY;
+  const steps = job.phase === "premiere_export"
+    ? STEP_DEFS_PREMIERE
+    : (job.totalPhases === 2 ? STEP_DEFS_FULL : STEP_DEFS_RENDER_ONLY);
   const pct = Math.round(clamp(overallProgress(job), 0, 100));
   const activeIdx = activeStepIndex(job, steps);
   const theme = state.current ? state.current.theme : state.theme;
@@ -637,6 +688,23 @@ function renderCreating() {
 }
 
 // ---------- 画面: できあがり ----------
+function premiereExportBannerHtml() {
+  if (!state.premiereExport) return "";
+  const { path, auto, message } = state.premiereExport;
+  // auto=true: Premiereへの自動インポートまで完了（Phase B）。
+  // auto=false: パッケージの書き出しのみ（Phase A・READMEから手動で読み込む）。
+  const title = auto ? "Premiereに組み上げました" : "書き出し先";
+  const hint = auto
+    ? "Premiereでプロジェクトが開かれています。字幕トラックが自動作成されなかった場合は、captions.srtをタイムラインへドラッグしてください。"
+    : "開き方はフォルダ内のREADME_import.mdを見てください";
+  return `
+    <div class="s-premiere-banner">
+      <div class="s-premiere-banner__title">${escapeHtml(title)}</div>
+      <div class="s-premiere-banner__path">${escapeHtml(path)}</div>
+      <div class="s-premiere-banner__hint">${escapeHtml(message || hint)}</div>
+    </div>`;
+}
+
 function renderResult() {
   const el = document.getElementById("simple-app");
   const project = state.current;
@@ -664,12 +732,16 @@ function renderResult() {
           <button type="button" class="s-cta-secondary" id="s-goedit">編集する</button>
           <button type="button" class="s-cta-secondary" id="s-goagain">もう一度作成</button>
         </div>
+        <button type="button" class="s-cta-secondary" id="s-premiere-export">Premiereで編集</button>
+        ${premiereExportBannerHtml()}
       </div>
     </div>
     ${footerHtml()}
   `;
   el.querySelector("#s-goedit").addEventListener("click", goEdit);
   el.querySelector("#s-goagain").addEventListener("click", goHomeFresh);
+  const premiereBtn = el.querySelector("#s-premiere-export");
+  if (premiereBtn) premiereBtn.addEventListener("click", beginPremiereExport);
 }
 
 // ---------- 画面: かんたん編集 ----------

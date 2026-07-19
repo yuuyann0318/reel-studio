@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "source": "reference_video",
+  "structure": {
+    "total_sec": 18,
+    "cut_min_sec": 1.0,
+    "cut_max_sec": 2.0,
+    "transitions": "cut_only",
+    "beats": ["hook_norm_break", "problem_empathy", "product", "testimonial", "cta_comment"]
+  },
+  "telop": {
+    "font": "Noto Sans JP Black",
+    "fill": "#FFFFFF",
+    "stroke": {"color": "#000000", "width": "thin"},
+    "position": "center_upper",
+    "align": "center",
+    "max_lines": 2,
+    "animation": "none"
+  },
+  "emphasis": {
+    "red_circle": true,
+    "asset": "assets/overlays/red_circle.png"
+  },
+  "audio": {
+    "sfx": false,
+    "bgm_gain_db": -8,
+    "narration": true
+  },
+  "compliance_note": "構成・編集様式のみTTP。文言コピーは薬機法違反のため厳禁"
+}

@@ -33,7 +33,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from pipeline import render
 from pipeline.config import load_config, project_root, output_dir
 from studio.server import projects
-from studio.server.jobs import job_manager, RenderConflictError, ResumeNotAllowedError, UnrenderedShotsError
+from studio.server.jobs import (
+    job_manager, RenderConflictError, ResumeNotAllowedError, UnrenderedShotsError,
+    PremiereExportNotAllowedError,
+)
 
 
 @asynccontextmanager
@@ -302,6 +305,27 @@ async def resume_project(project_id: str):
         return
     except ResumeNotAllowedError:
         _conflict("このプロジェクトは失敗状態ではないため、続きから生成は不要です")
+        return
+    if job_id is None:
+        _not_found("プロジェクトが見つかりません: {}".format(project_id))
+    return {"job_id": job_id}
+
+
+@app.post("/api/projects/{project_id}/premiere-export", status_code=202)
+async def premiere_export(project_id: str):
+    """「Premiereで編集」ボタン: readyなプロジェクトから書き出しパッケージ生成ジョブを起動する。
+
+    status != "ready" のプロジェクト（未完成・処理中・失敗中）は409で拒否する
+    （project.status自体は変更しない読み取り専用の副産物生成のため、renderのような
+    generating/rendering遷移は行わない）。
+    """
+    if not projects.is_safe_project_id(project_id):
+        _bad_request("invalid_project_id", "project_idの形式が不正です")
+
+    try:
+        job_id = job_manager.try_start_premiere_export(project_id)
+    except PremiereExportNotAllowedError:
+        _conflict("このプロジェクトは完成していないため、Premiereへの書き出しはできません")
         return
     if job_id is None:
         _not_found("プロジェクトが見つかりません: {}".format(project_id))

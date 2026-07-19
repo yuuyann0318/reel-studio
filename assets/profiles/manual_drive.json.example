@@ -1,0 +1,6 @@
+{
+  "_note": "このファイルは premiere/profile.load_profile() が読み込む manual_drive.json のプレースホルダです。実際に手動調整値を反映したいときは、このファイルを同じディレクトリに manual_drive.json という名前でコピーし、上書きしたいキーだけを残して保存してください（load_profile は ttp_reference.json の上に manual_drive.json を浅いマージで上書きします＝ここに書いたキーだけが優先されます）。manual_drive.json が存在しない、または空(=中身が {} や空ファイル)の場合は ttp_reference.json の値がそのまま使われます。",
+  "telop": {
+    "font": "Noto Sans JP Black"
+  }
+}

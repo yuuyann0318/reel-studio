@@ -64,3 +64,20 @@ higgsfield-auto-reel の独立レビュー(codex)＋目視検収で確定した�
 ### 同時に実施した機能改善（不具合ではない）
 - **テロップ再設計(上品モダン化)**: 縁6px黒→2.5pxダークチャコール+半透明ソフトシャドウ / 全テロップにフェード+マイクロポップ(94%→100%/120ms) / 自動アクセント着色(数字+単位・「」内・商品名トークン、最大2箇所・60%抑制) / 2行分割の行長バランス改善(BUG-2/5の語中分割防止は維持) / vertical_hookは列stagger(+90ms)+縦積み部分着色+accent_color対応。実機検証: 両プリセットを再レンダリング(render-only・クレジット0)しビフォーアフターをフレーム目視、ASSタグ(\fad/\t/\c)を実測検品。
 - クレジット切れエラーの日本語化(「Higgsfieldのクレジットが不足しています。チャージしてから続きから作成…」)。
+
+## 2026-07-20: Premiere Pro連携追加時の棚卸し（5周目）
+
+発見経路: 独立レビュー(exec-sonnet)+Codex再レビュー。**いずれもコミット前に検出・修正済み**。pytest 473 passed。
+
+| ID | 重大度 | 発見経路 | 症状 | 修正内容 | 状態 |
+|---|---|---|---|---|---|
+| BUG-26 | 高 | 独立レビュー | premiere-export APIに二重投入ガードが無く、パッケージdirが秒精度のみのため同一秒の2ジョブが同じdirへ並行書き込み(ファイル破損リスク)。 | package_dirにuuid8サフィックス+JobManagerにproject_id単位の実行中セット(二重投入は409)。実機確認: dir名 <ts>_<uuid8> 形式。 | 修正済み・実機検証済み |
+| BUG-27 | 中 | 独立レビュー | reel.xml(フレーム丸め累積)とcaptions.srt(浮動小数累積)の計算方式が異なり、ショット数に比例して字幕とカット位置がズレる(4ショットで65ms実測)。 | frame_align_durations()共通ヘルパーで両者を統一。実機確認: KINUI 14クリップ全てでXML/SRT開始時刻一致(<1ms)。Codex再レビュー指摘のfps float/int不整合も是正。 | 修正済み・実機検証済み |
+| BUG-28 | 低 | 独立レビュー | ゼロ長trimショットがゼロ長SRTエントリ/clipitemとして出力される。 | 1フレーム未満のショットを両方でスキップ。 | 修正済み・テスト検証済み |
+| BUG-29 | 低 | 独立レビュー | setup_premiere_link.sh のmktempゴミファイル+ダウンロード物の無検証展開。 | mktemp -d化+unzip -t整合性チェック+展開ファイル数表示。 | 修正済み・構文/テスト検証済み |
+
+### 既知の残課題(未修正・記録のみ)
+- premiere_export実行中に PUT /plan でプラン編集すると、build_packageが読むproject.jsonと競合しうる(実害=パッケージ内の新旧混在。再書き出しで解消・破壊なし)。修正はprojects.py/app.pyを跨ぐロック設計が必要なため次回スコープ。
+
+### 同時に実施した機能追加（不具合ではない）
+- **Premiere Pro連携(Phase A+B)**: 「Premiereで編集」ボタン→ reel.xml(FCP7 xmeml・V1トリム済みクリップ列+A1ナレ+A2 BGM+A3 SFX+V3赤丸プレースホルダ)+captions.srt(編集可能字幕)+narration.wav(Fish Audio)+README+スタイル仕様を書き出し。pymiereセットアップ済み環境では自動でPremiereに組み上げ+.prproj保存(未セットアップは手動importフォールバック)。参考TikTok動画のTTP編集プロファイル(assets/profiles/ttp_reference.json)を新設し、文言コピーは薬機法検査で遮断(構成・様式のみ再現)。実機検証: KINUI実プロジェクトでパッケージ生成・xmeml妥当性・%20パスエンコード・タイミング一致を確認。**pymiere Link拡張の導入(永続変更)はユーザー本人実行待ち**(bin/setup_premiere_link.sh)。
