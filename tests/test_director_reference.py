@@ -137,14 +137,18 @@ def test_build_critique_prompt_injects_reference_block():
 # 空置換のバイト等価回帰: reference未使用時は既存プロンプト出力が完全一致
 # （このハッシュはreference_block/REFERENCE_TTP_BLOCKプレースホルダ導入前の
 #  build_director_prompt/build_critique_prompt出力から採取した既知値）。
+#
+# 2026-07-20: 音声主導タイミング同期モード対応でshots[].narration_jpの出力指示を
+# director_prompt.txt/director_prompt_vertical_hook.txt/critique_prompt.txtへ追記した
+# （意図的なプロンプト内容変更）ため、このハッシュ値を新しいベースラインへ更新した。
 # ---------------------------------------------------------------------------
 
 _EXPECTED_SHA256 = {
-    "default_basic": "f1a17b0709b869c6380f5ce2be57c2510821bdafafb8b98014c6bcfa046534a3",
-    "default_with_angle": "c8c87adbdb7f897841fefaf2ff506e4246aaab0e9528ad6942849c46171759ef",
-    "vertical_hook_basic": "d12da123c0eec87ae1e07130726a0d92262d19491fd2f4897bc1cc107033e598",
-    "default_with_product": "4de982684ce4c2c78c8826226cc12280d3507f665103232b4422a30c9080a742",
-    "critique_basic": "5f380e4f172e4d47c5154168bceb6444fbee3a3da84be1fa14989ec0f415f81c",
+    "default_basic": "6f48a588fe6ad6e1adb06c5d1c878120a7056e00c062e264a13418a687a0cc80",
+    "default_with_angle": "7bf37c2786ccf8716907422176545ce07b1aabce87910995336b4d0b34589a80",
+    "vertical_hook_basic": "8f74b09e1a186b2319357b861a50ea145d53008b3f4a80c425c2d56cf5e2b2a4",
+    "default_with_product": "e494b3830a3f1c70becff862d76fb9ca01ee8e02cae9187863ccd41201009f7f",
+    "critique_basic": "8bf7bd5eb87393ef28bab7430725ce9e991de93447e7f04eba54406dde67777f",
 }
 
 

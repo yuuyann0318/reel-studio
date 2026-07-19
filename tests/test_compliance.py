@@ -102,3 +102,35 @@ def test_check_plan_ng_patterns_accepts_precompiled_pattern():
     )
     assert result["ok"] is False
     assert result["violations"][0]["word"] == "必ず痩せ"
+
+
+# --- shots[].narration_jp（音声主導タイミング同期モードの断片テキスト）の検査漏れ修正 -------
+
+def _plan_with_narration_jp(narration_jp, narration_script="普通のナレーションです。"):
+    return {
+        "concept": "普通のコンセプト",
+        "hook": "普通のフック",
+        "narration_script": narration_script,
+        "shots": [
+            {"id": "s1", "caption_jp": "普通のキャプション", "visual_prompt": "abstract bg", "narration_jp": narration_jp},
+        ],
+    }
+
+
+def test_check_plan_detects_ng_word_in_shot_narration_jp():
+    """narration_script(全文)にはNGワードが無くても、shots[].narration_jp(断片)にあれば検出する
+    （音声主導タイミング同期モードで実際にTTS音声化される文言のため検査漏れがあってはならない）。"""
+    result = compliance.check_plan(_plan_with_narration_jp("このやり方なら絶対稼げるようになります。"))
+    assert result["ok"] is False
+    assert any(v["word"] == "絶対稼げる" and v["field"] == "shots[s1].narration_jp" for v in result["violations"])
+
+
+def test_check_plan_narration_jp_absent_is_unaffected():
+    """narration_jpキー自体が無いshot（従来の全文方式のみのplan）の挙動は不変。"""
+    plan = {
+        "concept": "c", "hook": "h", "narration_script": "普通のナレーションです。",
+        "shots": [{"id": "s1", "caption_jp": "普通のキャプション", "visual_prompt": "abstract bg"}],
+    }
+    result = compliance.check_plan(plan)
+    assert result["ok"] is True
+    assert result["violations"] == []

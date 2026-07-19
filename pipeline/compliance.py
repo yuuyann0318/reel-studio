@@ -75,6 +75,12 @@ def _collect_texts(plan):
             texts.append(("shots[{}].caption_jp".format(sid), shot["caption_jp"]))
         if shot.get("visual_prompt"):
             texts.append(("shots[{}].visual_prompt".format(sid), shot["visual_prompt"]))
+        # narration_jp（音声主導タイミング同期モード用のショット別ナレーション断片）は
+        # narration_script（全文）とは別にTTS実音声へそのまま渡る文言のため、
+        # ここで検査対象に加えないとcheck_plan()をすり抜けてNGワードが音声化されてしまう
+        # （narration_scriptだけ検査していた従来の検査漏れの修正）。
+        if shot.get("narration_jp"):
+            texts.append(("shots[{}].narration_jp".format(sid), shot["narration_jp"]))
     return texts
 
 

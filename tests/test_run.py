@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """run.py のstageロジック検証（BUG-3: QA失敗の伝播 / BUG-4: ng_wordsのデフォルト有効化）。"""
+from pathlib import Path
+
 import pytest
 
 import run
@@ -147,3 +149,106 @@ def test_main_argparse_style_vertical_hook_is_forwarded(monkeypatch):
 def test_main_argparse_style_rejects_invalid_choice():
     with pytest.raises(SystemExit):
         run.main(["--theme", "t", "--style", "not_a_real_style"])
+
+
+# ---------------------------------------------------------------------------
+# 音声主導タイミング同期モード（CLI経路 run.run_pipeline）
+# ---------------------------------------------------------------------------
+
+_SYNC_TEST_SHOTS = [
+    {
+        "id": "s1", "visual_prompt": "abstract a", "motion_preset": "static", "duration_sec": 2.0,
+        "caption_jp": "テロップ1", "narration_jp": "断片1です。",
+    },
+    {
+        "id": "s2", "visual_prompt": "abstract b", "motion_preset": "static", "duration_sec": 5.0,
+        "caption_jp": "テロップ2", "narration_jp": "断片2です。",
+    },
+]
+
+
+def _fake_plan_with_shots(shots, narration_script="断片1です。断片2です。"):
+    return {
+        "version": 1, "meta": {"source": "ai"}, "concept": "c", "hook": "h",
+        "narration_script": narration_script, "shots": shots, "bgm_mood": "none",
+    }
+
+
+@pytest.mark.slow
+def test_run_pipeline_segment_sync_mode_computes_display_durations_and_pads_or_trims(monkeypatch):
+    """narration_jpが全shotsに揃っていれば同期モードになり、断片実測尺(+0.25秒)で
+    ショットごとにtpad(不足分)/truncate(超過分)が使い分けられること。"""
+    cfg = load_config()
+
+    monkeypatch.setattr(run.director, "run_director", lambda theme, config, **kw: _fake_plan_with_shots(_SYNC_TEST_SHOTS))
+
+    fake_segments = [
+        {"path": "/tmp/seg0.wav", "duration_sec": 3.0},  # display=3.25 > shot1 duration(2.0) -> pad
+        {"path": "/tmp/seg1.wav", "duration_sec": 1.0},  # display=1.25 < shot2 duration(5.0) -> truncate
+    ]
+
+    def _fake_synthesize_segments(texts, out_dir, cfg_, voice="Kyoko"):
+        assert texts == ["断片1です。", "断片2です。"]
+        return {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None}
+
+    monkeypatch.setattr(run.tts_mod, "synthesize_segments", _fake_synthesize_segments)
+
+    calls = []
+
+    def _fake_run_ffmpeg(cmd, timeout_sec=None):
+        calls.append(cmd)
+        return {"returncode": 0, "stderr": ""}
+
+    monkeypatch.setattr(run.render, "run_ffmpeg", _fake_run_ffmpeg)
+
+    report = run.run_pipeline("同期モードCLIテスト", 7.0, "mock", True, cfg, quality="single", style="default")
+
+    assert report["stages"]["tts"]["mode"] == "segment"
+    assert report["stages"]["tts"]["backend"] == "fake_seg"
+
+    # run.pyの実行順序はTTS(Stage4: ナレーション断片配置)が先、正規化(Stage5)が後。
+    # calls[0]=ナレーション断片配置concat calls[1]=s1正規化 calls[2]=s2正規化
+    assert "adelay=" in " ".join(calls[0])
+    assert "tpad=stop_mode=clone:stop_duration=1.250" in " ".join(calls[1])
+    assert calls[1][calls[1].index("-t") + 1] == "3.250"
+    assert "tpad" not in " ".join(calls[2])
+    assert calls[2][calls[2].index("-t") + 1] == "1.250"
+
+
+@pytest.mark.slow
+def test_run_pipeline_missing_narration_jp_on_some_shots_falls_back_to_full_mode(monkeypatch):
+    """一部のshotsだけnarration_jpが欠けている場合は同期モードを試みず、従来の全文方式になる。"""
+    cfg = load_config()
+
+    shots = [
+        _SYNC_TEST_SHOTS[0],
+        {"id": "s2", "visual_prompt": "abstract b", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "テロップ2"},
+    ]
+    monkeypatch.setattr(
+        run.director, "run_director",
+        lambda theme, config, **kw: _fake_plan_with_shots(shots, narration_script="全文ナレーションです。"),
+    )
+    monkeypatch.setattr(
+        run.tts_mod, "synthesize_segments",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("narration_jpが欠けているのに呼ばれてはいけない")),
+    )
+
+    calls = []
+    monkeypatch.setattr(run.render, "run_ffmpeg", lambda cmd, timeout_sec=None: calls.append(cmd) or {"returncode": 0, "stderr": ""})
+
+    called = {}
+
+    class _FakeFullBackend:
+        name = "fake_full"
+
+        def synthesize(self, text, out_wav_path, cfg=None):
+            called["text"] = text
+            Path(out_wav_path).write_bytes(b"RIFF....WAVEfmt ")
+            return {"backend": "fake_full", "duration_sec": 4.0, "is_silent": False}
+
+    monkeypatch.setattr(run.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+
+    report = run.run_pipeline("フォールバックCLIテスト", 4.0, "mock", True, cfg, quality="single", style="default")
+
+    assert report["stages"]["tts"]["mode"] == "full"
+    assert called["text"] == "全文ナレーションです。"

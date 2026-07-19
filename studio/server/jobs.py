@@ -35,6 +35,7 @@ from queue import Empty, Queue
 
 from pipeline import compliance
 from pipeline import director
+from pipeline import edit_profile
 from pipeline import product_images
 from pipeline import render
 from pipeline import subtitles
@@ -94,6 +95,62 @@ def _default_analyze_reference(url, cfg, progress_cb=None):
 
 
 analyze_reference = _default_analyze_reference
+
+
+def _plan_narration_became_stale(old_plan, new_plan):
+    """PUT /plan保存前後で narration_text（全文ナレーション）または有効(enabled)ショットの
+    trim(start/end) が変わったかどうかを判定する。
+
+    project["narration_segments"]（_run_generateが shots[].narration_jp から作る、
+    音声主導タイミング同期モード用の「ショットid -> 断片テキスト」）は、保存時点の
+    narration_text/各ショットのtrimと対応づいている前提でしか正しく使えない。
+    ユーザーがStudio/簡易UIでnarration_textを書き換えたり、いずれかの有効ショットの
+    trimを変えたりした後にそのまま古いnarration_segmentsでレンダリングすると、
+    古い音声がそのまま残る（テキスト変更が音声に反映されない）か、trimでずれたショット
+    境界に対して古い断片尺のまま同期させてしまう。ここでTrueを返した場合、呼び出し側
+    (try_update_plan)がnarration_segmentsをクリアし、次回レンダリングを全文方式(full)へ
+    自動フォールバックさせる。
+    """
+    old_plan = old_plan or {}
+    if (old_plan.get("narration_text") or "") != (new_plan.get("narration_text") or ""):
+        return True
+    old_trim_by_id = {
+        s.get("id"): s.get("trim")
+        for s in (old_plan.get("shots") or [])
+        if isinstance(s, dict)
+    }
+    for shot in new_plan.get("shots") or []:
+        if not isinstance(shot, dict) or not shot.get("enabled", True):
+            continue
+        if old_trim_by_id.get(shot.get("id")) != shot.get("trim"):
+            return True
+    return False
+
+
+_DURATION_DRIFT_WARN_THRESHOLD_SEC = 3.0
+
+
+def _duration_drift_info(out_duration, target_duration_sec):
+    """レンダリング実出力尺と目標尺(project.target_duration_sec)の差分を計算する。
+
+    Returns: (drift_sec: float|None, warning_message: str|None)
+    target_duration_secが取得できない場合は (None, None)。
+    |drift|>3.0秒の場合のみwarning_messageを返す。この警告はSSE通知/project["tts"]記録用の
+    可視化に留め、QAの合否判定式（qa/qa_check.py）は変更しない（誤検知でrunを止めるリスクを
+    避けるため。音声の実尺に合わせて意図的に尺が動くのは同期モードの仕様）。
+    """
+    if target_duration_sec is None:
+        return None, None
+    try:
+        target = float(target_duration_sec)
+    except (TypeError, ValueError):
+        return None, None
+    drift = out_duration - target
+    warning = None
+    if abs(drift) > _DURATION_DRIFT_WARN_THRESHOLD_SEC:
+        direction = "長く" if drift > 0 else "短く"
+        warning = "※目標尺より{:.1f}秒{}なりました（音声に合わせたため）".format(abs(drift), direction)
+    return round(drift, 2), warning
 
 
 def _resolve_bgm_by_mood(mood):
@@ -257,6 +314,13 @@ class JobManager:
         （= try_start_render/try_start_resumeと同じロックで直列化されるため、
         このメソッド実行中に別スレッドがstatusを書き換えることもない）。
 
+        narration_segmentsの陳腐化ガード: 保存前後で narration_text または有効ショットの
+        trim が変わっていれば project["narration_segments"] をクリアし、次回レンダリングを
+        全文方式(full)へ自動フォールバックさせる（_plan_narration_became_stale参照。古い音声の
+        残留防止＋ユーザーのtrim編集意図の尊重）。project["tts"]（直近レンダーのbackend/mode
+        表示）自体はここでは更新しない＝次にレンダリングが実行されるまでは直近の実績値の
+        ままで、これは「まだ再レンダリングしていない」という事実と矛盾しない。
+
         Returns: 保存後のproject dict（更新後の最新状態）。存在しなければNone。
         Raises: RenderConflictError（保存直前の再読込でstatusがgenerating/rendering中）。
         """
@@ -266,6 +330,8 @@ class JobManager:
                 return None
             if project.get("status") in ("generating", "rendering"):
                 raise RenderConflictError(project_id)
+            if _plan_narration_became_stale(project.get("plan"), normalized_plan):
+                project["narration_segments"] = {}
             project["plan"] = normalized_plan
             projects.save_project(project)
             return project
@@ -603,9 +669,21 @@ class JobManager:
             "sfx": [],
             "subtitle_style": dict(projects.DEFAULT_SUBTITLE_STYLE, preset=style),
         }
+        # 音声主導タイミング同期モード用: shots[].narration_jp（あれば）をショットidをキーに
+        # project直下（plan.shotsの外）に保存する。plan.shotsは以後 PUT /api/projects/{id}/plan
+        # -> projects.validate_plan() の既知キーのみへ正規化されnarration_jpは残らないため、
+        # project直下に持たせることでStudioでの再編集・再レンダリング後も同期モードが
+        # 維持されるようにする（narration_jpが無い/一部欠けているショットがあれば
+        # _render_project側の判定で自動的に全文方式へフォールバックする）。
+        narration_segments = {}
+        for shot in shots:
+            njp = shot.get("narration_jp")
+            if isinstance(njp, str) and njp.strip():
+                narration_segments[shot["id"]] = njp.strip()
         project = projects.get_project(project_id)
         if project is not None:
             project["plan"] = studio_plan
+            project["narration_segments"] = narration_segments
             projects.save_project(project)
 
         self._emit(job_id, "visual", 25, "ショットを生成中… (0/{})".format(len(shots)))
@@ -665,6 +743,11 @@ class JobManager:
             return
 
         project = projects.get_project(project_id)
+        drift_sec, drift_warning = _duration_drift_info(out_duration, project.get("target_duration_sec"))
+        if drift_sec is not None:
+            tts_meta["duration_drift_sec"] = drift_sec
+        if drift_warning:
+            self._emit(job_id, "render", 99, drift_warning)
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["tts"] = tts_meta
@@ -741,6 +824,11 @@ class JobManager:
             return
 
         project = projects.get_project(project_id)
+        drift_sec, drift_warning = _duration_drift_info(out_duration, project.get("target_duration_sec"))
+        if drift_sec is not None:
+            tts_meta["duration_drift_sec"] = drift_sec
+        if drift_warning:
+            self._emit(job_id, "render", 99, drift_warning)
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["tts"] = tts_meta
@@ -857,6 +945,11 @@ class JobManager:
             return
 
         project = projects.get_project(project_id)
+        drift_sec, drift_warning = _duration_drift_info(out_duration, project.get("target_duration_sec"))
+        if drift_sec is not None:
+            tts_meta["duration_drift_sec"] = drift_sec
+        if drift_warning:
+            self._emit(job_id, "render", 99, drift_warning)
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["tts"] = tts_meta
@@ -976,10 +1069,22 @@ class JobManager:
 def _render_project(project_id, plan, cfg):
     """plan（Studio形式・正規化済み）からffmpegレンダリングを実行し、(出力パス, 出力尺, tts_meta) を返す。
 
-    トリム済みショットの正規化+連結 -> TTS(常に現在のnarration_textから再生成) ->
-    ASS再生成(subtitle_style反映) -> BGM(gain_db)+SFX(at_sec配置)オーバーレイ -> 最終loudnorm。
-    tts_metaは tts_mod.get_tts_backend().synthesize() の返り値そのもの
-    （backend/duration_sec/is_silent/requested_backend/fallback_reason）。
+    トリム済みショットの正規化+連結 -> TTS -> ASS再生成(subtitle_style反映) ->
+    BGM(gain_db)+SFX(at_sec配置)オーバーレイ -> 最終loudnorm。
+
+    TTSは2モードある:
+      - segment（音声主導タイミング同期モード）: project直下のnarration_segments
+        （_run_generateが保存。shot id -> narration_jp）が、有効ショット全件について
+        非空で揃っている場合にのみ試みる。tts_mod.synthesize_segments()で断片ごとに
+        合成し、成功したら各ショットの表示尺 = max(断片実測尺+0.25秒, 1.2秒)を採用する
+        （テロップ/クリップ尺もこの値に統一するため、音声=テロップ=ショット境界が
+        原理的に一致する）。断片TTSが1つでも失敗したらfullへフォールバックする。
+      - full（従来方式）: narration_textの全文を1本のTTSで合成し、各ショットの表示尺は
+        従来どおりtrim尺（trim.end - trim.start）を使う。narration_jpが無い旧プロジェクト、
+        またはsegment合成が失敗した場合は常にこちら。
+    tts_metaはいずれのモードでも {"backend","duration_sec","is_silent","mode",...} を持つ
+    （mode以外のキーはfullなら tts_mod.get_tts_backend().synthesize() の返り値そのもの、
+    segmentなら synthesize_segments() の結果から組み立てたもの）。
     """
     pdir = projects.project_dir(project_id)
     work_dir = pdir / "_render_work" / (time.strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:6])
@@ -990,24 +1095,69 @@ def _render_project(project_id, plan, cfg):
     if not enabled_shots:
         raise RuntimeError("有効なショットが1つもありません（すべてenabled=falseです）")
 
+    project_snapshot = projects.get_project(project_id)
+    narration_segments_map = (project_snapshot or {}).get("narration_segments") or {}
+    sync_enabled = bool(narration_segments_map) and all(
+        isinstance(narration_segments_map.get(s["id"]), str) and narration_segments_map.get(s["id"]).strip()
+        for s in enabled_shots
+    )
+
+    sync_result = None
+    if sync_enabled:
+        seg_texts = [narration_segments_map[s["id"]] for s in enabled_shots]
+        seg_dir = work_dir / "narration_segments"
+        sync_result = tts_mod.synthesize_segments(seg_texts, str(seg_dir), cfg, voice=cfg.get("voice", "Kyoko"))
+        if not sync_result.get("ok"):
+            sync_enabled = False
+
+    # edit enhancement層（カット点SE/パンチイン/BGM音量カーブ/フックのインパクト）。
+    # プロファイル読み込み自体が失敗しても従来レンダを継続する（edit_prof=Noneなら以降すべて無効化）。
+    backend_name = (project_snapshot or {}).get("backend") or "mock"
+    try:
+        edit_prof = edit_profile.load_edit_profile(cfg)
+    except Exception:
+        edit_prof = None
+
     trimmed_dir = work_dir / "clips"
     trimmed_dir.mkdir(parents=True, exist_ok=True)
     clip_paths = []
     telop_shots = []
-    for shot in enabled_shots:
+    segment_specs = []
+    cursor = 0.0
+    for i, shot in enumerate(enabled_shots):
         src_path = projects.resolve_clip_path(project_id, shot["clip_path"])
         trim_start = shot["trim"]["start"]
         trim_end = shot["trim"]["end"]
         trim_duration = trim_end - trim_start
+
+        if sync_enabled:
+            seg = sync_result["segments"][i]
+            display_duration = render.compute_synced_shot_duration(seg["duration_sec"])
+        else:
+            display_duration = trim_duration
+
+        duration_sec, pad_to_duration_sec = render.resolve_normalize_pad_args(
+            trim_duration, display_duration if sync_enabled else None
+        )
+        punch_in_filter = None
+        if edit_prof is not None:
+            try:
+                punch_in_filter = render.resolve_punch_in_filter_for_shot(i, display_duration, edit_prof, backend_name)
+            except Exception:
+                punch_in_filter = None
         out_path = trimmed_dir / "{}.mp4".format(shot["id"])
         cmd = render.build_normalize_clip_cmd(
-            ffmpeg_bin, str(src_path), str(out_path), duration_sec=trim_duration, trim_start=trim_start
+            ffmpeg_bin, str(src_path), str(out_path), duration_sec=duration_sec, trim_start=trim_start,
+            pad_to_duration_sec=pad_to_duration_sec, punch_in_filter=punch_in_filter,
         )
         res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
         if res["returncode"] != 0:
             raise RuntimeError("ショット{}のトリムに失敗しました: {}".format(shot["id"], res["stderr"][-500:]))
         clip_paths.append(str(out_path))
-        telop_shots.append({"id": shot["id"], "duration_sec": trim_duration, "caption_jp": shot["caption"]})
+        telop_shots.append({"id": shot["id"], "duration_sec": display_duration, "caption_jp": shot["caption"]})
+        if sync_enabled:
+            segment_specs.append({"path": seg["path"], "start_sec": cursor})
+        cursor += display_duration
 
     list_path = work_dir / "list.txt"
     list_path.write_text(render.build_concat_list_content(clip_paths), encoding="utf-8")
@@ -1020,8 +1170,20 @@ def _render_project(project_id, plan, cfg):
     out_duration = sum(s["duration_sec"] for s in telop_shots)
 
     narration_path = work_dir / "narration.wav"
-    tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
-    tts_meta = tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg)
+    if sync_enabled:
+        cmd = render.build_narration_segments_concat_cmd(ffmpeg_bin, segment_specs, out_duration, str(narration_path))
+        res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
+        if res["returncode"] != 0:
+            raise RuntimeError("ナレーション断片の合成に失敗しました: {}".format(res["stderr"][-500:]))
+        tts_meta = {
+            "backend": sync_result.get("backend"), "duration_sec": out_duration, "is_silent": False,
+            "requested_backend": sync_result.get("backend"), "fallback_reason": sync_result.get("fallback_reason"),
+            "mode": "segment",
+        }
+    else:
+        tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
+        tts_meta = dict(tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg))
+        tts_meta["mode"] = "full"
 
     telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=telop_shots[0]["id"] if telop_shots else None)
     product_name = ((projects.get_project(project_id) or {}).get("product") or {}).get("name")
@@ -1046,6 +1208,25 @@ def _render_project(project_id, plan, cfg):
             continue
         sfx_specs.append({"path": str(resolved), "at_sec": s.get("at_sec", 0.0), "gain_db": s.get("gain_db", -8.0)})
 
+    # edit enhancement層: カットSEをsfx_specsへ追加し、BGM音量カーブ/フックのインパクトを
+    # 求める。この層の計算で例外が起きても従来レンダ(edit無し)へフォールバックする
+    # （edit_profile_applied=Falseとして記録するのみで、レンダ全体は落とさない）。
+    edit_profile_applied = False
+    bgm_curve = None
+    first_shot_impact_sec = None
+    if edit_prof is not None:
+        try:
+            durations = [s["duration_sec"] for s in telop_shots]
+            enhancement = render.compute_edit_enhancement_kwargs(durations, edit_prof)
+            sfx_specs = sfx_specs + enhancement["sfx_extra"]
+            bgm_curve = enhancement["bgm_curve"]
+            first_shot_impact_sec = enhancement["first_shot_impact_sec"]
+            edit_profile_applied = True
+        except Exception:
+            bgm_curve = None
+            first_shot_impact_sec = None
+            edit_profile_applied = False
+
     renders_dir = projects.renders_dir(project_id)
     renders_dir.mkdir(parents=True, exist_ok=True)
     output_filename = "{}.mp4".format(time.strftime("%Y%m%d%H%M%S"))
@@ -1056,6 +1237,7 @@ def _render_project(project_id, plan, cfg):
         ffmpeg_bin, str(concat_path), str(narration_path), str(pass1_path), str(ass_path), str(FONTS_DIR),
         bgm_path=bgm_path, out_duration=out_duration, loudnorm_measured=None,
         bgm_gain_db=bgm_gain_db, sfx=sfx_specs, ducking=bgm_ducking,
+        bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec,
     )
     res1 = render.run_ffmpeg(cmd1, timeout_sec=_FFMPEG_TIMEOUT_SEC)
     measured = _parse_loudnorm_json(res1["stderr"])
@@ -1070,16 +1252,26 @@ def _render_project(project_id, plan, cfg):
             ffmpeg_bin, str(concat_path), str(narration_path), str(output_path), str(ass_path), str(FONTS_DIR),
             bgm_path=bgm_path, out_duration=out_duration, loudnorm_measured=None,
             bgm_gain_db=bgm_gain_db, sfx=sfx_specs, ducking=bgm_ducking,
+            bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec,
         )
     else:
         cmd2 = render.build_final_cmd(
             ffmpeg_bin, str(concat_path), str(narration_path), str(output_path), str(ass_path), str(FONTS_DIR),
             bgm_path=bgm_path, out_duration=out_duration, loudnorm_measured=measured,
             bgm_gain_db=bgm_gain_db, sfx=sfx_specs, ducking=bgm_ducking,
+            bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec,
         )
     res2 = render.run_ffmpeg(cmd2, timeout_sec=_FFMPEG_TIMEOUT_SEC)
     if res2["returncode"] != 0:
         raise RuntimeError("最終レンダリングに失敗しました: {}".format(res2["stderr"][-800:]))
+
+    try:
+        proj_for_flag = projects.get_project(project_id)
+        if proj_for_flag is not None:
+            proj_for_flag["edit_profile_applied"] = edit_profile_applied
+            projects.save_project(proj_for_flag)
+    except Exception:
+        pass
 
     shutil.rmtree(work_dir, ignore_errors=True)
     return projects.media_relpath_for_render(project_id, output_filename), out_duration, tts_meta

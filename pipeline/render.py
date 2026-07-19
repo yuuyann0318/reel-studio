@@ -30,7 +30,8 @@ def build_concat_list_content(clip_paths):
     return "\n".join(lines) + "\n"
 
 
-def build_normalize_clip_cmd(ffmpeg_bin, in_path, out_path, duration_sec=None, trim_start=None):
+def build_normalize_clip_cmd(ffmpeg_bin, in_path, out_path, duration_sec=None, trim_start=None,
+                              pad_to_duration_sec=None, punch_in_filter=None):
     """1ショットクリップを 1080x1920/30fps/yuv420p/音声なし へ正規化するコマンドを構築する。
 
     ビジュアルバックエンド（mock/higgsfield/cloudapi）が返すクリップの解像度・fpsが
@@ -43,15 +44,126 @@ def build_normalize_clip_cmd(ffmpeg_bin, in_path, out_path, duration_sec=None, t
     依存する。本プロジェクトのクリップは短尺（数秒）のmock/higgsfield生成物のため実用上
     十分な精度で足りる。duration_sec には trim後の長さ（end-start）を渡すこと。
     trim_start=None（従来どおり）なら挙動を一切変えない（後方互換）。
+
+    pad_to_duration_sec を指定すると（かつ duration_sec より長い場合）、映像に
+    `tpad=stop_mode=clone` を追加し最終フレームを静止延長したうえで、出力尺を
+    pad_to_duration_sec まで打ち切る（音声主導タイミング同期モード: 音声断片の実測尺が
+    トリム尺より長い場合に、映像を音声に合わせて伸ばすために使う）。
+    pad_to_duration_sec が duration_sec 以下、または未指定なら従来どおり duration_sec で
+    単純truncateするだけで、この引数を渡さなかった場合と完全に同じコマンドになる（後方互換）。
+
+    punch_in_filter を指定すると（edit enhancement層のパンチイン演出）、正規化フィルタ
+    チェーンの末尾に ",{punch_in_filter}" として追加する。None（既定）なら従来どおり
+    このフィルタを一切追加しない（後方互換）。build_punch_in_zoompan_filter() が返す
+    zoompan文字列を渡すことを想定。
     """
     filt = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,format=yuv420p"
+    out_t = duration_sec
+    if pad_to_duration_sec and duration_sec and pad_to_duration_sec > duration_sec:
+        pad_amount = pad_to_duration_sec - duration_sec
+        filt += ",tpad=stop_mode=clone:stop_duration={:.3f}".format(pad_amount)
+        out_t = pad_to_duration_sec
+    if punch_in_filter:
+        filt += "," + punch_in_filter
     cmd = [ffmpeg_bin, "-y"]
     if trim_start:
         cmd += ["-ss", "{:.3f}".format(trim_start)]
     cmd += ["-i", in_path, "-vf", filt, "-an"]
-    if duration_sec:
-        cmd += ["-t", "{:.3f}".format(duration_sec)]
+    if out_t:
+        cmd += ["-t", "{:.3f}".format(out_t)]
     cmd += ["-c:v", "libx264", "-crf", "18", "-preset", "medium", out_path]
+    return cmd
+
+
+# ---------------------------------------------------------------------------
+# 音声主導タイミング同期モード: ショット表示尺の決定・ナレーション断片の配置合成。
+# jobs.py（Studio再レンダリング）とrun.py（CLI経路）の両方から共通で使う純関数群。
+# ---------------------------------------------------------------------------
+
+SYNC_GAP_SEC = 0.25  # 断片実測尺に足す「間」（無音の余白）
+SYNC_MIN_SHOT_SEC = 1.2  # ショット表示尺の下限
+
+
+def compute_synced_shot_duration(segment_duration_sec):
+    """音声断片の実測尺(segment_duration_sec)から、そのショットの表示尺を決める。
+
+    表示尺 = max(断片実測尺 + SYNC_GAP_SEC, SYNC_MIN_SHOT_SEC)。
+    テロップ/クリップ尺の両方をこの値で統一することで、音声=テロップ=ショット境界を
+    原理的に一致させる。
+    """
+    return max(float(segment_duration_sec) + SYNC_GAP_SEC, SYNC_MIN_SHOT_SEC)
+
+
+def resolve_normalize_pad_args(content_duration_sec, target_duration_sec):
+    """正規化クリップの元尺(content_duration_sec)を、目標尺(target_duration_sec)へ合わせるための
+    build_normalize_clip_cmd 用 (duration_sec, pad_to_duration_sec) を決める。
+
+    target_duration_sec が content_duration_sec より長い場合は映像が足りないのでtpadで埋める
+    （duration_sec=content_duration_sec, pad_to_duration_sec=target_duration_sec を返す）。
+    target_duration_sec が content_duration_sec 以下（同期不要 or 断片の方が短い）なら単純
+    truncateする（duration_sec=target_duration_sec, pad_to_duration_sec=None）。
+    target_duration_sec=None（同期モードでない）なら content_duration_sec をそのまま使う
+    （従来どおりの単純truncate。呼び出し側の共通処理用）。
+    """
+    if target_duration_sec is None:
+        return content_duration_sec, None
+    if target_duration_sec > content_duration_sec:
+        return content_duration_sec, target_duration_sec
+    return target_duration_sec, None
+
+
+def build_narration_segments_placement_filters(segments, start_index):
+    """ナレーション断片群を、各断片の start_sec 位置にadelay配置するフィルタ断片群を構築する
+    （build_sfx_overlay_filtersと同型: adelay+amixのパターンを流用）。
+
+    segments: [{"path","start_sec"}, ...]（呼び出し側が-iで各pathを追加し、
+    その入力インデックスがstart_indexから連番で振られている前提）。
+    Returns: (filter_parts:list[str], mix_labels:list[str])
+    """
+    filter_parts = []
+    mix_labels = []
+    for i, seg in enumerate(segments or []):
+        idx = start_index + i
+        start_sec = max(0.0, float(seg.get("start_sec", 0.0) or 0.0))
+        delay_ms = int(round(start_sec * 1000))
+        label = "seg{}".format(i)
+        filter_parts.append(
+            "[{idx}:a]adelay={delay}|{delay}[{label}]".format(idx=idx, delay=delay_ms, label=label)
+        )
+        mix_labels.append("[{}]".format(label))
+    return filter_parts, mix_labels
+
+
+def build_narration_segments_concat_cmd(ffmpeg_bin, segments, out_duration, out_path):
+    """ナレーション断片群を、各断片の start_sec 位置に配置して1本のwavへ合成する
+    （音声主導タイミング同期モード用）。
+
+    各断片はショットの表示区間内で時間的に重ならない設計（=同時に1断片しか音が鳴らない）
+    のため、amix(normalize=0)で単純合成しても音量劣化は起きない（build_sfx_overlay_filters/
+    build_final_cmdのSFXオーバーレイと同じ考え方）。断片間・末尾はadelay/出力尺打ち切りにより
+    自動的に無音になる。out_duration で最終的な尺を打ち切る。
+    """
+    cmd = [ffmpeg_bin, "-y"]
+    for seg in segments or []:
+        cmd += ["-i", seg["path"]]
+
+    if not segments:
+        # 断片が1つも無い場合の安全側フォールバック（呼び出し側は通常これを使わない想定）。
+        cmd += [
+            "-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=48000",
+            "-t", "{:.3f}".format(out_duration or 0.0),
+            "-c:a", "pcm_s16le", out_path,
+        ]
+        return cmd
+
+    filter_parts, mix_labels = build_narration_segments_placement_filters(segments, 0)
+    chain = ";".join(filter_parts) + ";" + "".join(mix_labels) + "amix=inputs={}:duration=longest:normalize=0[out]".format(
+        len(mix_labels)
+    )
+    cmd += ["-filter_complex", chain, "-map", "[out]"]
+    if out_duration:
+        cmd += ["-t", "{:.3f}".format(out_duration)]
+    cmd += ["-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le", out_path]
     return cmd
 
 
@@ -100,9 +212,211 @@ def build_sfx_overlay_filters(sfx, start_index):
     return filter_parts, mix_labels
 
 
+# ---------------------------------------------------------------------------
+# edit enhancement層: assets/profiles/ttp_reference.json の "edit" セクション
+# （pipeline.edit_profile.load_edit_profile()）が渡す設定から、プロ編集の演出
+# （カット点SE・パンチイン(緩急ズーム)・BGM音量カーブ・フック冒頭のインパクト）用の
+# フィルタ文字列/イベント列を構築する純関数群。すべて文字列/リストを返すだけで
+# ffmpegを一切呼ばない（テスト対象）。呼び出し側（run.py/jobs.py）は、この層の計算で
+# 例外が起きても catch して edit enhancement 無しの従来コマンドへフォールバックすること。
+# ---------------------------------------------------------------------------
+
+
+def compute_cut_sfx_events(shot_boundaries_sec, min_interval_sec):
+    """ショット境界秒（各ショットの表示開始時刻。1番目の要素=0.0＝映像の先頭を含む）から、
+    「カット」に該当する2番目以降の境界だけを、直前に採用した境界からmin_interval_sec未満
+    しか離れていないものを間引きながら抽出する。
+
+    最初のショットの開始（=0.0、映像の先頭）はカットではない（何も切り替わっていない）ため
+    常に除外する。境界が1つ以下（ショットが0〜1個）なら空リストを返す。
+    """
+    events = []
+    last = None
+    for i, t in enumerate(shot_boundaries_sec or []):
+        if i == 0:
+            continue
+        t = float(t)
+        if last is not None and (t - last) < float(min_interval_sec):
+            continue
+        events.append(t)
+        last = t
+    return events
+
+
+def build_edit_cut_sfx_specs(shot_boundaries_sec, edit_profile):
+    """edit_profile["cut_sfx"]設定から、build_final_cmdのsfx引数に追加できる
+    {"path","at_sec","gain_db"} 群を構築する（純関数）。
+
+    cut_sfx.enabled=False、または resolved_path が無い（SFXファイル未解決）場合は
+    空リストを返す（=カットSEなしで従来どおりレンダを継続できる）。
+    """
+    edit_profile = edit_profile or {}
+    cfg = edit_profile.get("cut_sfx") or {}
+    if not cfg.get("enabled", True):
+        return []
+    path = cfg.get("resolved_path")
+    if not path:
+        return []
+    min_interval = cfg.get("min_interval_sec", 1.5)
+    gain_db = cfg.get("gain_db", -18)
+    events = compute_cut_sfx_events(shot_boundaries_sec, min_interval)
+    return [{"path": path, "at_sec": t, "gain_db": gain_db} for t in events]
+
+
+# パンチイン(緩急ズーム)で使うzoompanの出力解像度。正規化後クリップ(1080x1920)と一致させる。
+_PUNCH_IN_OUTPUT_SIZE = "1080x1920"
+
+
+def build_punch_in_zoompan_filter(pattern_name, max_zoom, duration_sec, fps=30):
+    """パンチイン(緩急ズーム)用のzoompanフィルタ文字列を1ショット分構築する（純関数）。
+
+    pattern_name:
+      - "static": ズームなし。Noneを返す（フィルタ自体を付けない）。
+      - "zoom_in_slow": 1.0からmax_zoomまでショット尺いっぱいで均等に緩やかにズームイン。
+      - "zoom_in_fast": ショット前半40%で一気にmax_zoomへ立ち上げ、以降はmax_zoomを維持。
+      - "pan_subtle": ズームはわずか(1.02とmax_zoomの小さい方)に固定し、横方向にゆっくりパン。
+      - 上記以外/未指定: Noneを返す（未知パターンでレンダを壊さないための安全側フォールバック）。
+
+    d=1（1フレームごとにzoom式を評価）・出力fps/解像度は正規化後クリップと合わせる。
+    """
+    if not pattern_name or pattern_name == "static":
+        return None
+    total_frames = max(1, int(round(float(duration_sec or 0.0) * fps)))
+    max_zoom = float(max_zoom or 1.0)
+
+    if pattern_name == "zoom_in_slow":
+        step = (max_zoom - 1.0) / total_frames
+        z_expr = "min(zoom+{step:.6f},{maxz:.4f})".format(step=step, maxz=max_zoom)
+    elif pattern_name == "zoom_in_fast":
+        rise_frames = max(1, int(total_frames * 0.4))
+        step = (max_zoom - 1.0) / rise_frames
+        z_expr = "min(zoom+{step:.6f},{maxz:.4f})".format(step=step, maxz=max_zoom)
+    elif pattern_name == "pan_subtle":
+        pan_zoom = min(1.02, max_zoom)
+        return (
+            "zoompan=z='{z:.4f}':d=1:x='iw/2-(iw/zoom/2)+(on/{total}*20-10)':"
+            "y='ih/2-(ih/zoom/2)':s={size}:fps={fps}"
+        ).format(z=pan_zoom, total=total_frames, size=_PUNCH_IN_OUTPUT_SIZE, fps=fps)
+    else:
+        return None
+
+    return (
+        "zoompan=z='{z}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={size}:fps={fps}"
+    ).format(z=z_expr, size=_PUNCH_IN_OUTPUT_SIZE, fps=fps)
+
+
+def resolve_punch_in_filter_for_shot(shot_index, duration_sec, edit_profile, backend_name):
+    """指定ショット(shot_index番目、0始まり)のパンチイン用zoompanフィルタ文字列を解決する。
+
+    以下のいずれかに該当する場合はNone（=フィルタ付与なし）を返す:
+      - edit_profile.punch_in.enabled が False
+      - backend_name が edit_profile.punch_in.skip_if_backend と一致（既定"mock"。mock
+        バックエンドは生成クリップ自体がmotion_presetで疑似ズームを演出済みのため、
+        二重にズームをかけないための安全策）
+      - pattern（巡回リスト）が空、または該当パターンが"static"/未知
+    """
+    edit_profile = edit_profile or {}
+    cfg = edit_profile.get("punch_in") or {}
+    if not cfg.get("enabled", True):
+        return None
+    skip_backend = cfg.get("skip_if_backend", "mock")
+    if skip_backend and backend_name == skip_backend:
+        return None
+    pattern_list = cfg.get("pattern") or []
+    if not pattern_list:
+        return None
+    pattern_name = pattern_list[shot_index % len(pattern_list)]
+    max_zoom = cfg.get("max_zoom", 1.08)
+    return build_punch_in_zoompan_filter(pattern_name, max_zoom, duration_sec)
+
+
+def build_bgm_curve_volume_filter(bgm_curve, fallback_linear):
+    """BGM音量カーブ（フック/本編/CTAの三段volume）用のvolumeフィルタ片を構築する。
+
+    bgm_curveがNone/不正（辞書でない）なら、従来どおりの固定音量
+    "volume={fallback_linear:.4f}" を返す（後方互換: build_final_cmdにbgm_curveを渡さない
+    既存呼び出しは、この関数を経由しても出力コマンド文字列が一切変わらない）。
+
+    bgm_curveありの場合: t（秒）がhook_end_sec未満ならhook音量、cta_start_sec以上なら
+    cta音量、それ以外（本編区間）はbody音量、をffmpegのif()式でframe単位に評価する
+    （volume=...:eval=frame）。
+    """
+    if not isinstance(bgm_curve, dict):
+        return "volume={:.4f}".format(fallback_linear)
+    hook_end = float(bgm_curve.get("hook_end_sec", 0.0) or 0.0)
+    cta_start = float(bgm_curve.get("cta_start_sec", 0.0) or 0.0)
+    hook_lin = gain_db_to_linear(bgm_curve.get("hook_gain_db", -10))
+    body_lin = gain_db_to_linear(bgm_curve.get("body_gain_db", -14))
+    cta_lin = gain_db_to_linear(bgm_curve.get("cta_gain_db", -12))
+    expr = "if(lt(t,{hook_end:.3f}),{hook:.4f},if(gte(t,{cta_start:.3f}),{cta:.4f},{body:.4f}))".format(
+        hook_end=hook_end, cta_start=cta_start, hook=hook_lin, cta=cta_lin, body=body_lin
+    )
+    return "volume='{}':eval=frame".format(expr)
+
+
+def build_first_shot_impact_filter(duration_sec=0.3, start_scale=1.04, fps=30):
+    """フック1発目のインパクト演出（冒頭duration_sec秒でstart_scale→1.00へスケールポップ）用の
+    zoompanフィルタ文字列を構築する。連結後映像([0:v]、字幕焼込前)に適用する想定。
+    """
+    total_frames = max(1, int(round(float(duration_sec or 0.0) * fps)))
+    start_scale = float(start_scale or 1.0)
+    delta = (start_scale - 1.0) / total_frames
+    z_expr = "if(lte(on,{n}),{start:.4f}-on*({delta:.6f}),1.0)".format(n=total_frames, start=start_scale, delta=delta)
+    return (
+        "zoompan=z='{z}':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={size}:fps={fps}"
+    ).format(z=z_expr, size=_PUNCH_IN_OUTPUT_SIZE, fps=fps)
+
+
+def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile):
+    """editプロファイルと各ショットの表示尺（秒・ショット順のリスト）から、build_final_cmdへ
+    渡す追加引数 {"sfx_extra","bgm_curve","first_shot_impact_sec"} をまとめて計算する純関数。
+
+    ショットが0件でも例外を出さず安全な値（sfx_extra=[], bgm_curve=None,
+    first_shot_impact_sec=None）を返す。呼び出し側は sfx_extra を既存の sfx リストへ
+    追加（+=）し、bgm_curve/first_shot_impact_sec をそのまま build_final_cmd に渡す。
+    """
+    edit_profile = edit_profile or {}
+    durations = [float(d) for d in (shot_durations_sec or [])]
+
+    boundaries = []
+    cursor = 0.0
+    for d in durations:
+        boundaries.append(cursor)
+        cursor += d
+    total_duration = cursor
+
+    sfx_extra = build_edit_cut_sfx_specs(boundaries, edit_profile) if durations else []
+
+    bgm_curve = None
+    bgm_cfg = edit_profile.get("bgm_curve") or {}
+    if durations and bgm_cfg.get("enabled", True):
+        hook_end = boundaries[1] if len(boundaries) > 1 else total_duration
+        cta_start = boundaries[-1]
+        bgm_curve = {
+            "hook_end_sec": hook_end,
+            "cta_start_sec": cta_start,
+            "hook_gain_db": bgm_cfg.get("hook_gain_db", -10),
+            "body_gain_db": bgm_cfg.get("body_gain_db", -14),
+            "cta_gain_db": bgm_cfg.get("cta_gain_db", -12),
+            "fade_out_sec": bgm_cfg.get("fade_out_sec", 1.5),
+        }
+
+    first_shot_impact_sec = None
+    impact_cfg = edit_profile.get("first_shot_impact") or {}
+    if durations and impact_cfg.get("enabled", True) and impact_cfg.get("scale_pop", True):
+        first_shot_impact_sec = min(0.3, durations[0])
+
+    return {
+        "sfx_extra": sfx_extra,
+        "bgm_curve": bgm_curve,
+        "first_shot_impact_sec": first_shot_impact_sec,
+    }
+
+
 def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_path, ass_path, fonts_dir,
                      bgm_path=None, out_duration=None, loudnorm_measured=None,
-                     audio_prefilter=None, tp_target=-1.0, bgm_gain_db=None, sfx=None, ducking=True):
+                     audio_prefilter=None, tp_target=-1.0, bgm_gain_db=None, sfx=None, ducking=True,
+                     bgm_curve=None, first_shot_impact_sec=None):
     """字幕焼き込み＋ナレーション＋BGMダッキング＋SFXオーバーレイ＋loudnorm＋最終エンコード。
 
     入力: [0]=連結済み映像(音声なし), [1]=ナレーションwav, [2]=BGM(任意),
@@ -115,6 +429,12 @@ def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_pa
     Falseならダッキングせず単純にamixする（plan.bgm.ducking=falseを反映するため）。
     sfx: [{"path","at_sec","gain_db"}, ...]。各SFXをat_secの位置にamixでオーバーレイする
     （出力尺は-tで最終的に打ち切るため変わらない）。
+    bgm_curve: {"hook_end_sec","cta_start_sec","hook_gain_db","body_gain_db","cta_gain_db",
+    "fade_out_sec"}（pipeline.render.compute_edit_enhancement_kwargs()が構築）。Noneなら
+    従来どおりbgm_gain_db基準の固定音量・fade 2秒（後方互換）。
+    first_shot_impact_sec: 指定すると連結映像([0:v]、字幕焼込の直前)冒頭にスケールポップの
+    zoompanを適用する（build_first_shot_impact_filter）。Noneなら従来どおり何も付与しない
+    （後方互換）。
     """
     subtitles_filter = "subtitles=filename={}:fontsdir={}".format(
         escape_ffmpeg_filter_path(ass_path), escape_ffmpeg_filter_path(fonts_dir)
@@ -123,6 +443,9 @@ def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_pa
     prefilter = (audio_prefilter + ",") if audio_prefilter else ""
     dur = out_duration if out_duration else 0.0
     bgm_volume = gain_db_to_linear(bgm_gain_db) if bgm_gain_db is not None else 0.55
+    bgm_volume_filter = build_bgm_curve_volume_filter(bgm_curve, bgm_volume)
+    fade_out_sec = float(bgm_curve.get("fade_out_sec", 2.0)) if isinstance(bgm_curve, dict) else 2.0
+    impact_prefix = (build_first_shot_impact_filter(first_shot_impact_sec) + ",") if first_shot_impact_sec else ""
 
     cmd = [ffmpeg_bin, "-y", "-i", concat_video_path, "-i", narration_wav_path]
     next_index = 2
@@ -131,27 +454,27 @@ def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_pa
         cmd += ["-i", bgm_path]
         bgm_index = next_index
         next_index += 1
-        fade_st = max(dur - 2, 0.0)
+        fade_st = max(dur - fade_out_sec, 0.0)
         if ducking:
             chain = (
-                "[0:v]{subs}[vout];"
-                "[{bgm_idx}:a]aloop=loop=-1:size=2e9,atrim=0:{dur:.3f},afade=t=out:st={fade_st:.3f}:d=2,volume={bgm_vol:.4f}[bgm];"
+                "[0:v]{impact}{subs}[vout];"
+                "[{bgm_idx}:a]aloop=loop=-1:size=2e9,atrim=0:{dur:.3f},afade=t=out:st={fade_st:.3f}:d={fade_out:.3f},{bgm_vol_filter}[bgm];"
                 "[1:a]{pre}apad=whole_dur={dur:.3f},asplit[voice][sc];"
                 "[bgm][sc]sidechaincompress=threshold=0.02:ratio=10:attack=20:release=500:makeup=1[duck];"
                 "[voice][duck]amix=inputs=2:duration=longest:normalize=0[premix]"
-            ).format(subs=subtitles_filter, dur=dur, fade_st=fade_st, pre=prefilter, loud=loudnorm_filter,
-                     bgm_idx=bgm_index, bgm_vol=bgm_volume)
+            ).format(impact=impact_prefix, subs=subtitles_filter, dur=dur, fade_st=fade_st, fade_out=fade_out_sec,
+                     pre=prefilter, loud=loudnorm_filter, bgm_idx=bgm_index, bgm_vol_filter=bgm_volume_filter)
         else:
             chain = (
-                "[0:v]{subs}[vout];"
-                "[{bgm_idx}:a]aloop=loop=-1:size=2e9,atrim=0:{dur:.3f},afade=t=out:st={fade_st:.3f}:d=2,volume={bgm_vol:.4f}[bgm];"
+                "[0:v]{impact}{subs}[vout];"
+                "[{bgm_idx}:a]aloop=loop=-1:size=2e9,atrim=0:{dur:.3f},afade=t=out:st={fade_st:.3f}:d={fade_out:.3f},{bgm_vol_filter}[bgm];"
                 "[1:a]{pre}apad=whole_dur={dur:.3f}[voice];"
                 "[voice][bgm]amix=inputs=2:duration=longest:normalize=0[premix]"
-            ).format(subs=subtitles_filter, dur=dur, fade_st=fade_st, pre=prefilter, loud=loudnorm_filter,
-                     bgm_idx=bgm_index, bgm_vol=bgm_volume)
+            ).format(impact=impact_prefix, subs=subtitles_filter, dur=dur, fade_st=fade_st, fade_out=fade_out_sec,
+                     pre=prefilter, loud=loudnorm_filter, bgm_idx=bgm_index, bgm_vol_filter=bgm_volume_filter)
     else:
-        chain = "[0:v]{subs}[vout];[1:a]{pre}apad=whole_dur={dur:.3f}[premix]".format(
-            subs=subtitles_filter, dur=dur, pre=prefilter
+        chain = "[0:v]{impact}{subs}[vout];[1:a]{pre}apad=whole_dur={dur:.3f}[premix]".format(
+            impact=impact_prefix, subs=subtitles_filter, dur=dur, pre=prefilter
         )
 
     sfx_filter_parts, sfx_labels = build_sfx_overlay_filters(sfx, next_index)

@@ -22,6 +22,9 @@ plan スキーマ:
       "motion_preset": str,          # MOTION_PRESETS のいずれか
       "duration_sec": number,        # >0
       "caption_jp": str,             # 画面焼込キャプション（日本語）
+      "narration_jp": str,           # 任意。このショットのナレーション断片（音声主導タイミング
+                                      # 同期モード用。省略可＝後方互換。全shotsのnarration_jpを
+                                      # 連結したものがnarration_scriptと一致する想定）
     }, ...
   ],
   "bgm_mood": "upbeat"|"calm"|"emotional"|"none",
@@ -98,6 +101,7 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
             motion_preset = shot.get("motion_preset", "static")
             duration_sec = shot.get("duration_sec")
             caption_jp = shot.get("caption_jp", "")
+            narration_jp = shot.get("narration_jp")
 
             ok_item = True
             if not isinstance(visual_prompt, str) or not visual_prompt.strip():
@@ -127,18 +131,23 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                     )
                 )
                 ok_item = False
+            # narration_jp は任意（省略可＝後方互換）。指定された場合のみ文字列であることを検証する。
+            if narration_jp is not None and not isinstance(narration_jp, str):
+                errors.append("shots[{}(id={})].narration_jp は文字列である必要があります".format(i, sid))
+                ok_item = False
 
             if ok_item:
                 seen_ids.add(sid)
-                normalized_shots.append(
-                    {
-                        "id": sid,
-                        "visual_prompt": visual_prompt.strip(),
-                        "motion_preset": motion_preset,
-                        "duration_sec": float(duration_sec),
-                        "caption_jp": caption_jp.strip(),
-                    }
-                )
+                normalized_shot = {
+                    "id": sid,
+                    "visual_prompt": visual_prompt.strip(),
+                    "motion_preset": motion_preset,
+                    "duration_sec": float(duration_sec),
+                    "caption_jp": caption_jp.strip(),
+                }
+                if narration_jp is not None:
+                    normalized_shot["narration_jp"] = narration_jp.strip()
+                normalized_shots.append(normalized_shot)
 
     bgm_mood = plan.get("bgm_mood")
     if bgm_mood not in BGM_MOODS:

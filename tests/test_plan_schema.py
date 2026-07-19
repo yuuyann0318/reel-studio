@@ -126,3 +126,34 @@ def test_build_rule_based_plan_vertical_hook_template_text_has_no_ng_words():
     full_text = plan["narration_script"] + plan["hook"] + "".join(s["caption_jp"] for s in plan["shots"])
     assert "絶対稼げる" not in full_text
     assert "100%成功" not in full_text
+
+
+# --- narration_jp（音声主導タイミング同期モード用の任意フィールド） ---------------------
+
+
+def test_validate_plan_narration_jp_optional_absent_is_backward_compatible():
+    """narration_jpを一切含まないplan（従来のdirector出力）は今までどおり合法。"""
+    plan = _valid_plan()
+    ok, errors, normalized = plan_schema.validate_plan(plan)
+    assert ok is True
+    assert "narration_jp" not in normalized["shots"][0]
+    assert "narration_jp" not in normalized["shots"][1]
+
+
+def test_validate_plan_narration_jp_valid_string_is_normalized_and_stripped():
+    plan = _valid_plan()
+    plan["shots"][0]["narration_jp"] = "  これはナレーション断片です。  "
+    ok, errors, normalized = plan_schema.validate_plan(plan)
+    assert ok is True
+    assert normalized["shots"][0]["narration_jp"] == "これはナレーション断片です。"
+    # 指定しなかった方のshotには依然としてキーが付与されない
+    assert "narration_jp" not in normalized["shots"][1]
+
+
+def test_validate_plan_narration_jp_rejects_non_string():
+    plan = _valid_plan()
+    plan["shots"][0]["narration_jp"] = 12345
+    ok, errors, normalized = plan_schema.validate_plan(plan)
+    assert ok is False
+    assert normalized is None
+    assert any("narration_jp" in e for e in errors)

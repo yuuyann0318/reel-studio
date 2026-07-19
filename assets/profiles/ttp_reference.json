@@ -26,5 +26,30 @@
     "bgm_gain_db": -8,
     "narration": true
   },
-  "compliance_note": "構成・編集様式のみTTP。文言コピーは薬機法違反のため厳禁"
+  "compliance_note": "構成・編集様式のみTTP。文言コピーは薬機法違反のため厳禁",
+  "edit": {
+    "cut_sfx": {
+      "enabled": true,
+      "file": "whoosh_01.wav",
+      "gain_db": -18,
+      "min_interval_sec": 1.5
+    },
+    "punch_in": {
+      "enabled": true,
+      "pattern": ["zoom_in_slow", "static", "zoom_in_fast", "pan_subtle"],
+      "max_zoom": 1.08,
+      "skip_if_backend": "mock"
+    },
+    "bgm_curve": {
+      "enabled": true,
+      "hook_gain_db": -10,
+      "body_gain_db": -14,
+      "cta_gain_db": -12,
+      "fade_out_sec": 1.5
+    },
+    "first_shot_impact": {
+      "enabled": true,
+      "scale_pop": true
+    }
+  }
 }

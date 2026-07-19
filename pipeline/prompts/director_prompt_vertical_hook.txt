@@ -68,12 +68,18 @@ hook / narration_scriptの書き出しは、次の心理トリガーのうち **
 1. concept: この動画の企画コンセプトを1〜2文で。
 2. hook: 冒頭3秒で流すフック文（上記5トリガーのいずれかを使った短く強い一言）。
 3. narration_script: 日本語のナレーション台本全文（自然な話し言葉、短文で区切る、一人称の語りかけ口調、上記トーンを厳守）。
+   全shotsのnarration_jpを出現順に連結した文字列と完全に一致させること（音声とテロップの
+   タイミングをショット単位で同期させるため）。
 4. shots: ショットリスト。各ショットは以下を持つこと。
    - id: "s1", "s2", ... の連番
    - visual_prompt: 英語。text-to-video / image-to-video 生成AI向けのビジュアル指示（具体的・簡潔に）
    - motion_preset: 次のいずれか一つ: static, pan_left, pan_right, zoom_in, zoom_out, ken_burns
    - duration_sec: このショットの長さ（秒、1.5〜2.5を目安に。全ショットの合計が目標尺±許容誤差に収まること）
    - caption_jp: 画面に焼き込む日本語キャプション（40字以内、縦書き映えする13字程度の短文目安）
+   - narration_jp: このショットで読み上げるナレーション断片（日本語）。narration_scriptを
+     shots順に分割したものの1片であり、全shotsのnarration_jpを順に連結するとnarration_script
+     全文と完全一致すること。音読したときduration_sec秒前後になる長さにすること
+     （目安: 1秒≒6文字。高速カットのため短め）。
 5. bgm_mood: upbeat / calm / emotional / none のいずれか。
 
 # 制約（絶対厳守・コンプライアンス）

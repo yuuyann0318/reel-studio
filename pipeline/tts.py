@@ -16,6 +16,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from pipeline.config import load_config, project_root
 
@@ -277,3 +278,61 @@ def get_tts_backend(voice="Kyoko", cfg=None):
     if cfg is not None and (cfg.get("tts") or {}).get("engine") == "fish_audio":
         return FishAudioTTSBackend(voice=voice)
     return SayTTSBackend(voice=voice)
+
+
+def synthesize_segments(texts, out_dir, cfg=None, voice="Kyoko"):
+    """ナレーションをショット単位の断片ごとに合成する（音声主導タイミング同期モード用）。
+
+    get_tts_backend()が選ぶバックエンド（fish_audio -> say -> silent の既存フォールバック
+    チェーンをそのまま内包）で、texts の各要素を1断片ずつ合成し、ffprobe実測の尺を
+    そのまま採用する（=テロップ/ショット尺の同期はこの実測値を基準に呼び出し側が組み立てる）。
+
+    1断片でも合成に失敗（例外・空ファイル・尺0以下）したら即座に ok=False で打ち切る
+    （呼び出し側は全文方式へフォールバックすること。パイプライン全体が必ず完成することを
+    優先する既存TTS設計を踏襲し、部分的に同期済み・一部旧方式という中途半端な状態は作らない）。
+
+    Args:
+        texts: ショット順のナレーション断片文字列のリスト。
+        out_dir: 断片wavの保存先ディレクトリ（無ければ作成する）。
+        cfg: config dict（Noneならload_config()）。
+        voice: get_tts_backend()へ渡す音声名。
+
+    Returns:
+        {"ok": bool, "segments": [{"path": str, "duration_sec": float}, ...],
+         "backend": str|None, "fallback_reason": str|None}
+        segments は成功した断片のみ（ok=Falseのときは空リスト）。
+    """
+    cfg = cfg or load_config()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    backend = get_tts_backend(voice=voice, cfg=cfg)
+
+    segments = []
+    used_backend = None
+    fallback_reason = None
+    for i, text in enumerate(texts or []):
+        out_path = out_dir / "seg_{:03d}.wav".format(i)
+        try:
+            meta = backend.synthesize(text or "", str(out_path), cfg)
+        except Exception as exc:
+            return {
+                "ok": False, "segments": [], "backend": None,
+                "fallback_reason": "segment_{}_exception:{}".format(i, exc),
+            }
+        if not _file_nonempty(str(out_path)):
+            return {
+                "ok": False, "segments": [], "backend": None,
+                "fallback_reason": "segment_{}_empty_output".format(i),
+            }
+        duration = meta.get("duration_sec")
+        if not duration or duration <= 0:
+            return {
+                "ok": False, "segments": [], "backend": None,
+                "fallback_reason": "segment_{}_invalid_duration".format(i),
+            }
+        segments.append({"path": str(out_path), "duration_sec": float(duration)})
+        used_backend = meta.get("backend") or used_backend
+        if meta.get("fallback_reason"):
+            fallback_reason = meta.get("fallback_reason")
+
+    return {"ok": True, "segments": segments, "backend": used_backend, "fallback_reason": fallback_reason}

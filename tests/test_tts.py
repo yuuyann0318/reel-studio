@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import urllib.error
+from pathlib import Path
 
 from pipeline import tts
 from pipeline.config import project_root
@@ -210,3 +211,90 @@ def test_get_tts_backend_returns_fish_audio_backend_when_configured():
     backend = tts.get_tts_backend(voice="Kyoko", cfg=_FISH_CFG)
     assert isinstance(backend, tts.FishAudioTTSBackend)
     assert backend.voice == "Kyoko"
+
+
+# --- synthesize_segments（音声主導タイミング同期モード用のショット単位合成ヘルパー） ---------
+
+
+def test_synthesize_segments_success_measures_each_segment_duration(tmp_path):
+    """SilentTTSBackend実体（実ffmpeg）で、文字数が異なる断片ごとに異なる実測尺が得られること。"""
+    cfg = {"ffmpeg_bin": str(project_root() / "bin" / "ffmpeg"), "ffprobe_bin": str(project_root() / "bin" / "ffprobe")}
+    texts = ["あ" * 6, "あ" * 30]  # 6字/秒換算で概ね1秒 と 5秒
+    result = tts.synthesize_segments(texts, tmp_path / "segments", cfg, voice="Kyoko")
+
+    assert result["ok"] is True
+    assert len(result["segments"]) == 2
+    for seg in result["segments"]:
+        assert Path(seg["path"]).exists()
+        assert seg["duration_sec"] > 0
+    # 長いテキストの方が実測尺が長い
+    assert result["segments"][1]["duration_sec"] > result["segments"][0]["duration_sec"]
+    assert result["backend"] is not None
+
+
+def test_synthesize_segments_creates_out_dir_if_missing(tmp_path):
+    cfg = {"ffmpeg_bin": str(project_root() / "bin" / "ffmpeg")}
+    out_dir = tmp_path / "nested" / "segments"
+    assert not out_dir.exists()
+    result = tts.synthesize_segments(["こんにちは"], out_dir, cfg, voice="Kyoko")
+    assert result["ok"] is True
+    assert out_dir.exists()
+
+
+class _RaisesOnSecondCallBackend(tts.TTSBackend):
+    """1断片目は成功、2断片目は例外で失敗するフェイクバックエンド（部分失敗の再現用）。"""
+
+    name = "fake"
+
+    def __init__(self, voice="Kyoko"):
+        self.voice = voice
+        self.calls = 0
+
+    def synthesize(self, text, out_wav_path, cfg=None):
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("simulated segment TTS failure")
+        Path(out_wav_path).write_bytes(b"RIFF....WAVEfmt ")
+        return {"backend": "fake", "duration_sec": 1.5, "is_silent": False}
+
+
+def test_synthesize_segments_fails_fast_when_one_segment_raises(tmp_path, monkeypatch):
+    fake_backend = _RaisesOnSecondCallBackend()
+    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None: fake_backend)
+
+    result = tts.synthesize_segments(["ok", "boom", "never reached"], tmp_path / "segs", {}, voice="Kyoko")
+
+    assert result["ok"] is False
+    assert result["segments"] == []
+    assert "segment_1_exception" in result["fallback_reason"]
+    assert fake_backend.calls == 2  # 3断片目は試行されず即打ち切り
+
+
+class _EmptyOutputBackend(tts.TTSBackend):
+    name = "fake_empty"
+
+    def synthesize(self, text, out_wav_path, cfg=None):
+        # ファイルを作らない（合成失敗を模擬）
+        return {"backend": "fake_empty", "duration_sec": 1.0, "is_silent": False}
+
+
+def test_synthesize_segments_fails_when_output_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None: _EmptyOutputBackend())
+    result = tts.synthesize_segments(["text"], tmp_path / "segs", {}, voice="Kyoko")
+    assert result["ok"] is False
+    assert "empty_output" in result["fallback_reason"]
+
+
+class _ZeroDurationBackend(tts.TTSBackend):
+    name = "fake_zero"
+
+    def synthesize(self, text, out_wav_path, cfg=None):
+        Path(out_wav_path).write_bytes(b"x")
+        return {"backend": "fake_zero", "duration_sec": 0.0, "is_silent": False}
+
+
+def test_synthesize_segments_fails_when_duration_is_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None: _ZeroDurationBackend())
+    result = tts.synthesize_segments(["text"], tmp_path / "segs", {}, voice="Kyoko")
+    assert result["ok"] is False
+    assert "invalid_duration" in result["fallback_reason"]

@@ -33,6 +33,10 @@
 - ドラフトの良い部分（強いhook・具体的な体験描写）は残し、弱い部分だけを外科的に書き直す。全取っ替えはしない。
 - JSONの構造・キー・shotsのid体系はドラフトと同一に保つ（値だけを磨く）。shotsの数は±2個まで調整可。
   ただしduration_secの合計は必ず目標尺±許容誤差に収めること（これが最優先）。
+- ドラフトにshots[].narration_jpがある場合は書き直し後も保持すること。narration_scriptを書き直したときは、
+  対応するshots[].narration_jpも同じ内容になるよう更新し、全shotsのnarration_jpを順に連結した文字列が
+  narration_script全文と完全一致する状態を保つこと。各narration_jpは音読でduration_sec秒前後
+  （目安: 1秒≒6文字）になる長さにすること。
 - visual_promptは英語のまま。caption_jpとナレーションの改稿に合わせて、映像の内容がズレる場合のみ直す。
 - caption_jpは40字以内厳守。vertical_hookスタイルの場合は13字程度を目安に短くする。
 - motion_presetは static / pan_left / pan_right / zoom_in / zoom_out / ken_burns のみ。

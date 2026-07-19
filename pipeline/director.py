@@ -53,6 +53,7 @@ SCHEMA_EXAMPLE = json.dumps(
                 "motion_preset": "zoom_in",
                 "duration_sec": 5.0,
                 "caption_jp": "AI副業を始めよう",
+                "narration_jp": "AI副業について、今日は3つのポイントに絞って紹介します。",
             },
             {
                 "id": "s2",
@@ -60,6 +61,7 @@ SCHEMA_EXAMPLE = json.dumps(
                 "motion_preset": "pan_right",
                 "duration_sec": 6.0,
                 "caption_jp": "ポイント1: 全体像を知る",
+                "narration_jp": "1つ目は...",
             },
         ],
         "bgm_mood": "upbeat",

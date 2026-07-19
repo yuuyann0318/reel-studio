@@ -829,6 +829,7 @@ function renderEdit() {
     <div class="s-card">
       <div class="s-section-title">① テロップ</div>
       <div class="s-section-sub">タップして編集できます</div>
+      <div class="s-hint">※テロップの文言と音声のナレーションは別々に管理されています（音声の読み上げ内容を変えたい場合は最初から作り直してください）</div>
       <div class="s-edit-list">
         ${shots.map((s, i) => captionItemHtml(s, i)).join("")}
       </div>

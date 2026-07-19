@@ -26,6 +26,7 @@ from pathlib import Path
 from pipeline.config import load_config, project_root
 from pipeline import director
 from pipeline import compliance
+from pipeline import edit_profile
 from pipeline import subtitles
 from pipeline import render
 from pipeline import tts as tts_mod
@@ -143,6 +144,13 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     report["run_id"] = run_id
     report["run_dir"] = str(run_dir)
 
+    # edit enhancement層（カット点SE/パンチイン/BGM音量カーブ/フックのインパクト）。
+    # プロファイル読み込み自体が失敗しても従来レンダを継続する（edit_prof=Noneなら以降すべて無効化）。
+    try:
+        edit_prof = edit_profile.load_edit_profile(cfg)
+    except Exception:
+        edit_prof = None
+
     # --- Stage 1: director（企画生成） ---
     plan = None
     try:
@@ -181,8 +189,11 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     shots = plan.get("shots", [])
     total_shot_duration = sum(s["duration_sec"] for s in shots)
 
-    # --- Stage 3: 各ショットのビジュアル生成 + 正規化 ---
-    clip_paths = []
+    # --- Stage 3: 各ショットのビジュアル生成（raw取得のみ） ---
+    # 正規化（trim/pad）はStage5（TTS）で音声主導タイミング同期モードの適用有無・各ショットの
+    # 表示尺が確定してから行う（Stage4に統合。従来は生成直後に正規化していたが、同期モードでは
+    # 断片TTSの実測尺が確定するまで各ショットの最終的な表示尺が決まらないため）。
+    raw_clip_paths = {}
     try:
         with _timed_stage(report, "visual"):
             backend = get_backend(backend_name, cfg)
@@ -191,10 +202,97 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             per_shot_meta = []
             for shot in shots:
                 raw_path = clips_dir / "{}.raw.mp4".format(shot["id"])
-                norm_path = clips_dir / "{}.mp4".format(shot["id"])
                 meta = backend.generate(shot, str(raw_path))
+                raw_clip_paths[shot["id"]] = str(raw_path)
+                per_shot_meta.append(meta)
+            report["stages"]["visual"]["backend"] = backend.name
+            report["stages"]["visual"]["clip_count"] = len(raw_clip_paths)
+    except Exception:
+        _write_report(report)
+        return report
+
+    # --- Stage 4: TTS（ナレーション音声。音声主導タイミング同期モードの判定を含む） ---
+    # 同期モード: 全shotsにnarration_jpが非空で揃っている場合のみ試みる。
+    # pipeline.tts.synthesize_segments()でショット単位に断片合成し、成功したら各ショットの
+    # 表示尺 = render.compute_synced_shot_duration(断片実測尺) を採用する（テロップ/クリップ尺も
+    # この値に統一するため、音声=テロップ=ショット境界が原理的に一致する）。
+    # 断片TTSが1つでも失敗、またはnarration_jpが揃っていない場合は従来どおりの全文方式
+    # （各ショットの表示尺はdirectorが立てたduration_secをそのまま使う）。
+    narration_wav_path = run_dir / "narration.wav"
+    tts_mode = "full"
+    shot_display_durations = {}
+    try:
+        with _timed_stage(report, "tts"):
+            sync_eligible = bool(shots) and all(
+                isinstance(s.get("narration_jp"), str) and s.get("narration_jp").strip() for s in shots
+            )
+            sync_result = None
+            if sync_eligible:
+                seg_dir = run_dir / "narration_segments"
+                sync_result = tts_mod.synthesize_segments(
+                    [s["narration_jp"].strip() for s in shots], str(seg_dir), cfg, voice=cfg.get("voice", "Kyoko")
+                )
+
+            if sync_result and sync_result.get("ok"):
+                tts_mode = "segment"
+                cursor = 0.0
+                segment_specs = []
+                for shot, seg in zip(shots, sync_result["segments"]):
+                    display = render.compute_synced_shot_duration(seg["duration_sec"])
+                    shot_display_durations[shot["id"]] = display
+                    segment_specs.append({"path": seg["path"], "start_sec": cursor})
+                    cursor += display
+                cmd = render.build_narration_segments_concat_cmd(
+                    cfg["ffmpeg_bin"], segment_specs, cursor, str(narration_wav_path)
+                )
+                res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
+                if res["returncode"] != 0:
+                    raise StageError("ナレーション断片の合成に失敗: {}".format(res["stderr"][-500:]))
+                tts_meta = {
+                    "backend": sync_result.get("backend"), "duration_sec": cursor, "is_silent": False,
+                    "requested_backend": sync_result.get("backend"),
+                    "fallback_reason": sync_result.get("fallback_reason"), "mode": "segment",
+                }
+            else:
+                for shot in shots:
+                    shot_display_durations[shot["id"]] = shot["duration_sec"]
+                tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
+                tts_meta = dict(tts_backend.synthesize(plan.get("narration_script", ""), str(narration_wav_path), cfg))
+                tts_meta["mode"] = "full"
+
+            report["stages"]["tts"]["backend"] = tts_meta.get("backend")
+            report["stages"]["tts"]["duration_sec"] = tts_meta.get("duration_sec")
+            report["stages"]["tts"]["is_silent"] = tts_meta.get("is_silent")
+            report["stages"]["tts"]["requested_backend"] = tts_meta.get("requested_backend")
+            report["stages"]["tts"]["fallback_reason"] = tts_meta.get("fallback_reason")
+            report["stages"]["tts"]["mode"] = tts_meta.get("mode")
+    except Exception:
+        _write_report(report)
+        return report
+
+    # --- Stage 5: 正規化 + concat（各ショットをshot_display_durationsの尺へ揃えて連結） ---
+    clip_paths = []
+    concat_video_path = run_dir / "concat.mp4"
+    try:
+        with _timed_stage(report, "concat"):
+            for shot_index, shot in enumerate(shots):
+                raw_path = raw_clip_paths[shot["id"]]
+                norm_path = clips_dir / "{}.mp4".format(shot["id"])
+                target_duration = shot_display_durations.get(shot["id"], shot["duration_sec"])
+                duration_sec, pad_to_duration_sec = render.resolve_normalize_pad_args(
+                    shot["duration_sec"], target_duration if tts_mode == "segment" else None
+                )
+                punch_in_filter = None
+                if edit_prof is not None:
+                    try:
+                        punch_in_filter = render.resolve_punch_in_filter_for_shot(
+                            shot_index, target_duration, edit_prof, backend_name
+                        )
+                    except Exception:
+                        punch_in_filter = None
                 cmd = render.build_normalize_clip_cmd(
-                    cfg["ffmpeg_bin"], str(raw_path), str(norm_path), duration_sec=shot["duration_sec"]
+                    cfg["ffmpeg_bin"], raw_path, str(norm_path), duration_sec=duration_sec,
+                    pad_to_duration_sec=pad_to_duration_sec, punch_in_filter=punch_in_filter,
                 )
                 res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
                 if res["returncode"] != 0:
@@ -202,17 +300,7 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                         "ショット{}の正規化に失敗: {}".format(shot["id"], res["stderr"][-500:])
                     )
                 clip_paths.append(str(norm_path))
-                per_shot_meta.append(meta)
-            report["stages"]["visual"]["backend"] = backend.name
-            report["stages"]["visual"]["clip_count"] = len(clip_paths)
-    except Exception:
-        _write_report(report)
-        return report
 
-    # --- Stage 4: concat ---
-    concat_video_path = run_dir / "concat.mp4"
-    try:
-        with _timed_stage(report, "concat"):
             list_path = run_dir / "list.txt"
             list_path.write_text(render.build_concat_list_content(clip_paths), encoding="utf-8")
             cmd = render.build_concat_cmd(cfg["ffmpeg_bin"], str(list_path), str(concat_video_path))
@@ -223,27 +311,15 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
         _write_report(report)
         return report
 
-    # --- Stage 5: TTS（ナレーション音声） ---
-    narration_wav_path = run_dir / "narration.wav"
-    try:
-        with _timed_stage(report, "tts"):
-            tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
-            tts_meta = tts_backend.synthesize(plan.get("narration_script", ""), str(narration_wav_path), cfg)
-            report["stages"]["tts"]["backend"] = tts_meta.get("backend")
-            report["stages"]["tts"]["duration_sec"] = tts_meta.get("duration_sec")
-            report["stages"]["tts"]["is_silent"] = tts_meta.get("is_silent")
-            report["stages"]["tts"]["requested_backend"] = tts_meta.get("requested_backend")
-            report["stages"]["tts"]["fallback_reason"] = tts_meta.get("fallback_reason")
-    except Exception:
-        _write_report(report)
-        return report
-
-    # --- Stage 6: 字幕(ASS)生成 ---
+    # --- Stage 6: 字幕(ASS)生成（表示尺=shot_display_durationsをショットのduration_secへ反映） ---
     ass_path = run_dir / "subtitles.ass"
     try:
         with _timed_stage(report, "subtitles"):
             hook_shot_id = shots[0]["id"] if shots else None
-            telop_pieces = subtitles.build_telop_pieces_from_shots(shots, hook_shot_id=hook_shot_id)
+            telop_shots = [
+                dict(s, duration_sec=shot_display_durations.get(s["id"], s["duration_sec"])) for s in shots
+            ]
+            telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=hook_shot_id)
             ass_text = subtitles.generate_ass(telop_pieces)
             ass_path.write_text(ass_text, encoding="utf-8")
             report["stages"]["subtitles"]["piece_count"] = len(telop_pieces)
@@ -259,12 +335,55 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             report["stages"]["render"]["bgm_mood"] = plan.get("bgm_mood")
             report["stages"]["render"]["bgm_path"] = bgm_path
 
-            out_duration = total_shot_duration
+            out_duration = sum(shot_display_durations.get(s["id"], s["duration_sec"]) for s in shots) if shots else total_shot_duration
+
+            # 尺乖離の可視化: director企画時点のショット合計尺(total_shot_duration=plan上の
+            # duration_sec合計)と、同期モード後の実出力尺(out_duration)の差分を記録する。
+            # |drift|>3.0秒ならstageメッセージ/reportに警告文字列を残す。QAの合否判定式
+            # （qa/qa_check.py）は変えない（誤検知でrunを止めるリスクを避けるため。音声の
+            # 実尺に合わせて意図的に尺が動くのは同期モードの仕様）。
+            # 独立レビュー指摘: 閾値判定は丸め後の値ではなく生の差分で行う（例: 3.004秒が
+            # round()で3.0になり閾値超えを見逃すのを防ぐ）。round()は記録用の表示値にのみ適用する。
+            _raw_drift = out_duration - total_shot_duration
+            duration_drift_sec = round(_raw_drift, 2)
+            report["stages"]["render"]["duration_drift_sec"] = duration_drift_sec
+            if abs(_raw_drift) > 3.0:
+                direction = "長く" if _raw_drift > 0 else "短く"
+                # ここでの基準はCLI引数のtarget_duration_secそのものではなく、director企画時点の
+                # ショット合計尺(total_shot_duration)。「目標尺」ではなく「企画時点の尺」と表記し、
+                # 数字上の実際の比較対象を正確に示す（jobs.py側はproject.target_duration_secを
+                # 基準にするため、そちらは「目標尺」表記のままで正しい）。
+                report["stages"]["render"]["duration_drift_warning"] = (
+                    "※企画時点の尺より{:.1f}秒{}なりました（音声に合わせたため）".format(abs(_raw_drift), direction)
+                )
+
+            # edit enhancement層: カットSE(sfx)/BGM音量カーブ/フックのインパクトを求める。
+            # この層の計算で例外が起きても従来レンダ(edit無し)へフォールバックする。
+            edit_profile_applied = False
+            edit_sfx = []
+            bgm_curve = None
+            first_shot_impact_sec = None
+            if edit_prof is not None:
+                try:
+                    durations = [shot_display_durations.get(s["id"], s["duration_sec"]) for s in shots]
+                    enhancement = render.compute_edit_enhancement_kwargs(durations, edit_prof)
+                    edit_sfx = enhancement["sfx_extra"]
+                    bgm_curve = enhancement["bgm_curve"]
+                    first_shot_impact_sec = enhancement["first_shot_impact_sec"]
+                    edit_profile_applied = True
+                except Exception:
+                    edit_sfx = []
+                    bgm_curve = None
+                    first_shot_impact_sec = None
+                    edit_profile_applied = False
+            report["stages"]["render"]["edit_profile_applied"] = edit_profile_applied
+
             pass1_path = run_dir / "_loudnorm_pass1.mp4"
             cmd1 = render.build_final_cmd(
                 cfg["ffmpeg_bin"], str(concat_video_path), str(narration_wav_path), str(pass1_path),
                 str(ass_path), str(_FONTS_DIR), bgm_path=bgm_path, out_duration=out_duration,
-                loudnorm_measured=None,
+                loudnorm_measured=None, sfx=edit_sfx, bgm_curve=bgm_curve,
+                first_shot_impact_sec=first_shot_impact_sec,
             )
             res1 = render.run_ffmpeg(cmd1, timeout_sec=_FFMPEG_TIMEOUT_SEC)
             measured = _parse_loudnorm_json(res1["stderr"])
@@ -280,13 +399,15 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 cmd2 = render.build_final_cmd(
                     cfg["ffmpeg_bin"], str(concat_video_path), str(narration_wav_path), str(output_path),
                     str(ass_path), str(_FONTS_DIR), bgm_path=bgm_path, out_duration=out_duration,
-                    loudnorm_measured=None,
+                    loudnorm_measured=None, sfx=edit_sfx, bgm_curve=bgm_curve,
+                    first_shot_impact_sec=first_shot_impact_sec,
                 )
             else:
                 cmd2 = render.build_final_cmd(
                     cfg["ffmpeg_bin"], str(concat_video_path), str(narration_wav_path), str(output_path),
                     str(ass_path), str(_FONTS_DIR), bgm_path=bgm_path, out_duration=out_duration,
-                    loudnorm_measured=measured,
+                    loudnorm_measured=measured, sfx=edit_sfx, bgm_curve=bgm_curve,
+                    first_shot_impact_sec=first_shot_impact_sec,
                 )
             res2 = render.run_ffmpeg(cmd2, timeout_sec=_FFMPEG_TIMEOUT_SEC)
             if res2["returncode"] != 0:
@@ -353,6 +474,9 @@ def main(argv=None) -> int:
     for name, info in report["stages"].items():
         status = "OK" if info.get("ok") else "FAIL"
         print("  - {}: {} ({}s){}".format(name, status, info.get("elapsed_sec"), "" if info.get("ok") else " error=" + str(info.get("error"))))
+    render_stage = report["stages"].get("render") or {}
+    if render_stage.get("duration_drift_warning"):
+        print("[run] warning: {}".format(render_stage["duration_drift_warning"]))
     if report.get("output_path"):
         print("[run] output: {}".format(report["output_path"]))
     if report.get("qa"):
