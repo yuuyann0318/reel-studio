@@ -145,3 +145,19 @@ higgsfield-auto-reel の独立レビュー(codex)＋目視検収で確定した�
 ### 同時に実施した機能追加(不具合ではない)
 - **SFXライブラリ118種**(whoosh30/pop25/riser20/impact20/shimmer15+legacy8): パラメータ合成(generate_sfx_library.py)・ビート対応ローテーション(フック後=impact/CTA前=riser/本編=whoosh)・プロジェクトシード決定論・連続同音回避。
 - **BGMライブラリ+選曲エンジン**: inbox自動取り込み(ファイル名先頭ムード規約・loudnorm -18LUFS・sha1重複スキップ)/シード乱択+直近2曲回避/スターター12曲(4ムード×3・コード進行+ベース+ドラム合成)。bgm_selected記録。Suno等の実曲を入れれば無限に拡張可能。
+
+## 2026-07-20深夜: 多様化ラウンド2(実素材化)の棚卸し(10周目)
+
+発見経路: 窓口実機E2E+独立レビュー(exec-opus)×2周。**全件コミット前に修正済み**。pytest 817 passed。
+
+| ID | 重大度 | 発見経路 | 症状 | 修正内容 | 状態 |
+|---|---|---|---|---|---|
+| BUG-49 | 致命 | Opusレビュー | 外部SFX(効果音ラボ・再配布不可)105個mp3が.gitignore外でコミット対象=公開時に規約違反となるライセンス事故リスク。 | .gitignoreにexternal/*.mp3追加(LICENSE.mdは追跡)。窓口即時修正・check-ignore実証。 | 修正済み・実証済み |
+| BUG-50 | 高 | Opusレビュー | テロップ履歴(ランタイム状態)がコミット対象/2連続同テロップ(1/49の偶然だが体感悪化)。 | historyの.gitignore化+テロップにも直近1回避(BGMと同パターン・アトミック書き)。 | 修正済み・テスト検証済み |
+| BUG-51 | 中 | Opusレビュー | 外部SFXの素材間音量ばらつき(-46〜-13.6dB実測)で鳴りが不均一/texture族の長尺が将来レシピでカットSEに混入しうる/pop-yellow座布団が過大/jouhin等の細縁が実写で弱い。 | mean_volume_db計測→-16dBターゲット自動補正(±12dBクランプ)/texture除外+LONG_TAG不変式/座布団padding 10→5(bbox実測1.4%)/縁2.5統一。 | 修正済み・実フレーム検証済み |
+
+### 同時に実施した機能追加(ダブルループ2周の根本対応)
+- **実物SFX 104個**(効果音ラボ・商用可)をダウンロードしローテーションの主役に(外部80%優先・合成は脇役)。manifest 222件。
+- **編集レシピ6種**(punchy/minimal/sparkle/rhythmic/dramatic/clean)をムード連動シード選択・project["edit_recipe"]記録 → 「編集の方向性が毎回一緒」を解消。
+- **テロップ8スタイル**(新フォント5書体=OFL: ZenMaru/MochiyPop/YuseiMagic/KleeOne/MPLUSRounded)+動画ごと自動変化+直近回避。実フレーム見本で全スタイル描画確認。
+- 実機E2E×2本: BGM(calm_ambient↔upbeat_bright)・レシピ(clean↔rhythmic)が動画ごとに変化することを実証。

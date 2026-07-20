@@ -172,6 +172,8 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
 
     # edit enhancement層（カット点SE/パンチイン/BGM音量カーブ/フックのインパクト）。
     # プロファイル読み込み自体が失敗しても従来レンダを継続する（edit_prof=Noneなら以降すべて無効化）。
+    # 編集レシピ選択の入力: run_id は director 実行時にはまだ確定していないため、
+    # レシピの反映は director 完了後（plan.bgm_mood が判明した後）に再ロードする。
     try:
         edit_prof = edit_profile.load_edit_profile(cfg)
     except Exception:
@@ -193,6 +195,18 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     except Exception:
         _write_report(report)
         return report
+
+    # director 完了後、plan.bgm_mood と run_id を渡して編集レシピを解決し直す。
+    # プロジェクトごとに編集の性格を切り替えるための決定論選択。ロードに失敗しても
+    # 従来レンダを継続する（後方互換）。
+    try:
+        edit_prof = edit_profile.load_edit_profile(
+            cfg, project_seed=run_id, bgm_mood=plan.get("bgm_mood"),
+        )
+    except Exception:
+        pass  # 既存の edit_prof のまま
+    if isinstance(edit_prof, dict) and edit_prof.get("edit_recipe"):
+        report["edit_recipe"] = edit_prof["edit_recipe"]
 
     # --- Stage 2: compliance（NGワード検査） ---
     try:
@@ -346,9 +360,19 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 dict(s, duration_sec=shot_display_durations.get(s["id"], s["duration_sec"])) for s in shots
             ]
             telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=hook_shot_id)
-            ass_text = subtitles.generate_ass(telop_pieces, animation_enabled=_resolve_animation_enabled())
+            # 動画ごとに決定論的にテロップスタイルを1つ選ぶ（run_idをseedにするので同じ動画は同じスタイル）。
+            # CLI経路は現状 vertical_hook プリセットの指定手段がないため preset は None で
+            # horizontal_pool(7スタイル)から乱択する。
+            telop_style_name = subtitles.pick_telop_style_name(
+                run_id, preset=None, record_project_id=run_id,
+            )
+            ass_text = subtitles.generate_ass(
+                telop_pieces, animation_enabled=_resolve_animation_enabled(),
+                telop_style=telop_style_name,
+            )
             ass_path.write_text(ass_text, encoding="utf-8")
             report["stages"]["subtitles"]["piece_count"] = len(telop_pieces)
+            report["stages"]["subtitles"]["telop_style"] = telop_style_name
     except Exception:
         _write_report(report)
         return report

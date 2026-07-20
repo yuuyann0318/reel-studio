@@ -188,11 +188,49 @@ def gain_db_to_linear(gain_db):
     return 10.0 ** (float(gain_db) / 20.0)
 
 
+# 外部SFXの mean_volume 差を吸収する正規化ターゲット。ffmpeg volumedetect の
+# mean_volume(dB FS) がこの値になるように gain 補正を掛ける。実効的な聴感音量は
+# SFX の crest factor（ピーク/平均比）にも依存するため完璧ではないが、
+# 「効果音ラボ由来の音源だけ極端に大きい/小さい」を実用範囲まで詰めることが目的。
+SFX_MEAN_VOLUME_TARGET_DB = -16.0
+
+# gain 補正の絶対値上限（±dB）。無音に近い音源への過大ブースト（ノイズ増幅）と、
+# インパクト系のピーク過大カットを両側で防ぐ。
+SFX_MEAN_VOLUME_MAX_ADJUST_DB = 12.0
+
+
+def normalize_sfx_gain_db(base_gain_db, mean_volume_db,
+                          target_db=SFX_MEAN_VOLUME_TARGET_DB,
+                          max_adjust_db=SFX_MEAN_VOLUME_MAX_ADJUST_DB):
+    """SFX の mean_volume(dB) を target に揃える補正量を base_gain_db に足して返す。
+
+    - mean_volume_db が None（manifest 欠損 or ffmpeg 計測失敗）→ base_gain_db をそのまま返す。
+    - 補正量 = target_db - mean_volume_db を ±max_adjust_db にクランプ。
+    - 音源が target より小さい(-24dB など)→ 正の補正でブースト、
+      音源が target より大きい(-8dB など)→ 負の補正でカット。
+    """
+    if mean_volume_db is None:
+        return float(base_gain_db)
+    try:
+        mv = float(mean_volume_db)
+    except (TypeError, ValueError):
+        return float(base_gain_db)
+    adjust = float(target_db) - mv
+    limit = abs(float(max_adjust_db))
+    if adjust > limit:
+        adjust = limit
+    elif adjust < -limit:
+        adjust = -limit
+    return float(base_gain_db) + adjust
+
+
 def build_sfx_overlay_filters(sfx, start_index):
     """SFXオーバーレイ用のフィルタ断片群と、amixでpremixと合流させるラベル配列を構築する（純関数・テスト対象）。
 
-    sfx: [{"path","at_sec","gain_db"}, ...]（呼び出し側が-iで各pathを追加し、
-    その入力インデックスがstart_indexから連番で振られている前提）。
+    sfx: [{"path","at_sec","gain_db"[, "mean_volume_db"]}, ...]（呼び出し側が -i で各 path を
+    追加し、その入力インデックスが start_index から連番で振られている前提）。
+    mean_volume_db がある場合は normalize_sfx_gain_db() で volume 補正を掛けたうえで
+    volume= 断片を組み立てる（外部SFXの音量ばらつき吸収）。
     Returns: (filter_parts:list[str], mix_labels:list[str])
     """
     filter_parts = []
@@ -200,12 +238,14 @@ def build_sfx_overlay_filters(sfx, start_index):
     for i, s in enumerate(sfx or []):
         idx = start_index + i
         gain_db = s.get("gain_db", 0.0) or 0.0
+        mean_volume_db = s.get("mean_volume_db")
+        effective_gain_db = normalize_sfx_gain_db(gain_db, mean_volume_db)
         at_sec = max(0.0, float(s.get("at_sec", 0.0) or 0.0))
         delay_ms = int(round(at_sec * 1000))
         label = "sfx{}".format(i)
         filter_parts.append(
             "[{idx}:a]volume={gain:.4f},adelay={delay}|{delay}[{label}]".format(
-                idx=idx, gain=gain_db_to_linear(gain_db), delay=delay_ms, label=label
+                idx=idx, gain=gain_db_to_linear(effective_gain_db), delay=delay_ms, label=label
             )
         )
         mix_labels.append("[{}]".format(label))
@@ -261,6 +301,45 @@ def _family_weights_for_event(at_sec, hook_end_sec, cta_start_sec):
     return {"whoosh": 5, "legacy": 2, "pop": 1, "shimmer": 1}
 
 
+def _filter_events_by_density(events, cut_sfx_cfg, hook_end_sec, cta_start_sec):
+    """cut_sfx_cfg["density"] に応じてイベント配列を間引く。
+
+    - "every" / None / 未知: 何もしない（全イベント通過）
+    - "every_n": every_n_cuts（既定2）ごとに1つだけ残す
+    - "beats_only": hook_end_sec 付近（±0.6秒）と cta_start_sec 直前
+      （cta_start-1.5秒以降）のイベントだけ残す。両ヒントが無ければ
+      「フック直後（最初のイベント）」と「最後のイベント」の2箇所を残す。
+    - "none": すべて捨てる（＝カットSE無し）
+    """
+    density = (cut_sfx_cfg.get("density") or "every").lower()
+    if density in ("every", ""):
+        return list(events)
+    if density == "none":
+        return []
+    if density == "every_n":
+        n = int(cut_sfx_cfg.get("every_n_cuts") or 2)
+        if n <= 1:
+            return list(events)
+        return [t for i, t in enumerate(events) if i % n == 0]
+    if density == "beats_only":
+        filtered = []
+        for t in events:
+            near_hook = hook_end_sec is not None and abs(t - float(hook_end_sec)) < 0.6
+            near_cta = cta_start_sec is not None and t >= float(cta_start_sec) - 1.5
+            if near_hook or near_cta:
+                filtered.append(t)
+        if filtered:
+            return filtered
+        # フォールバック: ヒントが両方無い/どのイベントも境界に近くないなら
+        # 「最初 + 最後」の2箇所だけ残す（＝実質フックとCTAの位置）
+        if not events:
+            return []
+        if len(events) == 1:
+            return list(events)
+        return [events[0], events[-1]]
+    return list(events)
+
+
 def build_edit_cut_sfx_specs(shot_boundaries_sec, edit_profile, project_seed=None,
                               hook_end_sec=None, cta_start_sec=None):
     """edit_profile["cut_sfx"]設定から、build_final_cmdのsfx引数に追加できる
@@ -291,6 +370,19 @@ def build_edit_cut_sfx_specs(shot_boundaries_sec, edit_profile, project_seed=Non
     if not events:
         return []
 
+    # density（レシピが指定するSE密度: every / every_n / beats_only / none）で間引く
+    events = _filter_events_by_density(events, cfg, hook_end_sec, cta_start_sec)
+    if not events:
+        return []
+
+    # first_delay_sec（dramatic レシピ: 「無音→ドン」の遅延スタート）:
+    # 最初のイベントだけ後ろへずらして、フック直後の静寂を作る。
+    first_delay = float(cfg.get("first_delay_sec") or 0.0)
+
+    # レシピが cut_sfx.family_weights を指定していればそれを常時使う（位置ベースを上書き）。
+    # 指定が無ければ従来の位置ベース(_family_weights_for_event)。
+    recipe_weights = cfg.get("family_weights")
+
     rotate = cfg.get("rotate", False)
     manifest = cfg.get("manifest") or []
 
@@ -299,7 +391,10 @@ def build_edit_cut_sfx_specs(shot_boundaries_sec, edit_profile, project_seed=Non
         path = cfg.get("resolved_path")
         if not path:
             return []
-        return [{"path": path, "at_sec": t, "gain_db": gain_db} for t in events]
+        return [
+            {"path": path, "at_sec": (t + first_delay if i == 0 else t), "gain_db": gain_db}
+            for i, t in enumerate(events)
+        ]
 
     # ローテーションモード: 遅延インポートで edit_profile の関数を使う
     # （render.py -> edit_profile.py の依存を導入するが循環はしない）。
@@ -308,22 +403,32 @@ def build_edit_cut_sfx_specs(shot_boundaries_sec, edit_profile, project_seed=Non
     specs = []
     last_file = None
     for idx, at_sec in enumerate(events):
-        weights = _family_weights_for_event(at_sec, hook_end_sec, cta_start_sec)
+        if isinstance(recipe_weights, dict) and recipe_weights:
+            weights = recipe_weights
+        else:
+            weights = _family_weights_for_event(at_sec, hook_end_sec, cta_start_sec)
         picked = _ep.pick_cut_sfx(
             seed=project_seed, index=idx, manifest=manifest,
             family_weights=weights, avoid_file=last_file,
         )
+        emit_at = at_sec + first_delay if idx == 0 else at_sec
         if not picked:
             # フォールバック: 固定resolved_pathがあればそれで埋める
             path = cfg.get("resolved_path")
             if not path:
                 continue
-            specs.append({"path": path, "at_sec": at_sec, "gain_db": gain_db})
+            specs.append({"path": path, "at_sec": emit_at, "gain_db": gain_db})
             continue
         picked_path = _ep.resolve_sfx_file_path(picked.get("file"))
         if not picked_path:
             continue
-        specs.append({"path": picked_path, "at_sec": at_sec, "gain_db": gain_db})
+        # mean_volume_db は manifest 由来。build_sfx_overlay_filters 側で
+        # target -16dB との差分から ±12dB クランプで gain を補正する。
+        spec = {"path": picked_path, "at_sec": emit_at, "gain_db": gain_db}
+        mean_volume_db = picked.get("mean_volume_db")
+        if mean_volume_db is not None:
+            spec["mean_volume_db"] = mean_volume_db
+        specs.append(spec)
         last_file = picked.get("file")
     return specs
 

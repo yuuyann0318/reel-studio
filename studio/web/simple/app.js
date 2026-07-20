@@ -745,6 +745,9 @@ function renderResult() {
     <div class="s-card">
       <div class="s-section-title">動画が完成しました</div>
       <div class="s-section-sub">「${escapeHtml(project ? project.theme : "")}」</div>
+      ${project && project.telop_style && project.telop_style.display_name
+        ? `<div class="s-section-sub">テロップ: ${escapeHtml(project.telop_style.display_name)}</div>`
+        : ""}
       <div class="s-video-wrap">
         <div class="preview-frame">
           ${link

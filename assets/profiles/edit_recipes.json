@@ -1,0 +1,179 @@
+{
+  "_comment": "編集レシピ集: 動画ごとに編集の性格を切り替えるためのパラメータセット。load_edit_profile(project_seed, bgm_mood) が mood_weights から重み付き決定論選択する。各レシピは ttp_reference.json の edit セクション（cut_sfx/punch_in/bgm_curve/first_shot_impact）と同一スキーマ+family_weights・density の拡張キー。レシピに書いたキーだけがベースを上書きし、書いてないキーは既定値のまま残る。",
+  "version": 1,
+  "recipes": {
+    "punchy": {
+      "_desc": "毎カットSE・パンチイン強・BGMフックを大きく下げる（勢い最優先）",
+      "cut_sfx": {
+        "enabled": true,
+        "density": "every",
+        "gain_db": -14,
+        "min_interval_sec": 1.0,
+        "family_weights": {"impact": 5, "accent": 3, "whoosh": 3, "shimmer": 1}
+      },
+      "punch_in": {
+        "enabled": true,
+        "pattern": ["zoom_in_fast", "zoom_in_slow", "zoom_in_fast", "static"],
+        "max_zoom": 1.10,
+        "skip_if_backend": "mock"
+      },
+      "bgm_curve": {
+        "enabled": true,
+        "hook_gain_db": -8,
+        "body_gain_db": -16,
+        "cta_gain_db": -10,
+        "fade_out_sec": 1.2
+      },
+      "first_shot_impact": {
+        "enabled": true,
+        "scale_pop": true
+      }
+    },
+    "minimal": {
+      "_desc": "SEはビート境界のみ（3〜4発）・パンチインなし・BGM控えめ一定",
+      "cut_sfx": {
+        "enabled": true,
+        "density": "beats_only",
+        "gain_db": -18,
+        "min_interval_sec": 1.5,
+        "family_weights": {"whoosh": 3, "shimmer": 2, "accent": 1}
+      },
+      "punch_in": {
+        "enabled": false,
+        "pattern": ["static"],
+        "max_zoom": 1.00,
+        "skip_if_backend": "mock"
+      },
+      "bgm_curve": {
+        "enabled": true,
+        "hook_gain_db": -12,
+        "body_gain_db": -12,
+        "cta_gain_db": -12,
+        "fade_out_sec": 2.0
+      },
+      "first_shot_impact": {
+        "enabled": false,
+        "scale_pop": false
+      }
+    },
+    "sparkle": {
+      "_desc": "shimmer/accent中心・パンチイン弱・BGM明るめカーブ",
+      "cut_sfx": {
+        "enabled": true,
+        "density": "every",
+        "gain_db": -16,
+        "min_interval_sec": 1.2,
+        "family_weights": {"shimmer": 5, "accent": 3, "whoosh": 2}
+      },
+      "punch_in": {
+        "enabled": true,
+        "pattern": ["zoom_in_slow", "static", "pan_subtle", "static"],
+        "max_zoom": 1.05,
+        "skip_if_backend": "mock"
+      },
+      "bgm_curve": {
+        "enabled": true,
+        "hook_gain_db": -9,
+        "body_gain_db": -13,
+        "cta_gain_db": -10,
+        "fade_out_sec": 1.5
+      },
+      "first_shot_impact": {
+        "enabled": true,
+        "scale_pop": true
+      }
+    },
+    "rhythmic": {
+      "_desc": "SE1カットおき・whoosh中心・パンチイン交互",
+      "cut_sfx": {
+        "enabled": true,
+        "density": "every_n",
+        "every_n_cuts": 2,
+        "gain_db": -16,
+        "min_interval_sec": 1.0,
+        "family_weights": {"whoosh": 5, "accent": 3, "impact": 2, "shimmer": 1}
+      },
+      "punch_in": {
+        "enabled": true,
+        "pattern": ["zoom_in_slow", "static", "zoom_in_fast", "static"],
+        "max_zoom": 1.08,
+        "skip_if_backend": "mock"
+      },
+      "bgm_curve": {
+        "enabled": true,
+        "hook_gain_db": -10,
+        "body_gain_db": -14,
+        "cta_gain_db": -12,
+        "fade_out_sec": 1.5
+      },
+      "first_shot_impact": {
+        "enabled": true,
+        "scale_pop": true
+      }
+    },
+    "dramatic": {
+      "_desc": "riser/impact中心・フック無音→ドン演出・BGMカーブ大",
+      "cut_sfx": {
+        "enabled": true,
+        "density": "every",
+        "gain_db": -14,
+        "min_interval_sec": 1.3,
+        "first_delay_sec": 0.3,
+        "family_weights": {"riser": 5, "impact": 4, "whoosh": 2, "shimmer": 1}
+      },
+      "punch_in": {
+        "enabled": true,
+        "pattern": ["zoom_in_slow", "zoom_in_fast", "pan_subtle", "static"],
+        "max_zoom": 1.09,
+        "skip_if_backend": "mock"
+      },
+      "bgm_curve": {
+        "enabled": true,
+        "hook_gain_db": -6,
+        "body_gain_db": -18,
+        "cta_gain_db": -8,
+        "fade_out_sec": 2.0
+      },
+      "first_shot_impact": {
+        "enabled": true,
+        "scale_pop": true
+      }
+    },
+    "clean": {
+      "_desc": "SEほぼなし（フックとCTAのみ）・カットイン任せ",
+      "cut_sfx": {
+        "enabled": true,
+        "density": "beats_only",
+        "gain_db": -20,
+        "min_interval_sec": 2.0,
+        "family_weights": {"accent": 3, "shimmer": 2, "whoosh": 1}
+      },
+      "punch_in": {
+        "enabled": true,
+        "pattern": ["zoom_in_slow", "static", "static", "static"],
+        "max_zoom": 1.04,
+        "skip_if_backend": "mock"
+      },
+      "bgm_curve": {
+        "enabled": true,
+        "hook_gain_db": -11,
+        "body_gain_db": -13,
+        "cta_gain_db": -11,
+        "fade_out_sec": 1.5
+      },
+      "first_shot_impact": {
+        "enabled": false,
+        "scale_pop": false
+      }
+    }
+  },
+  "mood_weights": {
+    "upbeat":    {"punchy": 3, "rhythmic": 3, "sparkle": 3, "minimal": 1, "dramatic": 1, "clean": 0},
+    "calm":      {"minimal": 3, "clean": 3, "sparkle": 1, "rhythmic": 1, "punchy": 0, "dramatic": 0},
+    "emotional": {"dramatic": 3, "minimal": 2, "sparkle": 1, "clean": 1, "punchy": 0, "rhythmic": 0},
+    "dramatic":  {"dramatic": 4, "punchy": 3, "rhythmic": 1, "sparkle": 0, "minimal": 0, "clean": 0},
+    "lofi":      {"minimal": 3, "clean": 2, "sparkle": 1, "rhythmic": 1, "punchy": 0, "dramatic": 0},
+    "any":       {"punchy": 1, "minimal": 1, "sparkle": 1, "rhythmic": 1, "dramatic": 1, "clean": 1},
+    "default":   {"punchy": 1, "minimal": 1, "sparkle": 1, "rhythmic": 1, "dramatic": 1, "clean": 1}
+  }
+}

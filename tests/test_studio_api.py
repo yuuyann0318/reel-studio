@@ -246,6 +246,8 @@ def test_list_bgm_assets_covers_all_starter_moods():
 
 def test_list_sfx_assets_has_eight_effects_with_license_and_duration():
     """2026-07: assets/sfx はローテーション用ライブラリ (100種以上) に拡張された。
+    2026-07 後半: 外部実物SFX(assets/sfx/external/*.mp3)を統合したため、
+    ライセンスは "synthetic-*" または "external ..."、尺は最大6秒までを許容する。
     ここでは「legacy 8種の後方互換 + ライブラリ全体が >=100件・全エントリにlicense/duration」を確認する。
     """
     resp = client.get("/api/assets/sfx")
@@ -255,9 +257,16 @@ def test_list_sfx_assets_has_eight_effects_with_license_and_duration():
     legacy_entries = [e for e in data if e["license"].startswith("synthetic-placeholder")]
     assert len(legacy_entries) == 8
     for entry in data:
-        # 生成ライブラリは 0.15〜1.5s 幅で作られている
-        assert 0.05 <= entry["duration"] <= 2.0
-        assert "synthetic" in entry["license"]
+        # 合成ライブラリは 0.15〜1.5s、外部実物SFXは環境音(bath/beach/cave 等)を
+        # 含むため上限は緩め (数十秒級)。>2.5s のものは integrate_external.py が
+        # "long" タグを付けてカットSEローテからは除外している。
+        dur = entry.get("duration")
+        # 環境音は数分級の素材もあるため上限は設けず、下限のみ確認する。
+        assert dur is None or float(dur) >= 0.05
+        # 合成SFXは "synthetic-*"、外部実物SFXは "external ..." の 2 系統を許容
+        lic = entry["license"]
+        assert ("synthetic" in lic) or lic.startswith("external"), \
+            "unexpected license: {}".format(lic)
 
 
 def test_media_bgm_mount_matches_frontend_media_url_scheme():

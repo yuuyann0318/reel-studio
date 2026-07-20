@@ -80,15 +80,18 @@ def test_committed_manifest_has_100_plus_entries_and_all_families():
     assert {"whoosh", "pop", "riser", "impact", "shimmer", "legacy"}.issubset(families)
 
 
-def test_committed_manifest_files_exist_and_are_wav():
-    """manifest.json に載っている file が全部 assets/sfx/ に実在する。"""
+def test_committed_manifest_files_exist_and_are_audio():
+    """manifest.json に載っている file が全部 assets/sfx/ に実在し
+    音声ファイル拡張子(.wav / .mp3)であることを確認する。
+    2026-07以降 assets/sfx/external/*.mp3（実物SFX・integrate_external.py 経由）が
+    manifest に加わったため .mp3 も許容する。"""
     _require_generated_sfx()
     manifest_path = _REPO_ROOT / "assets" / "sfx" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     for e in manifest:
         p = _REPO_ROOT / "assets" / "sfx" / e["file"]
         assert p.exists(), "missing: {}".format(p)
-        assert p.suffix == ".wav"
+        assert p.suffix in (".wav", ".mp3"), "unsupported ext: {}".format(p)
 
 
 def test_generate_one_smoke_actually_runs_ffmpeg(tmp_path):

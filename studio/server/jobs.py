@@ -753,6 +753,11 @@ class JobManager:
             project["narration_segments"] = narration_segments
             if bgm_file:
                 project["bgm_selected"] = bgm_file
+            # 編集レシピ選択の入力として bgm_mood を残す（studio_plan には mood が
+            # 含まれないため、project 直下に保存する。_render_project はここを読む）。
+            _mood = plan.get("bgm_mood")
+            if _mood:
+                project["bgm_mood"] = _mood
             projects.save_project(project)
 
         # --- シーングループ（クリップ再利用）で生成する ---------------------------------
@@ -1416,8 +1421,14 @@ def _render_project(project_id, plan, cfg):
     # edit enhancement層（カット点SE/パンチイン/BGM音量カーブ/フックのインパクト）。
     # プロファイル読み込み自体が失敗しても従来レンダを継続する（edit_prof=Noneなら以降すべて無効化）。
     backend_name = (project_snapshot or {}).get("backend") or "mock"
+    # 編集レシピ選択の入力: project_id を seed、bgm_mood を mood として渡す。
+    # bgm_mood が未保存の旧プロジェクトでも load_edit_profile 側で
+    # 「default」重みへフォールバックする（後方互換）。
+    _bgm_mood_for_recipe = (project_snapshot or {}).get("bgm_mood")
     try:
-        edit_prof = edit_profile.load_edit_profile(cfg)
+        edit_prof = edit_profile.load_edit_profile(
+            cfg, project_seed=project_id, bgm_mood=_bgm_mood_for_recipe,
+        )
     except Exception:
         edit_prof = None
 
@@ -1500,12 +1511,33 @@ def _render_project(project_id, plan, cfg):
             animation_enabled = False
     except Exception:
         pass
+    # 動画ごとにテロップの見た目バリエーション（フォント/縁/座布団）を決定論選択する。
+    # seed=project_id・vertical_hookプリセットは"vertical-serif"固定・それ以外は
+    # horizontal_pool(7スタイル)から seed で選ぶ。選択結果は project["telop_style"] に記録し
+    # かんたんモードの完成画面に「テロップ: <名前>」1行を表示する。
+    _plan_sub_style = subtitles.resolve_subtitle_style(plan.get("subtitle_style"))
+    telop_style_name = subtitles.pick_telop_style_name(
+        project_id, preset=_plan_sub_style.get("preset"), record_project_id=project_id,
+    )
     ass_text = subtitles.generate_ass_with_style(
         telop_pieces, plan.get("subtitle_style"), product_name=product_name,
-        animation_enabled=animation_enabled,
+        animation_enabled=animation_enabled, telop_style=telop_style_name,
     )
     ass_path = work_dir / "subtitles.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
+    # 選択したテロップスタイルを project.json へ記録する（同じプロジェクトを再レンダしても
+    # 同じ結果になる=決定論。UIで名前を出すため display_name も合わせて保存）。
+    try:
+        _telop_def = subtitles.resolve_telop_style_def(telop_style_name)
+        _project = projects.get_project(project_id)
+        if _project is not None:
+            _project["telop_style"] = {
+                "name": telop_style_name,
+                "display_name": _telop_def.get("display_name") or telop_style_name,
+            }
+            projects.save_project(_project)
+    except Exception:
+        pass
 
     bgm_cfg = plan.get("bgm")
     bgm_path = None
@@ -1533,7 +1565,9 @@ def _render_project(project_id, plan, cfg):
     if edit_prof is not None:
         try:
             durations = [s["duration_sec"] for s in telop_shots]
-            enhancement = render.compute_edit_enhancement_kwargs(durations, edit_prof)
+            enhancement = render.compute_edit_enhancement_kwargs(
+                durations, edit_prof, project_seed=project_id,
+            )
             sfx_specs = sfx_specs + enhancement["sfx_extra"]
             bgm_curve = enhancement["bgm_curve"]
             first_shot_impact_sec = enhancement["first_shot_impact_sec"]
@@ -1585,6 +1619,11 @@ def _render_project(project_id, plan, cfg):
         proj_for_flag = projects.get_project(project_id)
         if proj_for_flag is not None:
             proj_for_flag["edit_profile_applied"] = edit_profile_applied
+            # 選択された編集レシピ名（あれば）を project に記録する。
+            # 「編集の方向性が毎回一緒」問題への監査ポイント: どの動画が
+            # どのレシピで組まれたかを追える。
+            if isinstance(edit_prof, dict) and edit_prof.get("edit_recipe"):
+                proj_for_flag["edit_recipe"] = edit_prof["edit_recipe"]
             projects.save_project(proj_for_flag)
     except Exception:
         pass

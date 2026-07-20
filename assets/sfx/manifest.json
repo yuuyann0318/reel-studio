@@ -1178,5 +1178,1387 @@
     ],
     "duration": 1.2,
     "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "external/anime_air-horn1.mp3",
+    "label_jp": "external:anime_air-horn1",
+    "family": "whoosh",
+    "tags": [
+      "transition",
+      "external"
+    ],
+    "duration": 1.794,
+    "mean_volume_db": -24.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_amount-display1.mp3",
+    "label_jp": "external:anime_amount-display1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 1.864,
+    "mean_volume_db": -27.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_ankle-spoil1.mp3",
+    "label_jp": "external:anime_ankle-spoil1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 0.991,
+    "mean_volume_db": -20.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_anxiety-piano1.mp3",
+    "label_jp": "external:anime_anxiety-piano1",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external"
+    ],
+    "duration": 1.96,
+    "mean_volume_db": -22.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_approaching-fear1.mp3",
+    "label_jp": "external:anime_approaching-fear1",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external"
+    ],
+    "duration": 2.091,
+    "mean_volume_db": -22.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_ban1.mp3",
+    "label_jp": "external:anime_ban1",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external",
+      "long"
+    ],
+    "duration": 5.195,
+    "mean_volume_db": -23.0,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_bell1.mp3",
+    "label_jp": "external:anime_bell1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.54,
+    "mean_volume_db": -27.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_bite1.mp3",
+    "label_jp": "external:anime_bite1",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 0.84,
+    "mean_volume_db": -22.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_blink1.mp3",
+    "label_jp": "external:anime_blink1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.002,
+    "mean_volume_db": -28.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_boyon1.mp3",
+    "label_jp": "external:anime_boyon1",
+    "family": "whoosh",
+    "tags": [
+      "transition",
+      "external"
+    ],
+    "duration": 0.685,
+    "mean_volume_db": -25.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_boyoyon1.mp3",
+    "label_jp": "external:anime_boyoyon1",
+    "family": "whoosh",
+    "tags": [
+      "transition",
+      "external"
+    ],
+    "duration": 1.344,
+    "mean_volume_db": -25.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_brake1.mp3",
+    "label_jp": "external:anime_brake1",
+    "family": "whoosh",
+    "tags": [
+      "transition",
+      "external"
+    ],
+    "duration": 1.35,
+    "mean_volume_db": -23.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_broadcasting-end1.mp3",
+    "label_jp": "external:anime_broadcasting-end1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 4.075,
+    "mean_volume_db": -22.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_broadcasting-start1.mp3",
+    "label_jp": "external:anime_broadcasting-start1",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external",
+      "long"
+    ],
+    "duration": 4.155,
+    "mean_volume_db": -22.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_buun1.mp3",
+    "label_jp": "external:anime_buun1",
+    "family": "whoosh",
+    "tags": [
+      "transition",
+      "external",
+      "long"
+    ],
+    "duration": 3.773,
+    "mean_volume_db": -13.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_buzzer-opening1.mp3",
+    "label_jp": "external:anime_buzzer-opening1",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 2.009,
+    "mean_volume_db": -25.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_chan-chan1.mp3",
+    "label_jp": "external:anime_chan-chan1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.643,
+    "mean_volume_db": -24.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_chan-chan2.mp3",
+    "label_jp": "external:anime_chan-chan2",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.947,
+    "mean_volume_db": -24.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_chan-chan3.mp3",
+    "label_jp": "external:anime_chan-chan3",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 2.016,
+    "mean_volume_db": -23.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_church-bell1.mp3",
+    "label_jp": "external:anime_church-bell1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external",
+      "long"
+    ],
+    "duration": 3.041,
+    "mean_volume_db": -27.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_church-bell2.mp3",
+    "label_jp": "external:anime_church-bell2",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external",
+      "long"
+    ],
+    "duration": 5.834,
+    "mean_volume_db": -24.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_clock-tower-bell1.mp3",
+    "label_jp": "external:anime_clock-tower-bell1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 2.419,
+    "mean_volume_db": -23.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_conch1.mp3",
+    "label_jp": "external:anime_conch1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 4.152,
+    "mean_volume_db": -20.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_correct1.mp3",
+    "label_jp": "external:anime_correct1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.698,
+    "mean_volume_db": -23.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_correct2.mp3",
+    "label_jp": "external:anime_correct2",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external",
+      "long"
+    ],
+    "duration": 2.783,
+    "mean_volume_db": -27.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_correct3.mp3",
+    "label_jp": "external:anime_correct3",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.477,
+    "mean_volume_db": -26.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_correct4.mp3",
+    "label_jp": "external:anime_correct4",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 2.496,
+    "mean_volume_db": -28.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_correct5.mp3",
+    "label_jp": "external:anime_correct5",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.79,
+    "mean_volume_db": -28.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_costume-drama1.mp3",
+    "label_jp": "external:anime_costume-drama1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 3.123,
+    "mean_volume_db": -33.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_costume-drama2.mp3",
+    "label_jp": "external:anime_costume-drama2",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 1.608,
+    "mean_volume_db": -30.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_costume-drama3.mp3",
+    "label_jp": "external:anime_costume-drama3",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 1.268,
+    "mean_volume_db": -28.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_curse-melody1.mp3",
+    "label_jp": "external:anime_curse-melody1",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external"
+    ],
+    "duration": 2.48,
+    "mean_volume_db": -22.0,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_cute-motion1.mp3",
+    "label_jp": "external:anime_cute-motion1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.006,
+    "mean_volume_db": -23.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/anime_cute-pose1.mp3",
+    "label_jp": "external:anime_cute-pose1",
+    "family": "shimmer",
+    "tags": [
+      "shimmer",
+      "external"
+    ],
+    "duration": 1.493,
+    "mean_volume_db": -22.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_armor-dash-2.mp3",
+    "label_jp": "external:battle_armor-dash-2",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 11.872,
+    "mean_volume_db": -23.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_armor-work-1.mp3",
+    "label_jp": "external:battle_armor-work-1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 5.355,
+    "mean_volume_db": -25.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_arrow-pierce1.mp3",
+    "label_jp": "external:battle_arrow-pierce1",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 0.912,
+    "mean_volume_db": -25.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_arrow-release1.mp3",
+    "label_jp": "external:battle_arrow-release1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 1.016,
+    "mean_volume_db": -25.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_aura1.mp3",
+    "label_jp": "external:battle_aura1",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external",
+      "long"
+    ],
+    "duration": 9.439,
+    "mean_volume_db": -22.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_aura2.mp3",
+    "label_jp": "external:battle_aura2",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external",
+      "long"
+    ],
+    "duration": 4.052,
+    "mean_volume_db": -23.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_ax-slash-1.mp3",
+    "label_jp": "external:battle_ax-slash-1",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 1.037,
+    "mean_volume_db": -18.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_ax-slash-2.mp3",
+    "label_jp": "external:battle_ax-slash-2",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 1.157,
+    "mean_volume_db": -14.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_best-step-into1.mp3",
+    "label_jp": "external:battle_best-step-into1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 1.251,
+    "mean_volume_db": -21.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_blood-drips1.mp3",
+    "label_jp": "external:battle_blood-drips1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 1.003,
+    "mean_volume_db": -35.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_blood-drips2.mp3",
+    "label_jp": "external:battle_blood-drips2",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 2.288,
+    "mean_volume_db": -38.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_blow1.mp3",
+    "label_jp": "external:battle_blow1",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 1.003,
+    "mean_volume_db": -24.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_blow2.mp3",
+    "label_jp": "external:battle_blow2",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 1.003,
+    "mean_volume_db": -22.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_blow3.mp3",
+    "label_jp": "external:battle_blow3",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 1.035,
+    "mean_volume_db": -21.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/battle_blow4.mp3",
+    "label_jp": "external:battle_blow4",
+    "family": "impact",
+    "tags": [
+      "impact",
+      "external"
+    ],
+    "duration": 1.235,
+    "mean_volume_db": -20.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_beep1.mp3",
+    "label_jp": "external:button_beep1",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.063,
+    "mean_volume_db": -28.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_beep2.mp3",
+    "label_jp": "external:button_beep2",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.025,
+    "mean_volume_db": -24.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_beep3.mp3",
+    "label_jp": "external:button_beep3",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.051,
+    "mean_volume_db": -24.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_beep4.mp3",
+    "label_jp": "external:button_beep4",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.033,
+    "mean_volume_db": -32.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_beep5.mp3",
+    "label_jp": "external:button_beep5",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.038,
+    "mean_volume_db": -31.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel1.mp3",
+    "label_jp": "external:button_cancel1",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.01,
+    "mean_volume_db": -33.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel2.mp3",
+    "label_jp": "external:button_cancel2",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.022,
+    "mean_volume_db": -27.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel3.mp3",
+    "label_jp": "external:button_cancel3",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.251,
+    "mean_volume_db": -29.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel4.mp3",
+    "label_jp": "external:button_cancel4",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.244,
+    "mean_volume_db": -29.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel5.mp3",
+    "label_jp": "external:button_cancel5",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.62,
+    "mean_volume_db": -29.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel6.mp3",
+    "label_jp": "external:button_cancel6",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.607,
+    "mean_volume_db": -26.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel7.mp3",
+    "label_jp": "external:button_cancel7",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.03,
+    "mean_volume_db": -32.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel8.mp3",
+    "label_jp": "external:button_cancel8",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.912,
+    "mean_volume_db": -19.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cancel9.mp3",
+    "label_jp": "external:button_cancel9",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.013,
+    "mean_volume_db": -24.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor1.mp3",
+    "label_jp": "external:button_cursor1",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.049,
+    "mean_volume_db": -32.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor10.mp3",
+    "label_jp": "external:button_cursor10",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.692,
+    "mean_volume_db": -25.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor11.mp3",
+    "label_jp": "external:button_cursor11",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.019,
+    "mean_volume_db": -24.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor12.mp3",
+    "label_jp": "external:button_cursor12",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.082,
+    "mean_volume_db": -34.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor2.mp3",
+    "label_jp": "external:button_cursor2",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.937,
+    "mean_volume_db": -39.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor3.mp3",
+    "label_jp": "external:button_cursor3",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.008,
+    "mean_volume_db": -27.7,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor4.mp3",
+    "label_jp": "external:button_cursor4",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.966,
+    "mean_volume_db": -37.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor5.mp3",
+    "label_jp": "external:button_cursor5",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.023,
+    "mean_volume_db": -31.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor6.mp3",
+    "label_jp": "external:button_cursor6",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.046,
+    "mean_volume_db": -46.0,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor7.mp3",
+    "label_jp": "external:button_cursor7",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.007,
+    "mean_volume_db": -36.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor8.mp3",
+    "label_jp": "external:button_cursor8",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.99,
+    "mean_volume_db": -37.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_cursor9.mp3",
+    "label_jp": "external:button_cursor9",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.01,
+    "mean_volume_db": -45.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_data-display1.mp3",
+    "label_jp": "external:button_data-display1",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.066,
+    "mean_volume_db": -19.1,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_data-display2.mp3",
+    "label_jp": "external:button_data-display2",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.005,
+    "mean_volume_db": -22.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_data-display3.mp3",
+    "label_jp": "external:button_data-display3",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external",
+      "long"
+    ],
+    "duration": 4.139,
+    "mean_volume_db": -25.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_data-display4.mp3",
+    "label_jp": "external:button_data-display4",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.486,
+    "mean_volume_db": -23.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_decision1.mp3",
+    "label_jp": "external:button_decision1",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.816,
+    "mean_volume_db": -22.0,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_decision10.mp3",
+    "label_jp": "external:button_decision10",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 2.375,
+    "mean_volume_db": -17.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_decision11.mp3",
+    "label_jp": "external:button_decision11",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.799,
+    "mean_volume_db": -18.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_decision12.mp3",
+    "label_jp": "external:button_decision12",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 1.01,
+    "mean_volume_db": -26.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/button_decision13.mp3",
+    "label_jp": "external:button_decision13",
+    "family": "accent",
+    "tags": [
+      "accent",
+      "external"
+    ],
+    "duration": 0.451,
+    "mean_volume_db": -20.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_after-death-word1.mp3",
+    "label_jp": "external:environment_after-death-word1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 60.843,
+    "mean_volume_db": -23.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_airport1.mp3",
+    "label_jp": "external:environment_airport1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 23.336,
+    "mean_volume_db": -37.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_amami-nature-night1.mp3",
+    "label_jp": "external:environment_amami-nature-night1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 164.309,
+    "mean_volume_db": -26.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_amami-nature1.mp3",
+    "label_jp": "external:environment_amami-nature1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 57.557,
+    "mean_volume_db": -28.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_bath1.mp3",
+    "label_jp": "external:environment_bath1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 56.595,
+    "mean_volume_db": -32.0,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_beach-seagull1.mp3",
+    "label_jp": "external:environment_beach-seagull1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 75.414,
+    "mean_volume_db": -29.6,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_big-city-sky1.mp3",
+    "label_jp": "external:environment_big-city-sky1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 9.573,
+    "mean_volume_db": -25.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_big-city1.mp3",
+    "label_jp": "external:environment_big-city1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 62.464,
+    "mean_volume_db": -26.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_bowling-alley1.mp3",
+    "label_jp": "external:environment_bowling-alley1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 61.963,
+    "mean_volume_db": -34.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/environment_cave1.mp3",
+    "label_jp": "external:environment_cave1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 72.191,
+    "mean_volume_db": -44.8,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_airliner-pass1.mp3",
+    "label_jp": "external:machine_airliner-pass1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 8.493,
+    "mean_volume_db": -25.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_airliner-pass2.mp3",
+    "label_jp": "external:machine_airliner-pass2",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 17.148,
+    "mean_volume_db": -22.0,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_arm-action1.mp3",
+    "label_jp": "external:machine_arm-action1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 0.959,
+    "mean_volume_db": -22.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_arm-action2.mp3",
+    "label_jp": "external:machine_arm-action2",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external"
+    ],
+    "duration": 1.02,
+    "mean_volume_db": -26.3,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_booster1.mp3",
+    "label_jp": "external:machine_booster1",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external"
+    ],
+    "duration": 1.011,
+    "mean_volume_db": -20.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_booster2.mp3",
+    "label_jp": "external:machine_booster2",
+    "family": "riser",
+    "tags": [
+      "riser",
+      "external"
+    ],
+    "duration": 1.945,
+    "mean_volume_db": -19.9,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_bullet-train-driving1.mp3",
+    "label_jp": "external:machine_bullet-train-driving1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 49.505,
+    "mean_volume_db": -25.2,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_bullet-train-home1.mp3",
+    "label_jp": "external:machine_bullet-train-home1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 76.858,
+    "mean_volume_db": -24.4,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_bullet-train-start1.mp3",
+    "label_jp": "external:machine_bullet-train-start1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 20.689,
+    "mean_volume_db": -22.0,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
+  },
+  {
+    "file": "external/machine_camera-press-conference-shutter1.mp3",
+    "label_jp": "external:machine_camera-press-conference-shutter1",
+    "family": "texture",
+    "tags": [
+      "ambient",
+      "external",
+      "long"
+    ],
+    "duration": 6.365,
+    "mean_volume_db": -26.5,
+    "source": "external",
+    "license": "external (assets/sfx/external/LICENSE.md 参照。効果音ラボ・商用可)"
   }
 ]

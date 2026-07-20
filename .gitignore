@@ -10,3 +10,7 @@ assets/bgm/library/
 assets/fonts/
 assets/sfx/*.wav
 projects/
+# 外部SFX(効果音ラボ)は再配布不可のためコミット禁止(LICENSE.mdは追跡する)
+assets/sfx/external/*.mp3
+# テロップ選択履歴(ランタイム状態)
+assets/profiles/.telop_history.json*

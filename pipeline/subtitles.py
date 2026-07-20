@@ -10,7 +10,18 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import tempfile
+import time
+from pathlib import Path
+
+try:
+    import fcntl  # POSIX のみ（macOS/Linuxで有効）
+except Exception:  # pragma: no cover - Windows等
+    fcntl = None
 
 PLAY_RES_X = 1080
 PLAY_RES_Y = 1920
@@ -165,7 +176,15 @@ def build_dialogue_text(lines, emphasis=None, color_map=None):
     return "\\N".join(rendered_lines)
 
 
-def build_ass_header():
+def build_ass_header(telop_style=None):
+    """CLI(run.py)経路のASSヘッダを構築する。
+
+    telop_style（None/str/dict）を渡すと、フォント/縁/座布団を反映した
+    build_ass_header_with_style() の結果を返す（Studioの style-aware ヘッダと
+    共通ロジックを使う）。未指定時は従来どおり固定テンプレート（完全後方互換）。
+    """
+    if telop_style is not None:
+        return build_ass_header_with_style(subtitle_style=None, telop_style=telop_style)
     return _ASS_HEADER_TEMPLATE.format(
         play_res_x=PLAY_RES_X,
         play_res_y=PLAY_RES_Y,
@@ -202,12 +221,279 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Base,Noto Sans JP Black,{base_size},&H00FFFFFF,&H000000FF,{outline_color},{back_color},-1,0,0,0,100,100,0,0,1,{outline},{shadow},{alignment},{margin_l},{margin_r},{margin_v},1
-Style: Big,Noto Sans JP Black,{big_size},{big_primary},&H000000FF,{outline_color},{back_color},-1,0,0,0,100,100,0,0,1,{outline},{shadow},{alignment},{margin_l},{margin_r},{margin_v},1
+Style: Base,{font},{base_size},&H00FFFFFF,&H000000FF,{outline_color},{back_color},-1,0,0,0,100,100,{spacing},0,{border_style},{outline},{shadow},{alignment},{margin_l},{margin_r},{margin_v},1
+Style: Big,{font},{big_size},{big_primary},&H000000FF,{outline_color},{back_color},-1,0,0,0,100,100,{spacing},0,{border_style},{outline},{shadow},{alignment},{margin_l},{margin_r},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+
+# ---------------------------------------------------------------------------
+# テロップ見た目バリエーション（telop_styles.json）
+#
+# 動画ごとに「フォント/縁/影/座布団」等の見た目を切り替えるための定義群。
+# ttf内部ファミリー名で fontsdir 経由に libass が解決する（実機描画確認済み・
+# 名前: Noto Sans JP Black / Noto Serif JP Black / Zen Maru Gothic Black /
+# Mochiy Pop One / Yusei Magic / Klee One SemiBold / Rounded Mplus 1c Black）。
+# ---------------------------------------------------------------------------
+
+_TELOP_STYLES_PATH = Path(__file__).resolve().parent.parent / "assets" / "profiles" / "telop_styles.json"
+
+# 既定スタイル（telop_styles.json未指定/読み込み失敗時のフォールバック=現行"shiro-futo"相当）。
+# 既存テスト（Noto Sans JP Black / outline=2.5 / shadow=3 / OUTLINE_COLOR / BACK_COLOR / 座布団なし）
+# の期待値と厳密に一致するよう組んである。変更する場合は test_subtitles_studio.py を要確認。
+_DEFAULT_TELOP_STYLE_DEF = {
+    "display_name": "白×太チャコール",
+    "font": "Noto Sans JP Black",
+    "base_size_scale": 1.0,
+    "outline": OUTLINE,
+    "shadow": SHADOW,
+    "outline_color_hex": "#1A1A1A",
+    "outline_color_alpha_hex": "00",
+    "back_color_hex": "#000000",
+    "back_color_alpha_hex": "80",
+    "band": False,
+    "spacing": 0,
+    "margin_v_offset": 0,
+    "accent_color_override": None,
+    "vertical": False,
+}
+
+DEFAULT_TELOP_STYLE_NAME = "shiro-futo"
+VERTICAL_TELOP_STYLE_NAME = "vertical-serif"
+
+_TELOP_STYLES_CACHE = None
+
+
+def _load_telop_styles_from_disk():
+    try:
+        with _TELOP_STYLES_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    styles = data.get("styles")
+    if not isinstance(styles, dict):
+        return None
+    horizontal_pool = data.get("horizontal_pool")
+    if not isinstance(horizontal_pool, list) or not horizontal_pool:
+        horizontal_pool = [DEFAULT_TELOP_STYLE_NAME]
+    vertical_default = data.get("vertical_default") or VERTICAL_TELOP_STYLE_NAME
+    return {"styles": styles, "horizontal_pool": horizontal_pool, "vertical_default": vertical_default}
+
+
+def load_telop_styles():
+    """assets/profiles/telop_styles.json を読み込んで返す（読込失敗時は最小フォールバック）。
+
+    プロセス内でキャッシュする（テストで書き換えたい場合は _TELOP_STYLES_CACHE = None）。
+    """
+    global _TELOP_STYLES_CACHE
+    if _TELOP_STYLES_CACHE is not None:
+        return _TELOP_STYLES_CACHE
+    data = _load_telop_styles_from_disk()
+    if data is None:
+        data = {
+            "styles": {DEFAULT_TELOP_STYLE_NAME: dict(_DEFAULT_TELOP_STYLE_DEF)},
+            "horizontal_pool": [DEFAULT_TELOP_STYLE_NAME],
+            "vertical_default": VERTICAL_TELOP_STYLE_NAME,
+        }
+    _TELOP_STYLES_CACHE = data
+    return data
+
+
+def list_telop_style_names():
+    """定義済みテロップスタイル名の一覧を返す（順序は telop_styles.json の"styles"順）。"""
+    return list(load_telop_styles()["styles"].keys())
+
+
+def resolve_telop_style_def(telop_style):
+    """telop_style（None / スタイル名 str / 完全指定 dict）を _DEFAULT_TELOP_STYLE_DEF で補完して返す。
+
+    - None: DEFAULT_TELOP_STYLE_NAME を解決して返す
+    - str: telop_styles.json から名前解決。未知の名前は既定へフォールバック（例外は投げない）
+    - dict: そのまま _DEFAULT_TELOP_STYLE_DEF とマージ（部分指定可）
+    """
+    if isinstance(telop_style, dict):
+        merged = dict(_DEFAULT_TELOP_STYLE_DEF)
+        for k, v in telop_style.items():
+            if v is not None:
+                merged[k] = v
+        return merged
+    data = load_telop_styles()
+    name = telop_style if isinstance(telop_style, str) and telop_style else DEFAULT_TELOP_STYLE_NAME
+    style_def = data["styles"].get(name)
+    if not isinstance(style_def, dict):
+        style_def = data["styles"].get(DEFAULT_TELOP_STYLE_NAME) or {}
+    merged = dict(_DEFAULT_TELOP_STYLE_DEF)
+    for k, v in style_def.items():
+        if v is not None:
+            merged[k] = v
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# テロップスタイル履歴（直近回避）
+#
+# 直近1件（=前回動画で採用した horizontal_pool のstyle名）を候補プールから外して
+# シード選択することで、seedが偶々近いmd5を出したときの「連続同スタイル」を防ぐ。
+# 実装パターンは pipeline/bgm_library._save_history_to と同じ（flock排他 +
+# tempfile→os.replaceのアトミック書き）。1責務: pick_telop_style_name の
+# 内部ヘルパーとしてのみ使う。
+# ---------------------------------------------------------------------------
+
+_TELOP_HISTORY_PATH = Path(__file__).resolve().parent.parent / "assets" / "profiles" / ".telop_history.json"
+_TELOP_HISTORY_MAX = 32
+_TELOP_AVOID_LAST_N = 1  # 「直近1件のstyleを除外」（連続同スタイル防止）
+
+
+def telop_history_path():
+    return _TELOP_HISTORY_PATH
+
+
+def _load_telop_history_from(path):
+    if not path.exists():
+        return {"recent": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("recent"), list):
+            return data
+    except Exception:
+        pass
+    return {"recent": []}
+
+
+def load_telop_history():
+    return _load_telop_history_from(_TELOP_HISTORY_PATH)
+
+
+def _save_telop_history_to(path, history):
+    """history JSONをアトミック書き込み（tempfile→os.replace）＋flock排他で永続化する。
+
+    pipeline/bgm_library._save_history_to と同じ実装パターン。
+    - 同ディレクトリの .lock に fcntl.flock(EX) を取ってから書く（同時実行での破損回避）
+    - tempfile を同一ディレクトリに作って os.replace で原子的に置換（途中失敗しても既存
+      ファイルは常に妥当な JSON のまま残る）
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(history, ensure_ascii=False, indent=2) + "\n"
+
+    lock_path = path.parent / (path.name + ".lock")
+    lock_fp = None
+    if fcntl is not None:
+        try:
+            lock_fp = open(lock_path, "a+")
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            if lock_fp is not None:
+                try:
+                    lock_fp.close()
+                except Exception:
+                    pass
+                lock_fp = None
+
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp_name, str(path))
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except Exception:
+                pass
+            raise
+    finally:
+        if lock_fp is not None:
+            try:
+                fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            try:
+                lock_fp.close()
+            except Exception:
+                pass
+
+
+def pick_telop_style_name(seed, preset=None, history=None, record_project_id=None,
+                          history_path_override=None):
+    """project_seed（str/int/None）から決定論的にテロップスタイル名を選ぶ。
+
+    preset=="vertical_hook" のときは vertical_default（既定 "vertical-serif"）を返す
+    （縦書きは連続同スタイル問題の対象外なので履歴回避は行わない）。
+    それ以外（"default" or None）は horizontal_pool から seed で決定論選択する。
+    履歴の直近1件のstyleは候補から除外する（連続同スタイル防止）。ただし候補が
+    1個しか残らない場合は縮退して回避なしで返す。record_project_id を渡した場合、
+    同 project_id が既に recent にあれば append 抑止（同一プロジェクトの再実行で
+    決定論を維持するため）＝それ以外は新規に追記して永続化する。history_path_override
+    を渡した場合はそのパスへ書き出す（テスト用）。
+    """
+    data = load_telop_styles()
+    if preset == "vertical_hook":
+        return data.get("vertical_default") or VERTICAL_TELOP_STYLE_NAME
+    pool = data.get("horizontal_pool") or [DEFAULT_TELOP_STYLE_NAME]
+    if not pool:
+        return DEFAULT_TELOP_STYLE_NAME
+
+    if history is None:
+        history = load_telop_history()
+
+    # 直近使用の回避: ただし自プロジェクトの過去エントリは「他人ではなく自分の履歴」
+    # なので回避対象から外す（再実行で同スタイルを維持するため。決定論と回避の衝突回避）。
+    recent_slice = history.get("recent", [])[-_TELOP_AVOID_LAST_N:]
+    recent_names = [
+        r.get("name") for r in recent_slice
+        if isinstance(r, dict)
+        and r.get("name")
+        and not (record_project_id and r.get("project_id") == record_project_id)
+    ]
+    filtered = [n for n in pool if n not in recent_names]
+    effective_pool = filtered if filtered else pool  # 候補1個なら回避なしで縮退
+
+    key = "telop:{}".format(seed if seed is not None else "")
+    digest = hashlib.md5(key.encode("utf-8")).digest()
+    idx = int.from_bytes(digest[:8], "big", signed=False) % len(effective_pool)
+    chosen = effective_pool[idx]
+
+    if record_project_id:
+        recent_list = history.setdefault("recent", [])
+        # 同じ project_id のエントリが既に recent にあれば append しない
+        # （同プロジェクトの再実行で回避対象が積み重ならないようにする＝決定論維持）。
+        already_recorded = any(
+            isinstance(r, dict) and r.get("project_id") == record_project_id
+            for r in recent_list
+        )
+        if not already_recorded:
+            recent_list.append({
+                "project_id": record_project_id,
+                "name": chosen,
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            })
+            history["recent"] = recent_list[-_TELOP_HISTORY_MAX:]
+            _save_telop_history_to(
+                Path(history_path_override) if history_path_override else _TELOP_HISTORY_PATH,
+                history,
+            )
+    return chosen
+
+
+def _telop_style_outline_color(style_def):
+    """style_defからOutlineColour（Style行の&HAABBGGRR）を組み立てる。"""
+    return _hex_to_ass_style_color(
+        style_def.get("outline_color_hex") or "#1A1A1A",
+        alpha_hex=style_def.get("outline_color_alpha_hex") or "00",
+    )
+
+
+def _telop_style_back_color(style_def):
+    """style_defからBackColour（Style行の&HAABBGGRR）を組み立てる。"""
+    return _hex_to_ass_style_color(
+        style_def.get("back_color_hex") or "#000000",
+        alpha_hex=style_def.get("back_color_alpha_hex") or "80",
+    )
 
 
 def _hex_to_ass_style_color(hex_color, alpha_hex="00"):
@@ -232,36 +518,55 @@ def resolve_subtitle_style(subtitle_style=None):
     return merged
 
 
-def build_ass_header_with_style(subtitle_style=None):
-    """subtitle_style（font_size/accent_color/position）を反映したASSヘッダを構築する。
+def build_ass_header_with_style(subtitle_style=None, telop_style=None):
+    """subtitle_style（font_size/accent_color/position）+ telop_style（見た目）を反映したASSヘッダを構築する。
 
     Studio専用のテロップ再生成で使う（既存の build_ass_header()/generate_ass() は
     run.py のCLI経路向けとして変更せず残す）。DEFAULT_SUBTITLE_STYLE を既定値とし、
     Big(フック)スタイルの文字色に accent_color を反映する。
+
+    telop_style（None/str/dict）は resolve_telop_style_def() 経由で解決し、
+    フォント名/サイズスケール/縁色/座布団(BorderStyle=3)/字間 を Style 行へ焼き込む。
+    未指定時は既定"shiro-futo"相当 → Noto Sans JP Black + 現行の縁2.5/影3/ダーク
+    チャコール縁で完全後方互換（既存テストの数値がそのまま維持される）。
     """
     style = resolve_subtitle_style(subtitle_style)
-    base_size = int(style.get("font_size") or STYLE_BASE_FONTSIZE)
+    telop_def = resolve_telop_style_def(telop_style)
+
+    scale = float(telop_def.get("base_size_scale") or 1.0)
+    base_size = int(round((style.get("font_size") or STYLE_BASE_FONTSIZE) * scale))
     big_size = base_size + (STYLE_BIG_FONTSIZE - STYLE_BASE_FONTSIZE)
-    margin_v = _POSITION_MARGIN_V.get(style.get("position"), MARGIN_V)
+    margin_v = _POSITION_MARGIN_V.get(style.get("position"), MARGIN_V) + int(telop_def.get("margin_v_offset") or 0)
     # Big(フック)行の全文をaccent_colorで塗る旧仕様は、明るい背景で細縁と
     # 組み合わさると可読性が崩れることが実機フレーム目視で判明したため廃止。
     # フック行も白ベースとし、強調は自動アクセント(部分着色)に一本化する。
     big_primary = "&H00FFFFFF"
 
+    # band=Trueは BorderStyle=3（不透明ボックス=座布団）でOutlineColour色の帯を
+    # テキスト背景に描く（padding量はOutlineフィールドが担う）。band=Falseは従来
+    # BorderStyle=1（縁取り+影）。libassの実挙動を実機フレームで確認済み。
+    if telop_def.get("band"):
+        border_style = 3
+    else:
+        border_style = 1
+
     return _STYLED_ASS_HEADER_TEMPLATE.format(
         play_res_x=PLAY_RES_X,
         play_res_y=PLAY_RES_Y,
+        font=telop_def.get("font") or "Noto Sans JP Black",
         base_size=base_size,
         big_size=big_size,
         big_primary=big_primary,
-        outline=OUTLINE,
-        shadow=SHADOW,
-        outline_color=OUTLINE_COLOR,
-        back_color=BACK_COLOR,
+        outline=telop_def.get("outline", OUTLINE),
+        shadow=telop_def.get("shadow", SHADOW),
+        outline_color=_telop_style_outline_color(telop_def),
+        back_color=_telop_style_back_color(telop_def),
         alignment=ALIGNMENT,
         margin_l=MARGIN_L,
         margin_r=MARGIN_R,
         margin_v=margin_v,
+        spacing=int(telop_def.get("spacing") or 0),
+        border_style=border_style,
     )
 
 
@@ -407,7 +712,8 @@ def _color_map_from_spans(length, spans, accent_bgr):
     return color_at
 
 
-def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None, animation_enabled=True):
+def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None, animation_enabled=True,
+                            telop_style=None):
     """generate_ass() のsubtitle_style対応版。Studioのテロップ再生成で使う。
 
     subtitle_style.preset=="vertical_hook" のときは横書き(Base/Big)ではなく、
@@ -417,18 +723,27 @@ def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None
     （数字+単位／「」内／商品名トークン）でstyle!="big"かつemphasis未指定のpieceに
     自動着色する（Big行はStudioヘッダのBig PrimaryColour=accent_colorのため、
     \\cで白リセットすると壊れるので絶対に着色しない）。
+
+    telop_style（None/str/dict）でテロップの見た目バリエーション（フォント/縁/座布団等）
+    を切り替える。未指定は既定"shiro-futo"（Noto Sans JP Black・現行仕様と一致）。
+    style.accent_color は telop_def.accent_color_override があればそちらを優先する。
     """
     style = resolve_subtitle_style(subtitle_style)
+    telop_def = resolve_telop_style_def(telop_style)
     if style.get("preset") == "vertical_hook":
         return generate_vertical_hook_ass(
             telop_pieces, subtitle_style=subtitle_style, product_name=product_name,
-            animation_enabled=animation_enabled,
+            animation_enabled=animation_enabled, telop_style=telop_style,
         )
 
-    accent_color_hex = style.get("accent_color") or DEFAULT_SUBTITLE_STYLE["accent_color"]
+    accent_color_hex = (
+        telop_def.get("accent_color_override")
+        or style.get("accent_color")
+        or DEFAULT_SUBTITLE_STYLE["accent_color"]
+    )
     accent_bgr = hex_to_ass_bgr(accent_color_hex)
 
-    lines_out = [build_ass_header_with_style(subtitle_style).rstrip("\n")]
+    lines_out = [build_ass_header_with_style(subtitle_style, telop_style=telop_style).rstrip("\n")]
     for piece in sorted(telop_pieces, key=lambda p: p["out_start"]):
         piece_style = piece.get("style", "base")
         lines = piece["lines"]
@@ -516,12 +831,29 @@ def split_into_vertical_columns(text, max_col_chars=VERTICAL_HOOK_MAX_COL_CHARS)
     return [chars[i:i + max_col_chars] for i in range(0, len(chars), max_col_chars)]
 
 
-def build_vertical_hook_ass_header():
+def build_vertical_hook_ass_header(telop_style=None):
     """vertical_hookスタイル用のASSヘッダ（Style: VerticalHook）を構築する。
 
     Alignmentは列ごとに`\\an8`（上中央）をDialogue側で明示するため、Style行の
     Alignment値そのものは実質参照されないが、フォーマット互換のため7(上左)を設定しておく。
+    telop_style（None/str/dict）を渡すと、フォント名/縁色/縁の太さを上書きできる。
+    未指定時は従来どおり VERTICAL_HOOK_* 定数で構築（完全後方互換）。
     """
+    if telop_style is None:
+        font = VERTICAL_HOOK_FONT
+        size = VERTICAL_HOOK_FONT_SIZE
+        outline = VERTICAL_HOOK_OUTLINE
+        shadow = VERTICAL_HOOK_SHADOW
+        outline_color = VERTICAL_HOOK_OUTLINE_COLOR
+        back_color = VERTICAL_HOOK_BACK_COLOR
+    else:
+        telop_def = resolve_telop_style_def(telop_style)
+        font = telop_def.get("font") or VERTICAL_HOOK_FONT
+        size = int(round(VERTICAL_HOOK_FONT_SIZE * float(telop_def.get("base_size_scale") or 1.0)))
+        outline = telop_def.get("outline", VERTICAL_HOOK_OUTLINE)
+        shadow = telop_def.get("shadow", VERTICAL_HOOK_SHADOW)
+        outline_color = _telop_style_outline_color(telop_def)
+        back_color = _telop_style_back_color(telop_def)
     return (
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
@@ -541,9 +873,9 @@ def build_vertical_hook_ass_header():
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     ).format(
         play_res_x=PLAY_RES_X, play_res_y=PLAY_RES_Y,
-        font=VERTICAL_HOOK_FONT, size=VERTICAL_HOOK_FONT_SIZE,
-        outline=VERTICAL_HOOK_OUTLINE, shadow=VERTICAL_HOOK_SHADOW,
-        outline_color=VERTICAL_HOOK_OUTLINE_COLOR, back_color=VERTICAL_HOOK_BACK_COLOR,
+        font=font, size=size,
+        outline=outline, shadow=shadow,
+        outline_color=outline_color, back_color=back_color,
     )
 
 
@@ -612,7 +944,8 @@ def build_vertical_hook_dialogue_lines(out_start, out_end, caption, anchor="righ
     return lines_out
 
 
-def generate_vertical_hook_ass(telop_pieces, subtitle_style=None, product_name=None, animation_enabled=True):
+def generate_vertical_hook_ass(telop_pieces, subtitle_style=None, product_name=None, animation_enabled=True,
+                               telop_style=None):
     """縦書きテロップ(vertical_hookスタイル)のASS全文を生成する。
 
     ショットごとに右端/左端アンカーを交互に切り替える（出現順で偶数番目=右端、
@@ -621,13 +954,20 @@ def generate_vertical_hook_ass(telop_pieces, subtitle_style=None, product_name=N
 
     product_nameを渡すと自動アクセント抽出（数字+単位／「」内／商品名トークン）を
     置換前のcaption原文に対して行う（「ー→｜」置換は1文字1対1のためindexはそのまま
-    使える）。accent_colorはsubtitle_styleから解決する（既定#FFD84D）。
+    使える）。accent_colorはsubtitle_styleから解決する（既定#FFD84D。telop_styleに
+    accent_color_overrideがあればそちらを優先）。telop_style未指定時は従来のVERTICAL_HOOK_*
+    定数どおり（後方互換）。
     """
     style = resolve_subtitle_style(subtitle_style)
-    accent_color_hex = style.get("accent_color") or DEFAULT_SUBTITLE_STYLE["accent_color"]
+    telop_def = resolve_telop_style_def(telop_style) if telop_style is not None else None
+    accent_color_hex = (
+        (telop_def.get("accent_color_override") if telop_def else None)
+        or style.get("accent_color")
+        or DEFAULT_SUBTITLE_STYLE["accent_color"]
+    )
     accent_bgr = hex_to_ass_bgr(accent_color_hex)
 
-    lines_out = [build_vertical_hook_ass_header().rstrip("\n")]
+    lines_out = [build_vertical_hook_ass_header(telop_style=telop_style).rstrip("\n")]
     sorted_pieces = sorted(telop_pieces, key=lambda p: p["out_start"])
     for i, piece in enumerate(sorted_pieces):
         caption = piece.get("caption")
@@ -692,14 +1032,15 @@ def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base", 
     return "Dialogue: 0,{},{},{},,0,0,0,,{}".format(start, end, style_name, text)
 
 
-def generate_ass(telop_pieces, animation_enabled=True):
+def generate_ass(telop_pieces, animation_enabled=True, telop_style=None):
     """出力時刻マップ済みのtelop断片群からASS全文を生成する。
 
     telop_pieces: [{"out_start","out_end","lines","emphasis","style"}, ...]
     animation_enabled=False で編集プロファイル(telop.animation=="none")のカットイン表示に
     合わせて \\fad/\\fscx/\\fscy/\\t 系のタグを一切付けない（既定Trueは完全後方互換）。
+    telop_style（None/str/dict）を渡すと、フォント/縁/座布団のバリエーションを反映する。
     """
-    lines_out = [build_ass_header().rstrip("\n")]
+    lines_out = [build_ass_header(telop_style=telop_style).rstrip("\n")]
     for piece in sorted(telop_pieces, key=lambda p: p["out_start"]):
         lines_out.append(
             build_dialogue_line(
