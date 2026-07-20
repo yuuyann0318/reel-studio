@@ -31,6 +31,11 @@ _FISH_AUDIO_DEFAULT_FORMAT = "wav"
 _FISH_AUDIO_DEFAULT_API_KEY_ENV = "FISH_AUDIO_API_KEY"
 _FISH_AUDIO_RETRY_BACKOFF_SEC = [2, 5]
 _FISH_AUDIO_MAX_RETRIES = 2
+# UGC体験談トーンに合わせた既定の話速。1.0なら等倍（prosodyをbodyに載せない）。
+_FISH_AUDIO_DEFAULT_PROSODY_SPEED = 1.15
+
+# `say` フォールバック時の読み上げ速度（words/min）。UGCの早口体験談トーンに寄せる。
+_SAY_RATE_WPM = 230
 
 
 class TTSError(RuntimeError):
@@ -86,7 +91,7 @@ class SayTTSBackend(TTSBackend):
         aiff_path = out_wav_path + ".say.aiff"
         try:
             proc = subprocess.run(
-                ["say", "-v", self.voice, "-o", aiff_path, text or ""],
+                ["say", "-v", self.voice, "-r", str(_SAY_RATE_WPM), "-o", aiff_path, text or ""],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=180,
             )
         except Exception as exc:
@@ -196,6 +201,11 @@ class FishAudioTTSBackend(TTSBackend):
         payload = {"text": text or "", "format": audio_format}
         if reference_id:
             payload["reference_id"] = reference_id
+        # UGC体験談トーンに寄せた話速。等倍(1.0)ならbodyに載せない（従来挙動を維持）。
+        # 実機検証済み(2026-07-20): 同一文でspeed=1.15が5.67秒→4.95秒に短縮されることを実APIで確認。
+        prosody_speed = fish_cfg.get("prosody_speed", _FISH_AUDIO_DEFAULT_PROSODY_SPEED)
+        if prosody_speed and prosody_speed != 1.0:
+            payload["prosody"] = {"speed": prosody_speed}
 
         audio_bytes = None
         fallback_reason = None

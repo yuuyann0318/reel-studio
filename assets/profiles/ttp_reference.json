@@ -15,7 +15,8 @@
     "position": "center_upper",
     "align": "center",
     "max_lines": 2,
-    "animation": "none"
+    "animation": "none",
+    "full_text": true
   },
   "emphasis": {
     "red_circle": true,

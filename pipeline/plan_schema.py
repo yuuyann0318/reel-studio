@@ -89,21 +89,51 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
         errors.append("shots は非空リストである必要があります")
     else:
         seen_ids = set()
+        # scene_id（シーングループ）検証用: 同一 scene_id は連続ショットにのみ許可する
+        # （途切れて再出現＝飛び飛びの再利用はエラー）。prev_scene_id は直前ショットの
+        # 正規化済み scene_id（無ければ None）。seen_scene_ids は既出の scene_id 集合。
+        seen_scene_ids = set()
+        prev_scene_id = None
         for i, shot in enumerate(shots_raw):
             if not isinstance(shot, dict):
                 errors.append("shots[{}] はオブジェクトではありません".format(i))
+                prev_scene_id = None
                 continue
             sid = shot.get("id") or "s{}".format(i + 1)
             if sid in seen_ids:
                 errors.append("shots の id が重複しています: {!r}".format(sid))
+                prev_scene_id = None
                 continue
             visual_prompt = shot.get("visual_prompt")
             motion_preset = shot.get("motion_preset", "static")
             duration_sec = shot.get("duration_sec")
             caption_jp = shot.get("caption_jp", "")
             narration_jp = shot.get("narration_jp")
+            scene_id_raw = shot.get("scene_id")
 
             ok_item = True
+
+            # scene_id は任意。指定された場合は非空文字列であること・同一 scene_id が
+            # 連続ショット以外で再出現していないことを検証する。scene_id 無しは従来どおり
+            # 単独ショット扱い（後方互換）。シーン尺・個数の制約はハードエラーにしない。
+            scene_id = None
+            if scene_id_raw is not None:
+                if not isinstance(scene_id_raw, str) or not scene_id_raw.strip():
+                    errors.append(
+                        "shots[{}(id={})].scene_id は非空文字列である必要があります (got: {!r})".format(
+                            i, sid, scene_id_raw
+                        )
+                    )
+                    ok_item = False
+                else:
+                    scene_id = scene_id_raw.strip()
+                    if scene_id != prev_scene_id and scene_id in seen_scene_ids:
+                        errors.append(
+                            "shots[{}(id={})].scene_id {!r} が連続しない位置で再利用されています"
+                            "（同一 scene_id は連続ショットにのみ付けてください）".format(i, sid, scene_id)
+                        )
+                        ok_item = False
+            prev_scene_id = scene_id
             if not isinstance(visual_prompt, str) or not visual_prompt.strip():
                 errors.append("shots[{}(id={})].visual_prompt は非空文字列である必要があります".format(i, sid))
                 ok_item = False
@@ -138,6 +168,8 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
 
             if ok_item:
                 seen_ids.add(sid)
+                if scene_id is not None:
+                    seen_scene_ids.add(scene_id)
                 normalized_shot = {
                     "id": sid,
                     "visual_prompt": visual_prompt.strip(),
@@ -145,6 +177,8 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                     "duration_sec": float(duration_sec),
                     "caption_jp": caption_jp.strip(),
                 }
+                if scene_id is not None:
+                    normalized_shot["scene_id"] = scene_id
                 if narration_jp is not None:
                     normalized_shot["narration_jp"] = narration_jp.strip()
                 normalized_shots.append(normalized_shot)
@@ -152,6 +186,26 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
     bgm_mood = plan.get("bgm_mood")
     if bgm_mood not in BGM_MOODS:
         errors.append("bgm_mood が不正です (got: {!r})".format(bgm_mood))
+
+    # 同一 scene_id の連続ショットは、シーンマスター1本から切り出す前提のため
+    # visual_prompt が一致していなければならない（1つのシーンに複数の絵は存在しない）。
+    # 矯正リトライへ回す（jobs.py 側は防御的に警告emitのみで先頭promptで続行）。
+    scene_prompts = {}
+    for shot in normalized_shots:
+        sid = shot.get("scene_id")
+        if not sid:
+            continue
+        vp = shot["visual_prompt"]
+        prev = scene_prompts.get(sid)
+        if prev is None:
+            scene_prompts[sid] = vp
+        elif prev != vp:
+            errors.append(
+                "shots の scene_id={!r} 内で visual_prompt が一致していません "
+                "（同一シーンは1本のマスター動画から切り出すため、visual_promptは全メンバーで揃えてください）: "
+                "{!r} vs {!r}".format(sid, prev, vp)
+            )
+            break
 
     if errors:
         return False, errors, None

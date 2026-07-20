@@ -141,14 +141,16 @@ def test_build_critique_prompt_injects_reference_block():
 # 2026-07-20: 音声主導タイミング同期モード対応でshots[].narration_jpの出力指示を
 # director_prompt.txt/director_prompt_vertical_hook.txt/critique_prompt.txtへ追記した
 # （意図的なプロンプト内容変更）ため、このハッシュ値を新しいベースラインへ更新した。
+# 2026-07-20: UGCネイティブ化（「広告っぽさの徹底排除」セクション追加＋caption=全文テロップ
+# 方針への書き換え）を各プロンプトへ反映した（意図的なプロンプト内容変更）ため再更新した。
 # ---------------------------------------------------------------------------
 
 _EXPECTED_SHA256 = {
-    "default_basic": "6f48a588fe6ad6e1adb06c5d1c878120a7056e00c062e264a13418a687a0cc80",
-    "default_with_angle": "7bf37c2786ccf8716907422176545ce07b1aabce87910995336b4d0b34589a80",
-    "vertical_hook_basic": "8f74b09e1a186b2319357b861a50ea145d53008b3f4a80c425c2d56cf5e2b2a4",
-    "default_with_product": "e494b3830a3f1c70becff862d76fb9ca01ee8e02cae9187863ccd41201009f7f",
-    "critique_basic": "8bf7bd5eb87393ef28bab7430725ce9e991de93447e7f04eba54406dde67777f",
+    "default_basic": "55c1f31a2289de3c29ada313b61b8644ddfe42cb113ff05acbf23bb8567c5435",
+    "default_with_angle": "3ffa49d6d8a20cdaf23eb4f9251d05977eaaec86473066f844e3d3780a505ce7",
+    "vertical_hook_basic": "1294af12d19570e2acd6f08bfae9a498ada089bc41f83b9a1dbe9148371462d2",
+    "default_with_product": "adf222ac12ca1029adcea089a23aba5d217960e434cdde3a213f49bf8bcc46bd",
+    "critique_basic": "9f0eee428be60e531352e6153aef9bb91f393c206392155c4a6fd43c56e7d2a1",
 }
 
 

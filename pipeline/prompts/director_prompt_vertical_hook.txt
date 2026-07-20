@@ -44,6 +44,15 @@ hook / narration_scriptの書き出しは、次の心理トリガーのうち **
 - caption_jp はナレーションの丸写しではなく「要点の見出し化」。音を消して流し見してもテロップだけで筋が追えること。
 - ナレーションは耳用（話し言葉・リズム重視）、テロップは目用（短く・強い単語を先頭に）。
 
+# 広告っぽさの徹底排除(UGCネイティブ・絶対厳守)
+- これは広告ではなく『友達に送る早口の体験談』。次の広告構文を全面禁止:
+  『ぜひ』『おすすめします』『〜してみてください』『今なら』『実感してください』『叶える』『贅沢な』『上質な』
+- 語りは粗くてよい。『〜なんで』『〜だったんだけど』『正直』等の砕けた口語を積極的に使う(下品な語は不可)
+- 1文=1ショット。1文は8〜20字目安に短く割る(長い文は文ごと分割してショットを増やす)
+- caption_jpは要約・見出し化せず、そのショットのnarration_jpとほぼ同文にする(TikTokの全文テロップ文化。40字以内は維持)。ただし縦書きは13字目安の短文のまま（縦書きテロップは短文が映えるため見出し化を許容する）
+- visual_promptは『スマホで撮ったリアルな生活感』に限定: smartphone footage, handheld, everyday Japanese bathroom/bedroom/drugstore shelf, natural imperfect lighting, extreme close-up of skin/hands/product texture
+- visual_promptで禁止: cinematic, professional, studio lighting, elegant, luxurious, perfect, model, advertisement
+
 # vertical_hookスタイル特有の構成ルール（絶対厳守）
 - shots数の目安: 完成尺÷2秒（例: 15秒なら7個前後）。各ショットのduration_secは1.5〜2.5秒に収める
   高速カット構成にすること（1ショットを長くしない）。
@@ -94,3 +103,9 @@ hook / narration_scriptの書き出しは、次の心理トリガーのうち **
 
 # 出力スキーマ例（このJSON構造のみを出力すること。値は例です。文章の質は下回らないこと）
 {SCHEMA_EXAMPLE}
+
+## シーングループ(生成コスト削減のため必ず守ること)
+- 連続する2〜4ショットを1つの『シーン』にまとめ、同じ scene_id を付ける(例: "sc1")
+- 同一シーンのショットは『同じ絵の別の瞬間』。visual_promptはシーン内で全ショット同一にする(被写体が動き続ける絵にすると各カットが別ショットに見える)
+- シーンの合計尺(構成ショットのduration_sec合計)は4〜10秒に収める
+- scene_idは連続ショットにのみ付け、飛び飛びに再利用しない

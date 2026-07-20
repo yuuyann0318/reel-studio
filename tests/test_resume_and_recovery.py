@@ -315,6 +315,175 @@ def test_run_resume_records_progress_up_to_failure_point(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# (c') シーングループ resume: マスター実在→再切り出しのみ(クレジット0) / 無し→シーン再生成 / 混在
+# ---------------------------------------------------------------------------
+
+def _fake_render_project_ok(project_id, plan, cfg):
+    return projects.media_relpath_for_render(project_id, "out.mp4"), 6.0, {"backend": "say", "duration_sec": 6.0, "is_silent": False}
+
+
+def _scene_project_with_pending(monkeypatch, master_on_disk):
+    """sc1=(s1済/s2未) の failed プロジェクトを作る。master_on_disk=True でシーンマスターを実在させる。"""
+    project = projects.create_project("シーンresume", 4.0, "mock", status="failed")
+    clips_dir = projects.clips_dir(project["id"])
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    (clips_dir / "s1.mp4").write_bytes(b"\x00")
+    scene_master_rel = projects.media_relpath_for_clip(project["id"], "scene__sc1.mp4")
+    if master_on_disk:
+        (clips_dir / "scene__sc1.mp4").write_bytes(b"\x00")
+    project["plan"] = {
+        "shots": [
+            {"id": "s1", "order": 0, "enabled": True, "prompt": "v1", "caption": "c1",
+             "clip_path": projects.media_relpath_for_clip(project["id"], "s1.mp4"),
+             "source_duration": 2.0, "trim": {"start": 0.0, "end": 2.0}},
+            {"id": "s2", "order": 1, "enabled": True, "prompt": "v1", "caption": "c2",
+             "clip_path": None, "source_duration": 2.0, "trim": {"start": 0.0, "end": 2.0}},
+        ],
+        "narration_text": "t", "bgm": None, "sfx": [], "subtitle_style": dict(projects.DEFAULT_SUBTITLE_STYLE),
+    }
+    project["scenes"] = [{
+        "scene_key": "sc1", "shot_ids": ["s1", "s2"], "visual_prompt": "v1", "motion_preset": "zoom_in",
+        "clip_path": scene_master_rel, "planned_duration_sec": 4.0, "actual_duration_sec": 4.0,
+    }]
+    projects.save_project(project)
+    monkeypatch.setattr(jobs_mod.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
+    monkeypatch.setattr(jobs_mod, "_probe_duration", lambda ffprobe_bin, path: 4.0)
+    monkeypatch.setattr(jobs_mod, "_render_project", _fake_render_project_ok)
+    return project
+
+
+def test_resume_recut_only_when_scene_master_exists_no_credits(monkeypatch):
+    project = _scene_project_with_pending(monkeypatch, master_on_disk=True)
+    backend = _SucceedingBackend()
+    monkeypatch.setattr(jobs_mod, "get_backend", lambda name, cfg: backend)
+    manager = _make_job_manager_without_worker(monkeypatch)
+    try:
+        manager._run_resume("job_scene_recut", {"project_id": project["id"]})
+        # マスター実在 → backend は一度も呼ばれない（クレジット0）。再切り出しだけ
+        assert backend.calls == []
+        saved = projects.get_project(project["id"])
+        assert saved["status"] == "ready"
+        shots_by_id = {s["id"]: s for s in saved["plan"]["shots"]}
+        assert shots_by_id["s2"]["clip_path"] == projects.media_relpath_for_clip(project["id"], "s2.mp4")
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+def test_resume_regenerates_scene_when_master_missing(monkeypatch):
+    project = _scene_project_with_pending(monkeypatch, master_on_disk=False)
+    backend = _SucceedingBackend()
+    monkeypatch.setattr(jobs_mod, "get_backend", lambda name, cfg: backend)
+    manager = _make_job_manager_without_worker(monkeypatch)
+    try:
+        manager._run_resume("job_scene_regen", {"project_id": project["id"]})
+        # マスター無し → シーン単位で1回だけ再生成（scene_key で呼ばれる）
+        assert backend.calls == ["sc1"]
+        saved = projects.get_project(project["id"])
+        assert saved["status"] == "ready"
+        shots_by_id = {s["id"]: s for s in saved["plan"]["shots"]}
+        assert shots_by_id["s2"]["clip_path"] is not None
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+def test_resume_mixes_scene_and_standalone_shots(monkeypatch):
+    """sc1(マスター実在,s2未) + scenes非登録の単独ショット s3未 の混在。"""
+    project = _scene_project_with_pending(monkeypatch, master_on_disk=True)
+    saved = projects.get_project(project["id"])
+    saved["plan"]["shots"].append(
+        {"id": "s3", "order": 2, "enabled": True, "prompt": "v3", "caption": "c3",
+         "clip_path": None, "source_duration": 2.0, "trim": {"start": 0.0, "end": 2.0}}
+    )
+    projects.save_project(saved)
+
+    backend = _SucceedingBackend()
+    monkeypatch.setattr(jobs_mod, "get_backend", lambda name, cfg: backend)
+    manager = _make_job_manager_without_worker(monkeypatch)
+    try:
+        manager._run_resume("job_scene_mixed", {"project_id": project["id"]})
+        # s2 はシーン再切り出し(生成呼び出し無し)、s3 は従来1ショット経路で生成される
+        assert backend.calls == ["s3"]
+        saved2 = projects.get_project(project["id"])
+        assert saved2["status"] == "ready"
+        shots_by_id = {s["id"]: s for s in saved2["plan"]["shots"]}
+        assert shots_by_id["s2"]["clip_path"] is not None
+        assert shots_by_id["s3"]["clip_path"] == projects.media_relpath_for_clip(project["id"], "s3.mp4")
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# (c'') resume時のシーン窓破壊回帰: 生成時の member_durations を尊重すること
+# ---------------------------------------------------------------------------
+
+
+def test_resume_uses_saved_member_durations_not_plan_shots(monkeypatch):
+    """生成後にユーザーがショットを削除/trim編集しても、シーンマスターから切り出す窓は
+    生成時と一致する（[高]バグ修正: シーン窓破壊）。
+
+    シナリオ: sc1=[s1(1.0秒), s2(3.0秒), s3(4.0秒)] で生成。マスター実在。
+    その後ユーザーがs1をplanから削除（PUT /plan相当）→ pending=[s2, s3]。
+    scenes.member_durations=[1.0, 3.0, 4.0] が保存されていれば、s2の trim_start=1.0（正）。
+    もし plan.shots の source_duration から作り直すと、s1が消えているため s2 の trim_start=0.0
+    という誤った窓になり「別の絵の区間」を切り出してしまう。
+    """
+    project = projects.create_project("resume窓保護テスト", 8.0, "mock", status="failed")
+    clips_dir = projects.clips_dir(project["id"])
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    scene_master_rel = projects.media_relpath_for_clip(project["id"], "scene__sc1.mp4")
+    (clips_dir / "scene__sc1.mp4").write_bytes(b"\x00")  # マスター実在
+
+    # s1は削除済み。plan.shots に残っているのは s2, s3 のみ（両方 pending）。
+    project["plan"] = {
+        "shots": [
+            {"id": "s2", "order": 0, "enabled": True, "prompt": "v1", "caption": "c2",
+             "clip_path": None, "source_duration": 3.0, "trim": {"start": 0.0, "end": 3.0}},
+            {"id": "s3", "order": 1, "enabled": True, "prompt": "v1", "caption": "c3",
+             "clip_path": None, "source_duration": 4.0, "trim": {"start": 0.0, "end": 4.0}},
+        ],
+        "narration_text": "t", "bgm": None, "sfx": [],
+        "subtitle_style": dict(projects.DEFAULT_SUBTITLE_STYLE),
+    }
+    # scenes メタは生成時のスナップショットのまま（s1 も member_ids/member_durations に含まれる）。
+    project["scenes"] = [{
+        "scene_key": "sc1",
+        "shot_ids": ["s1", "s2", "s3"],
+        "member_durations": [1.0, 3.0, 4.0],
+        "visual_prompt": "v1", "motion_preset": "static",
+        "clip_path": scene_master_rel,
+        "planned_duration_sec": 8.0, "actual_duration_sec": 8.0,
+    }]
+    projects.save_project(project)
+
+    # 切り出し時のtrim_startを捕捉する。
+    captured = []
+    orig_build = jobs_mod.render.build_normalize_clip_cmd
+
+    def _capture_build(ffmpeg_bin, src, dst, duration_sec=None, trim_start=0.0, **kwargs):
+        # 出力ファイル名からshot_idを抜き出す（clips_dir / "s2.mp4" 等）。
+        from pathlib import Path as _P
+        sid = _P(dst).stem
+        captured.append({"shot_id": sid, "trim_start": trim_start, "duration_sec": duration_sec})
+        return orig_build(ffmpeg_bin, src, dst, duration_sec=duration_sec, trim_start=trim_start, **kwargs)
+
+    monkeypatch.setattr(jobs_mod.render, "build_normalize_clip_cmd", _capture_build)
+    monkeypatch.setattr(jobs_mod.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
+    monkeypatch.setattr(jobs_mod, "_probe_duration", lambda ffprobe_bin, path: 8.0)
+    monkeypatch.setattr(jobs_mod, "_render_project", _fake_render_project_ok)
+    monkeypatch.setattr(jobs_mod, "get_backend", lambda name, cfg: _SucceedingBackend())
+
+    manager = _make_job_manager_without_worker(monkeypatch)
+    try:
+        manager._run_resume("job_window_preserved", {"project_id": project["id"]})
+        # s2/s3 のtrim_start は 生成時のオフセット（累積尺）と一致する。
+        trims = {c["shot_id"]: c["trim_start"] for c in captured if c["shot_id"] in ("s2", "s3")}
+        assert trims.get("s2") == 1.0, "s2のtrim_startが生成時オフセットと不一致: {}".format(trims)
+        assert trims.get("s3") == 4.0, "s3のtrim_startが生成時オフセットと不一致: {}".format(trims)
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
 # (d) resume中への二重resumeは409 / 存在しなければ404
 # ---------------------------------------------------------------------------
 

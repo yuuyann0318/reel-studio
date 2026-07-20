@@ -407,7 +407,7 @@ def _color_map_from_spans(length, spans, accent_bgr):
     return color_at
 
 
-def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None):
+def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None, animation_enabled=True):
     """generate_ass() のsubtitle_style対応版。Studioのテロップ再生成で使う。
 
     subtitle_style.preset=="vertical_hook" のときは横書き(Base/Big)ではなく、
@@ -420,7 +420,10 @@ def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None
     """
     style = resolve_subtitle_style(subtitle_style)
     if style.get("preset") == "vertical_hook":
-        return generate_vertical_hook_ass(telop_pieces, subtitle_style=subtitle_style, product_name=product_name)
+        return generate_vertical_hook_ass(
+            telop_pieces, subtitle_style=subtitle_style, product_name=product_name,
+            animation_enabled=animation_enabled,
+        )
 
     accent_color_hex = style.get("accent_color") or DEFAULT_SUBTITLE_STYLE["accent_color"]
     accent_bgr = hex_to_ass_bgr(accent_color_hex)
@@ -440,7 +443,8 @@ def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None
                 color_map = _color_map_from_spans(len(joined), spans, accent_bgr)
         lines_out.append(
             build_dialogue_line(
-                piece["out_start"], piece["out_end"], lines, emphasis, piece_style, color_map=color_map
+                piece["out_start"], piece["out_end"], lines, emphasis, piece_style, color_map=color_map,
+                animation_enabled=animation_enabled,
             )
         )
     return "\n".join(lines_out) + "\n"
@@ -555,7 +559,8 @@ def _vertical_col_start_sec(out_start, out_end, col_idx):
     return max(delayed, out_start)
 
 
-def build_vertical_hook_dialogue_lines(out_start, out_end, caption, anchor="right", color_map=None):
+def build_vertical_hook_dialogue_lines(out_start, out_end, caption, anchor="right", color_map=None,
+                                       animation_enabled=True):
     """1つのcaptionから、縦書き列ごとのDialogue行（1行以上）を組み立てる。
 
     anchor: "right"（右端寄せ・列は左へ追加）| "left"（左端寄せ・列は右へ追加）。
@@ -575,7 +580,12 @@ def build_vertical_hook_dialogue_lines(out_start, out_end, caption, anchor="righ
         else:
             x = VERTICAL_HOOK_RIGHT_X - col_idx * VERTICAL_HOOK_COL_STEP
         y = VERTICAL_HOOK_TOP_Y
-        col_start_sec = _vertical_col_start_sec(out_start, out_end, col_idx)
+        # animation_enabled=False のときは列stagger（2列目以降のStart遅延）を無効化し、
+        # 全列を out_start で同時にカットイン表示する。
+        if animation_enabled:
+            col_start_sec = _vertical_col_start_sec(out_start, out_end, col_idx)
+        else:
+            col_start_sec = out_start
         start = seconds_to_ass_time(col_start_sec)
         col_duration = out_end - col_start_sec
         fad = _vertical_fad_for(col_duration)
@@ -591,14 +601,18 @@ def build_vertical_hook_dialogue_lines(out_start, out_end, caption, anchor="righ
             else:
                 rendered_chars.append(esc)
         text = "\\N".join(rendered_chars)
-        override = "{{\\an8\\pos({},{})\\{}}}".format(x, y, fad)
+        # animation_enabled=False のときは \fad を付けず即時カットインにする。
+        if animation_enabled:
+            override = "{{\\an8\\pos({},{})\\{}}}".format(x, y, fad)
+        else:
+            override = "{{\\an8\\pos({},{})}}".format(x, y)
         lines_out.append(
             "Dialogue: 0,{},{},VerticalHook,,0,0,0,,{}{}".format(start, end, override, text)
         )
     return lines_out
 
 
-def generate_vertical_hook_ass(telop_pieces, subtitle_style=None, product_name=None):
+def generate_vertical_hook_ass(telop_pieces, subtitle_style=None, product_name=None, animation_enabled=True):
     """縦書きテロップ(vertical_hookスタイル)のASS全文を生成する。
 
     ショットごとに右端/左端アンカーを交互に切り替える（出現順で偶数番目=右端、
@@ -626,7 +640,8 @@ def generate_vertical_hook_ass(telop_pieces, subtitle_style=None, product_name=N
             color_map = _color_map_from_spans(len(caption), spans, accent_bgr)
         lines_out.extend(
             build_vertical_hook_dialogue_lines(
-                piece["out_start"], piece["out_end"], caption, anchor=anchor, color_map=color_map
+                piece["out_start"], piece["out_end"], caption, anchor=anchor, color_map=color_map,
+                animation_enabled=animation_enabled,
             )
         )
     return "\n".join(lines_out) + "\n"
@@ -662,28 +677,34 @@ def _pop_override_block(duration_sec):
     )
 
 
-def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base", color_map=None):
+def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base", color_map=None,
+                        animation_enabled=True):
     style_name = "Big" if style == "big" else "Base"
     start = seconds_to_ass_time(out_start)
     end = seconds_to_ass_time(out_end)
     duration_sec = None
     if out_start is not None and out_end is not None:
         duration_sec = out_end - out_start
-    override = _pop_override_block(duration_sec)
+    # animation_enabled=False のときは \fad/\fscx/\fscy/\t 系のアニメ指定を一切付けない
+    # （テロップをカットインで即時表示する。既定Trueは完全後方互換）。
+    override = _pop_override_block(duration_sec) if animation_enabled else ""
     text = override + build_dialogue_text(lines, emphasis, color_map=color_map)
     return "Dialogue: 0,{},{},{},,0,0,0,,{}".format(start, end, style_name, text)
 
 
-def generate_ass(telop_pieces):
+def generate_ass(telop_pieces, animation_enabled=True):
     """出力時刻マップ済みのtelop断片群からASS全文を生成する。
 
     telop_pieces: [{"out_start","out_end","lines","emphasis","style"}, ...]
+    animation_enabled=False で編集プロファイル(telop.animation=="none")のカットイン表示に
+    合わせて \\fad/\\fscx/\\fscy/\\t 系のタグを一切付けない（既定Trueは完全後方互換）。
     """
     lines_out = [build_ass_header().rstrip("\n")]
     for piece in sorted(telop_pieces, key=lambda p: p["out_start"]):
         lines_out.append(
             build_dialogue_line(
-                piece["out_start"], piece["out_end"], piece["lines"], piece.get("emphasis"), piece.get("style", "base")
+                piece["out_start"], piece["out_end"], piece["lines"], piece.get("emphasis"), piece.get("style", "base"),
+                animation_enabled=animation_enabled,
             )
         )
     return "\n".join(lines_out) + "\n"
@@ -802,7 +823,16 @@ def build_telop_pieces_from_shots(shots, hook_shot_id=None):
         caption = (shot.get("caption_jp") or "").strip()
         if not caption:
             continue
-        lines = wrap_caption_kinsoku(caption, max_chars=13, max_lines=2)
+        # 長文caption（>26字）は max_chars=13 のままだと2行目が最大27字となり
+        # 画面幅（既定フォント20字/行相当）を超えて枠外にはみ出す。ceil(len/2)を
+        # max_charsに使い両行が~ceil(len/2)+数字字以内に収まるようにする（[高]バグ修正）。
+        # <=26字は従来どおり13字禁則で（既存テスト・BUG-2/5挙動を維持）。
+        cap_len = len(caption)
+        if cap_len > 26:
+            wrap_max_chars = -(-cap_len // 2)  # ceil(cap_len / 2)
+        else:
+            wrap_max_chars = 13
+        lines = wrap_caption_kinsoku(caption, max_chars=wrap_max_chars, max_lines=2)
         if not lines:
             continue
         style = "big" if shot.get("id") == (hook_shot_id or first_id) else "base"

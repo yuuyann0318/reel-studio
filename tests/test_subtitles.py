@@ -149,3 +149,96 @@ def test_generate_ass_all_dialogue_lines_have_fad_and_pop_override():
     for line in dialogue_lines:
         assert "\\fad(160,120)" in line
         assert "\\fscx94\\fscy94\\t(0,120,\\fscx100\\fscy100)" in line
+
+
+# --- animation_enabled（テロップのカットイン化） ---
+
+_ANIM_PIECES = [
+    {"out_start": 0.0, "out_end": 2.0, "lines": ["テスト1"], "emphasis": [], "style": "base"},
+    {"out_start": 2.0, "out_end": 4.0, "lines": ["テスト2"], "emphasis": [], "style": "big"},
+]
+
+
+def test_generate_ass_legacy_animation_enabled_false_has_no_fad_or_pop():
+    """CLI経路（run.py）で使う legacy generate_ass も animation_enabled=False で
+    アニメタグを一切付けない（[中]バグ修正: CLI経路配線）。
+    """
+    ass_text = subtitles.generate_ass(_ANIM_PIECES, animation_enabled=False)
+    dialogue_lines = [l for l in ass_text.splitlines() if l.startswith("Dialogue:")]
+    assert dialogue_lines
+    for line in dialogue_lines:
+        assert "\\fad(" not in line
+        assert "\\t(" not in line
+        assert "\\fscx" not in line
+        assert "\\fscy" not in line
+    assert "テスト1" in ass_text and "テスト2" in ass_text
+
+
+def test_generate_ass_with_style_animation_enabled_true_keeps_fad_and_pop():
+    ass_text = subtitles.generate_ass_with_style(_ANIM_PIECES, animation_enabled=True)
+    dialogue_lines = [l for l in ass_text.splitlines() if l.startswith("Dialogue:")]
+    assert dialogue_lines
+    for line in dialogue_lines:
+        assert "\\fad(" in line
+        assert "\\fscx94\\fscy94\\t(0,120,\\fscx100\\fscy100)" in line
+
+
+def test_generate_ass_with_style_default_is_animated_backward_compatible():
+    """引数省略時は従来どおりアニメーション付き（完全後方互換）。"""
+    ass_text = subtitles.generate_ass_with_style(_ANIM_PIECES)
+    dialogue_lines = [l for l in ass_text.splitlines() if l.startswith("Dialogue:")]
+    assert dialogue_lines
+    for line in dialogue_lines:
+        assert "\\fad(" in line
+
+
+def test_build_telop_pieces_long_caption_30_chars_fits_in_two_balanced_lines():
+    """>26字caption(30字)は max_chars=ceil(len/2) で折り返し、両行が~ceil(len/2)+2字以内。
+    結合は原文と完全一致（[高]バグ修正: 画面外流出）。
+    """
+    caption = "あ" * 30
+    shots = [{"id": "s1", "duration_sec": 5.0, "caption_jp": caption}]
+    pieces = subtitles.build_telop_pieces_from_shots(shots)
+    assert len(pieces) == 1
+    lines = pieces[0]["lines"]
+    assert len(lines) == 2
+    assert "".join(lines) == caption
+    ceil_half = -(-30 // 2)  # =15
+    for ln in lines:
+        assert len(ln) <= ceil_half + 2, "行が長すぎる: {} chars".format(len(ln))
+
+
+def test_build_telop_pieces_long_caption_40_chars_fits_in_two_balanced_lines():
+    """40字（MAX_CAPTION_CHARS上限）でも max_chars=20 で折り、両行が~22字以内。"""
+    caption = "あ" * 40
+    shots = [{"id": "s1", "duration_sec": 5.0, "caption_jp": caption}]
+    pieces = subtitles.build_telop_pieces_from_shots(shots)
+    assert len(pieces) == 1
+    lines = pieces[0]["lines"]
+    assert len(lines) == 2
+    assert "".join(lines) == caption
+    ceil_half = -(-40 // 2)  # =20
+    for ln in lines:
+        assert len(ln) <= ceil_half + 2, "行が長すぎる: {} chars".format(len(ln))
+
+
+def test_build_telop_pieces_short_caption_keeps_existing_13char_behavior():
+    """<=26字captionは max_chars=13 のままで従来テスト(BUG-2/5)を退行させない。"""
+    text = "毎日5分で散らかる前にリセット"  # 16字, BUG-2 test caption
+    shots = [{"id": "s1", "duration_sec": 5.0, "caption_jp": text}]
+    pieces = subtitles.build_telop_pieces_from_shots(shots)
+    assert pieces[0]["lines"] == ["毎日5分で", "散らかる前にリセット"]
+
+
+def test_generate_ass_with_style_animation_disabled_has_no_fad_or_pop():
+    """animation_enabled=False では \\fad / \\t / \\fscx / \\fscy を一切付けない（即時カットイン）。"""
+    ass_text = subtitles.generate_ass_with_style(_ANIM_PIECES, animation_enabled=False)
+    dialogue_lines = [l for l in ass_text.splitlines() if l.startswith("Dialogue:")]
+    assert dialogue_lines
+    for line in dialogue_lines:
+        assert "\\fad(" not in line
+        assert "\\t(" not in line
+        assert "\\fscx" not in line
+        assert "\\fscy" not in line
+    # テロップ本文自体は保持される。
+    assert "テスト1" in ass_text and "テスト2" in ass_text

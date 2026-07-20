@@ -24,9 +24,11 @@ from __future__ import annotations
 #   サーバ起動時（FastAPIのstartup/lifespan経由）のスタック回復でstatus="failed"に倒し、
 #   resumeで再開できるようにする（JobManager()の生成自体では回復は走らない。BUG-21）。
 
+import contextlib
 import json
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -38,6 +40,7 @@ from pipeline import director
 from pipeline import edit_profile
 from pipeline import product_images
 from pipeline import render
+from pipeline import scenes as scenes_mod
 from pipeline import subtitles
 from pipeline import tts as tts_mod
 from pipeline.config import load_config, project_root
@@ -54,11 +57,67 @@ BGM_MANIFEST = ASSETS_DIR / "bgm" / "manifest.json"
 _FFMPEG_TIMEOUT_SEC = 1800
 _LOUDNORM_JSON_RE = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.DOTALL)
 
+# シーングループ（クリップ再利用）関連の定数。
+# 1回の生成リクエストで作るシーンマスターの合計尺の上限（超えたらショット境界で分割生成する）。
+_SCENE_MAX_REQUEST_SEC = 12.0
+# シーンマスターから各ショットを切り出す際の content 尺の下限（ffmpegの -t 0 秒回避の保険）。
+_MIN_CUT_SEC = 0.05
+_SCENE_KEY_SAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
+
 TERMINAL = ("done",)  # SSE側は最終イベント {"done":true,...} の送出をもって終端とみなす
+
+# _render_project がテロップアニメーション解決のため参照する編集プロファイル名。
+# run.py の CLI 経路と揃えるため定数化する（マジック文字列の散在を避ける）。
+_TELOP_PROFILE_NAME = "ttp_reference"
 
 
 def _new_job_id():
     return "job_" + time.strftime("%Y%m%d%H%M%S") + "_" + uuid.uuid4().hex[:8]
+
+
+def _safe_scene_key(scene_key):
+    """scene_key（director由来の任意文字列）をファイル名に安全な形へ正規化する。"""
+    return _SCENE_KEY_SAFE_RE.sub("_", str(scene_key))
+
+
+def _probe_duration(ffprobe_bin, path):
+    """ffprobeで動画の実尺(秒)を測る。取得できなければ None を返す（呼び出し側で計画尺へfallback）。"""
+    try:
+        proc = subprocess.run(
+            [ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+        )
+        return float(proc.stdout.decode("utf-8", "replace").strip())
+    except Exception:
+        return None
+
+
+@contextlib.contextmanager
+def _scaled_credit_limit(backend, factor):
+    """シーンマスター生成中だけ backend.max_credits_per_shot を factor 倍に引き上げる。
+
+    シーンマスターは構成ショット数ぶんの尺を1本で生成するため、単ショット用の上限のままだと
+    見積コストが上限を超えて誤って中断されてしまう。ここで「構成ショット数×上限」を許容する
+    （＝1シーン=1生成でクレジット消費は1本ぶんに抑えつつ、上限だけスケールさせる）。
+    max_credits_per_shot 属性を持たないバックエンド（mock 等）や factor<=1 のときは何もしない。
+    """
+    prev = getattr(backend, "max_credits_per_shot", None)
+    changed = False
+    if isinstance(prev, (int, float)) and not isinstance(prev, bool) and factor and factor > 1:
+        try:
+            backend.max_credits_per_shot = prev * factor
+            changed = True
+        except Exception:
+            changed = False
+    try:
+        yield
+    finally:
+        if changed:
+            try:
+                backend.max_credits_per_shot = prev
+            except Exception:
+                pass
 
 
 def _parse_loudnorm_json(stderr_text):
@@ -686,26 +745,119 @@ class JobManager:
             project["narration_segments"] = narration_segments
             projects.save_project(project)
 
-        self._emit(job_id, "visual", 25, "ショットを生成中… (0/{})".format(len(shots)))
+        # --- シーングループ（クリップ再利用）で生成する ---------------------------------
+        # director が連続ショットへ同じ scene_id を付けている場合、それらを1本の「シーン
+        # マスター」（構成ショットの尺の合計）だけ生成し、各ショットへ切り出して再利用する
+        # （＝生成は1回・クレジットは1本ぶん）。合計尺が_SCENE_MAX_REQUEST_SECを超える
+        # シーンはショット境界で貪欲分割する。scene_id 無しの単独シーン（1メンバー）は
+        # 従来どおり直接 clips/<id>.mp4 を生成する（＝全ショットが scene_id 無しなら従来経路と等価）。
+        raw_scenes = scenes_mod.group_shots_into_scenes(shots)
+        scene_groups = []
+        for _sc in raw_scenes:
+            scene_groups.extend(scenes_mod.split_scene_by_max_request(_sc, max_sec=_SCENE_MAX_REQUEST_SEC))
+        num_scenes = len(scene_groups)
+        num_shots = len(shots)
+        planned_by_id = {ps["id"]: ps for ps in planned_shots}
+        ffmpeg_bin = cfg["ffmpeg_bin"]
+        ffprobe_bin = cfg.get("ffprobe_bin") or "ffprobe"
+        project_scenes = []
+        cut_done = 0
+
+        self._emit(job_id, "visual", 25, "シーンを生成中…(0/{})".format(num_scenes))
         try:
             backend = get_backend(backend_name, cfg)
         except Exception as exc:
             fail("ビジュアルバックエンドの初期化に失敗しました: {}".format(exc))
             return
 
-        for i, shot in enumerate(shots):
-            raw_path = clips_dir / "{}.raw.mp4".format(shot["id"])
-            norm_path = clips_dir / "{}.mp4".format(shot["id"])
+        def _persist_clip_path(shot_id, filename):
+            planned_by_id[shot_id]["clip_path"] = projects.media_relpath_for_clip(project_id, filename)
+            proj = projects.get_project(project_id)
+            if proj is not None:
+                proj["plan"] = studio_plan
+                projects.save_project(proj)
+
+        for n, scene in enumerate(scene_groups):
+            members = scene["shots"]
+            scene_key = scene["scene_key"]
+            member_ids = [m["id"] for m in members]
+            self._emit(
+                job_id, "visual", 25 + int(35 * n / max(1, num_scenes)),
+                "シーンを生成中…({}/{})".format(n + 1, num_scenes),
+            )
+
+            if len(members) == 1:
+                # 単独シーン = 従来経路と等価（シーンマスターを作らず直接 clips/<id>.mp4 を生成）。
+                shot = members[0]
+                shot_id = shot["id"]
+                raw_path = clips_dir / "{}.raw.mp4".format(shot_id)
+                norm_path = clips_dir / "{}.mp4".format(shot_id)
+                try:
+                    backend.generate(shot, str(raw_path))
+                    cmd = render.build_normalize_clip_cmd(
+                        ffmpeg_bin, str(raw_path), str(norm_path), duration_sec=shot["duration_sec"]
+                    )
+                    res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
+                    if res["returncode"] != 0:
+                        raise RuntimeError(res["stderr"][-500:])
+                except Exception as exc:
+                    fail("ショット{}の生成に失敗しました: {}".format(shot_id, exc))
+                    return
+                finally:
+                    try:
+                        if raw_path.exists():
+                            raw_path.unlink()
+                    except Exception:
+                        pass
+                _persist_clip_path(shot_id, "{}.mp4".format(shot_id))
+                cut_done += 1
+                self._emit(
+                    job_id, "visual", 25 + int(45 * cut_done / max(1, num_shots)),
+                    "ショットを切り出し中…({}/{})".format(cut_done, num_shots),
+                )
+                continue
+
+            # --- 複数メンバーのシーン: マスター1本を生成し各ショットへ切り出す ---
+            member_durations = [float(m["duration_sec"]) for m in members]
+            planned_total = sum(member_durations)
+            # plan_schema.validate_plan で visual_prompt 不一致はハードエラーになるため
+            # ここに到達した時点で通常は不一致は起こらない。念のため防御としてチェックし、
+            # 万一発生していたら警告emitのうえ先頭promptで続行する（生成は止めない）。
+            first_prompt = members[0].get("visual_prompt", "")
+            mismatched = [m["id"] for m in members[1:] if m.get("visual_prompt", "") != first_prompt]
+            if mismatched:
+                self._emit(
+                    job_id, "visual", 25 + int(35 * n / max(1, num_scenes)),
+                    "警告: シーン{}内でvisual_promptが不一致(対象ショット: {})。先頭promptで生成します".format(
+                        scene_key, ", ".join(mismatched)
+                    ),
+                )
+            scene_shot = {
+                "id": scene_key,
+                "visual_prompt": members[0].get("visual_prompt", ""),
+                "motion_preset": members[0].get("motion_preset", "static"),
+                "duration_sec": planned_total,
+                "caption_jp": members[0].get("caption_jp", ""),
+            }
+            if members[0].get("image_path"):
+                scene_shot["image_path"] = members[0]["image_path"]
+
+            safe_key = _safe_scene_key(scene_key)
+            scene_fname = "scene__{}.mp4".format(safe_key)
+            raw_path = clips_dir / "scene__{}.raw.mp4".format(safe_key)
+            master_path = clips_dir / scene_fname
             try:
-                backend.generate(shot, str(raw_path))
+                with _scaled_credit_limit(backend, len(members)):
+                    backend.generate(scene_shot, str(raw_path))
                 cmd = render.build_normalize_clip_cmd(
-                    cfg["ffmpeg_bin"], str(raw_path), str(norm_path), duration_sec=shot["duration_sec"]
+                    ffmpeg_bin, str(raw_path), str(master_path), duration_sec=planned_total
                 )
                 res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
                 if res["returncode"] != 0:
                     raise RuntimeError(res["stderr"][-500:])
             except Exception as exc:
-                fail("ショット{}の生成に失敗しました: {}".format(shot.get("id"), exc))
+                fail("シーン{}の生成に失敗しました（対象ショット: {}）: {}".format(
+                    scene_key, ", ".join(member_ids), exc))
                 return
             finally:
                 try:
@@ -714,17 +866,53 @@ class JobManager:
                 except Exception:
                     pass
 
-            # このショットの生成が成功したので、その場でclip_pathを確定して保存する
-            # （途中で後続ショットが失敗しても、ここまでの成功分は失われない）。
-            planned_shots[i]["clip_path"] = projects.media_relpath_for_clip(
-                project_id, "{}.mp4".format(shot["id"])
-            )
-            project = projects.get_project(project_id)
-            if project is not None:
-                project["plan"] = studio_plan
-                projects.save_project(project)
-            progress = 25 + int(45 * (i + 1) / max(1, len(shots)))
-            self._emit(job_id, "visual", progress, "ショットを生成中… ({}/{})".format(i + 1, len(shots)))
+            actual = _probe_duration(ffprobe_bin, master_path)
+            if not actual or actual <= 0:
+                actual = planned_total
+            windows = scenes_mod.compute_scene_windows(member_durations, actual)
+
+            try:
+                for m, win in zip(members, windows):
+                    shot_id = m["id"]
+                    out_path = clips_dir / "{}.mp4".format(shot_id)
+                    cmd = render.build_normalize_clip_cmd(
+                        ffmpeg_bin, str(master_path), str(out_path),
+                        duration_sec=max(win["content_duration"], _MIN_CUT_SEC),
+                        trim_start=win["trim_start"], pad_to_duration_sec=win["pad_to"],
+                    )
+                    res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
+                    if res["returncode"] != 0:
+                        raise RuntimeError(res["stderr"][-500:])
+                    _persist_clip_path(shot_id, "{}.mp4".format(shot_id))
+                    cut_done += 1
+                    self._emit(
+                        job_id, "visual", 25 + int(45 * cut_done / max(1, num_shots)),
+                        "ショットを切り出し中…({}/{})".format(cut_done, num_shots),
+                    )
+            except Exception as exc:
+                fail("シーン{}のショット切り出しに失敗しました（対象ショット: {}）: {}".format(
+                    scene_key, ", ".join(member_ids), exc))
+                return
+
+            project_scenes.append({
+                "scene_key": scene_key,
+                "shot_ids": member_ids,
+                # member_durations: 生成時点の各メンバーの計画尺のスナップショット。
+                # resume で compute_scene_windows() を再計算するとき、plan.shots から
+                # source_duration を読み直すと Studio でのショット削除/trim編集の影響で
+                # 窓が生成時と変わってしまい「別の絵の区間」が切り出されてしまう。
+                # 生成時の窓を維持するためここでスナップショットを固定する（[高]バグ修正）。
+                "member_durations": [float(d) for d in member_durations],
+                "visual_prompt": scene_shot["visual_prompt"],
+                "motion_preset": scene_shot["motion_preset"],
+                "clip_path": projects.media_relpath_for_clip(project_id, scene_fname),
+                "planned_duration_sec": planned_total,
+                "actual_duration_sec": actual,
+            })
+            proj = projects.get_project(project_id)
+            if proj is not None:
+                proj["scenes"] = project_scenes
+                projects.save_project(proj)
 
         # studio_plan["shots"] は planned_shots への参照のため、ここまでのループで
         # 全ショットのclip_pathが確定済み（= 作り直す必要はない）。
@@ -867,12 +1055,25 @@ class JobManager:
         plan = project.get("plan") or {}
         shots = plan.get("shots") or []
         pending_ids = set(projects.unrendered_enabled_shot_ids(plan))
-        pending_shots = [s for s in shots if s.get("id") in pending_ids]
+        shot_by_id = {s.get("id"): s for s in shots}
 
+        ffmpeg_bin = cfg["ffmpeg_bin"]
+        ffprobe_bin = cfg.get("ffprobe_bin") or "ffprobe"
         clips_dir = projects.clips_dir(project_id)
         clips_dir.mkdir(parents=True, exist_ok=True)
 
-        self._emit(job_id, "visual", 25, "続きのショットを生成中… (0/{})".format(len(pending_shots)))
+        # project["scenes"]（初回generateがシーングループで作った場合のみ存在）で pending
+        # ショットをグルーピングする。シーンマスターが実在すれば backend を呼ばず再切り出し
+        # だけ行う（クレジット消費0）。無ければシーン単位で再生成する。scenes に載っていない
+        # ショット（旧plan / scene_id無し）は従来の1ショット経路で個別生成する（混在OK）。
+        scenes_meta = project.get("scenes") or []
+        scene_by_shot = {}
+        for sc in scenes_meta:
+            for sid in sc.get("shot_ids") or []:
+                scene_by_shot[sid] = sc
+
+        total_pending = len(pending_ids)
+        self._emit(job_id, "visual", 25, "続きのショットを生成中… (0/{})".format(total_pending))
         try:
             backend = get_backend(project.get("backend") or "mock", cfg)
         except Exception as exc:
@@ -880,12 +1081,113 @@ class JobManager:
             return
 
         succeeded_ids = []
-        for i, shot in enumerate(pending_shots):
+
+        def _persist_clip_path(shot_id):
+            current = projects.get_project(project_id)
+            if current is not None:
+                for s in (current.get("plan") or {}).get("shots") or []:
+                    if s.get("id") == shot_id:
+                        s["clip_path"] = projects.media_relpath_for_clip(project_id, "{}.mp4".format(shot_id))
+                projects.save_project(current)
+
+        def _emit_progress():
+            self._emit(
+                job_id, "visual", 25 + int(45 * len(succeeded_ids) / max(1, total_pending)),
+                "続きのショットを生成中… ({}/{})".format(len(succeeded_ids), total_pending),
+            )
+
+        # (1) シーン単位の再開: pending メンバーを含むシーンを、scenes_meta の順で処理する。
+        for sc in scenes_meta:
+            member_ids = list(sc.get("shot_ids") or [])
+            pending_members = [sid for sid in member_ids if sid in pending_ids]
+            if not pending_members:
+                continue
+            member_shots = [shot_by_id.get(sid) or {} for sid in member_ids]
+            # 生成時に保存された member_durations を優先して使う（[高]バグ修正: シーン窓破壊）。
+            # 旧プロジェクト（member_durations 未保存）は plan.shots の source_duration から復元する。
+            saved_member_durations = sc.get("member_durations")
+            if isinstance(saved_member_durations, list) and len(saved_member_durations) == len(member_ids):
+                member_durations = [float(d) for d in saved_member_durations]
+            else:
+                member_durations = [float(ms.get("source_duration") or 0.0) for ms in member_shots]
+            planned_total = float(sc.get("planned_duration_sec") or sum(member_durations))
+            master_rel = sc.get("clip_path")
+            master_path = projects.resolve_clip_path(project_id, master_rel) if master_rel else None
+            master_exists = bool(master_path) and Path(master_path).exists()
+
+            if not master_exists:
+                # シーンマスターが失われている: シーン単位で再生成する（クレジット1本ぶん）。
+                scene_shot = {
+                    "id": sc.get("scene_key") or member_ids[0],
+                    "visual_prompt": sc.get("visual_prompt") or (member_shots[0].get("prompt") or ""),
+                    "motion_preset": sc.get("motion_preset") or "static",
+                    "duration_sec": planned_total,
+                    "caption_jp": member_shots[0].get("caption") or "",
+                }
+                if member_shots[0].get("image_path"):
+                    scene_shot["image_path"] = member_shots[0]["image_path"]
+                safe_key = _safe_scene_key(sc.get("scene_key") or member_ids[0])
+                raw_path = clips_dir / "scene__{}.raw.mp4".format(safe_key)
+                master_path = str(clips_dir / "scene__{}.mp4".format(safe_key))
+                try:
+                    with _scaled_credit_limit(backend, len(member_ids)):
+                        backend.generate(scene_shot, str(raw_path))
+                    cmd = render.build_normalize_clip_cmd(
+                        ffmpeg_bin, str(raw_path), master_path, duration_sec=planned_total
+                    )
+                    res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
+                    if res["returncode"] != 0:
+                        raise RuntimeError(res["stderr"][-500:])
+                except Exception as exc:
+                    fail("シーン{}の再生成に失敗しました（対象ショット: {}）。ここまでに成功: {}. エラー: {}".format(
+                        sc.get("scene_key"), ", ".join(pending_members),
+                        ", ".join(succeeded_ids) if succeeded_ids else "なし", exc))
+                    return
+                finally:
+                    try:
+                        if raw_path.exists():
+                            raw_path.unlink()
+                    except Exception:
+                        pass
+                actual = _probe_duration(ffprobe_bin, master_path)
+                if not actual or actual <= 0:
+                    actual = planned_total
+            else:
+                # マスター実在: 再生成せず既存の実尺で切り出すだけ（クレジット0）。
+                actual = float(sc.get("actual_duration_sec") or planned_total)
+
+            windows = scenes_mod.compute_scene_windows(member_durations, actual)
+            win_by_id = dict(zip(member_ids, windows))
+            try:
+                for sid in pending_members:
+                    win = win_by_id[sid]
+                    out_path = clips_dir / "{}.mp4".format(sid)
+                    cmd = render.build_normalize_clip_cmd(
+                        ffmpeg_bin, str(master_path), str(out_path),
+                        duration_sec=max(win["content_duration"], _MIN_CUT_SEC),
+                        trim_start=win["trim_start"], pad_to_duration_sec=win["pad_to"],
+                    )
+                    res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
+                    if res["returncode"] != 0:
+                        raise RuntimeError(res["stderr"][-500:])
+                    _persist_clip_path(sid)
+                    succeeded_ids.append(sid)
+                    _emit_progress()
+            except Exception as exc:
+                fail("シーン{}のショット切り出しに失敗しました（対象ショット: {}）。ここまでに成功: {}. エラー: {}".format(
+                    sc.get("scene_key"), ", ".join(pending_members),
+                    ", ".join(succeeded_ids) if succeeded_ids else "なし", exc))
+                return
+
+        # (2) scenes に載っていない pending ショット: 従来の1ショット経路で個別生成する。
+        standalone_pending = [
+            s for s in shots
+            if s.get("id") in pending_ids and s.get("id") not in scene_by_shot
+        ]
+        for shot in standalone_pending:
             shot_id = shot.get("id")
             # studio plan の shot（id/order/enabled/prompt/caption/clip_path/source_duration/trim）を
-            # バックエンドが期待する shot 形（id/visual_prompt/motion_preset/duration_sec/caption_jp）へ
-            # マッピングする。studio plan には motion_preset が無いため既定値"static"で補う
-            # （既存project=本機能追加前に作られたものでも安全に動くようにするための既定値）。
+            # バックエンドが期待する shot 形へマッピングする（motion_preset は既定"static"で補う）。
             backend_shot = {
                 "id": shot_id,
                 "visual_prompt": shot.get("prompt") or "",
@@ -900,7 +1202,7 @@ class JobManager:
             try:
                 backend.generate(backend_shot, str(raw_path))
                 cmd = render.build_normalize_clip_cmd(
-                    cfg["ffmpeg_bin"], str(raw_path), str(norm_path), duration_sec=backend_shot["duration_sec"]
+                    ffmpeg_bin, str(raw_path), str(norm_path), duration_sec=backend_shot["duration_sec"]
                 )
                 res = render.run_ffmpeg(cmd, timeout_sec=_FFMPEG_TIMEOUT_SEC)
                 if res["returncode"] != 0:
@@ -918,18 +1220,9 @@ class JobManager:
                         raw_path.unlink()
                 except Exception:
                     pass
-
-            # このショットの生成が成功したので、その場でclip_pathを確定して保存する
-            # （generateの初回生成と同じ思想: 途中で後続ショットが失敗しても、ここまでの成功分は失われない）。
-            current = projects.get_project(project_id)
-            if current is not None:
-                for s in (current.get("plan") or {}).get("shots") or []:
-                    if s.get("id") == shot_id:
-                        s["clip_path"] = projects.media_relpath_for_clip(project_id, "{}.mp4".format(shot_id))
-                projects.save_project(current)
+            _persist_clip_path(shot_id)
             succeeded_ids.append(shot_id)
-            progress = 25 + int(45 * (i + 1) / max(1, len(pending_shots)))
-            self._emit(job_id, "visual", progress, "続きのショットを生成中… ({}/{})".format(i + 1, len(pending_shots)))
+            _emit_progress()
 
         project = projects.get_project(project_id)
         project["status"] = "rendering"
@@ -1187,7 +1480,20 @@ def _render_project(project_id, plan, cfg):
 
     telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=telop_shots[0]["id"] if telop_shots else None)
     product_name = ((projects.get_project(project_id) or {}).get("product") or {}).get("name")
-    ass_text = subtitles.generate_ass_with_style(telop_pieces, plan.get("subtitle_style"), product_name=product_name)
+    # 編集プロファイルの telop.animation=="none" を尊重(参考TikTok風のカットイン表示。
+    # プロファイル読込に失敗してもアニメ有効の従来挙動へフォールバック)。
+    animation_enabled = True
+    try:
+        from premiere.profile import load_profile as _load_full_profile
+        _profile = _load_full_profile(_TELOP_PROFILE_NAME) or {}
+        if ((_profile.get("telop") or {}).get("animation")) == "none":
+            animation_enabled = False
+    except Exception:
+        pass
+    ass_text = subtitles.generate_ass_with_style(
+        telop_pieces, plan.get("subtitle_style"), product_name=product_name,
+        animation_enabled=animation_enabled,
+    )
     ass_path = work_dir / "subtitles.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 

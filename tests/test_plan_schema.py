@@ -80,6 +80,84 @@ def test_build_rule_based_plan_has_valid_shape():
     assert len(normalized["shots"]) == 4
 
 
+# --- scene_id（シーングループ） ---------------------------------------------
+
+def test_scene_id_omitted_backward_compatible():
+    """scene_id 無しの従来plan: 正規化後にも scene_id キーは付かない（後方互換）。"""
+    ok, errors, normalized = plan_schema.validate_plan(_valid_plan())
+    assert ok is True
+    assert all("scene_id" not in s for s in normalized["shots"])
+
+
+def test_scene_id_passthrough_when_present():
+    plan = _valid_plan(shots=[
+        {"id": "s1", "visual_prompt": "p", "motion_preset": "zoom_in", "duration_sec": 2.0, "caption_jp": "a", "scene_id": "sc1"},
+        {"id": "s2", "visual_prompt": "p", "motion_preset": "zoom_in", "duration_sec": 2.0, "caption_jp": "b", "scene_id": "sc1"},
+        {"id": "s3", "visual_prompt": "p", "motion_preset": "pan_left", "duration_sec": 2.0, "caption_jp": "c", "scene_id": "sc2"},
+    ])
+    ok, errors, normalized = plan_schema.validate_plan(plan)
+    assert ok is True, errors
+    assert [s.get("scene_id") for s in normalized["shots"]] == ["sc1", "sc1", "sc2"]
+
+
+def test_scene_id_consecutive_reuse_ok():
+    plan = _valid_plan(shots=[
+        {"id": "s1", "visual_prompt": "p", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "a", "scene_id": "sc1"},
+        {"id": "s2", "visual_prompt": "p", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "b", "scene_id": "sc1"},
+    ])
+    ok, errors, _ = plan_schema.validate_plan(plan)
+    assert ok is True, errors
+
+
+def test_scene_id_non_consecutive_reuse_rejected():
+    """飛び飛び（sc1 → sc2 → sc1）の scene_id 再利用はエラー。"""
+    plan = _valid_plan(shots=[
+        {"id": "s1", "visual_prompt": "p", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "a", "scene_id": "sc1"},
+        {"id": "s2", "visual_prompt": "p", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "b", "scene_id": "sc2"},
+        {"id": "s3", "visual_prompt": "p", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "c", "scene_id": "sc1"},
+    ])
+    ok, errors, _ = plan_schema.validate_plan(plan)
+    assert ok is False
+    assert any("scene_id" in e and "連続" in e for e in errors)
+
+
+def test_scene_id_visual_prompt_mismatch_rejected():
+    """同一 scene_id 内で visual_prompt が異なる plan はエラー（シーンマスター1本から
+    切り出す前提のため）。矯正リトライへ回すためのハードエラー（[中]バグ修正）。
+    """
+    plan = _valid_plan(shots=[
+        {"id": "s1", "visual_prompt": "prompt A", "motion_preset": "static", "duration_sec": 2.0,
+         "caption_jp": "a", "scene_id": "sc1"},
+        {"id": "s2", "visual_prompt": "prompt B", "motion_preset": "static", "duration_sec": 2.0,
+         "caption_jp": "b", "scene_id": "sc1"},
+    ])
+    ok, errors, _ = plan_schema.validate_plan(plan)
+    assert ok is False
+    assert any("visual_prompt" in e and "一致" in e for e in errors)
+
+
+def test_scene_id_visual_prompt_match_ok():
+    """同一 scene_id で visual_prompt が一致していれば validate_plan は通る。"""
+    plan = _valid_plan(shots=[
+        {"id": "s1", "visual_prompt": "same prompt", "motion_preset": "static", "duration_sec": 2.0,
+         "caption_jp": "a", "scene_id": "sc1"},
+        {"id": "s2", "visual_prompt": "same prompt", "motion_preset": "static", "duration_sec": 2.0,
+         "caption_jp": "b", "scene_id": "sc1"},
+    ])
+    ok, errors, _ = plan_schema.validate_plan(plan)
+    assert ok is True, errors
+
+
+def test_scene_id_non_string_rejected():
+    plan = _valid_plan(shots=[
+        {"id": "s1", "visual_prompt": "p", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "a", "scene_id": 123},
+        {"id": "s2", "visual_prompt": "p", "motion_preset": "static", "duration_sec": 2.0, "caption_jp": "b"},
+    ])
+    ok, errors, _ = plan_schema.validate_plan(plan)
+    assert ok is False
+    assert any("scene_id" in e for e in errors)
+
+
 def test_build_rule_based_plan_template_text_has_no_ng_words():
     """テンプレート自体の固定文言（narration_scriptの定型部分）にNGワードが無いことを確認する。
 

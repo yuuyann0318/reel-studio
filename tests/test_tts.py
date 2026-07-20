@@ -298,3 +298,114 @@ def test_synthesize_segments_fails_when_duration_is_zero(tmp_path, monkeypatch):
     result = tts.synthesize_segments(["text"], tmp_path / "segs", {}, voice="Kyoko")
     assert result["ok"] is False
     assert "invalid_duration" in result["fallback_reason"]
+
+
+# --- prosody話速（UGC体験談トーン） ---
+
+
+def _make_fixture_bytes(tmp_path):
+    fixture_wav = tmp_path / "fixture.wav"
+    cfg_for_fixture = {"ffmpeg_bin": str(project_root() / "bin" / "ffmpeg")}
+    tts.SilentTTSBackend().synthesize("あ", str(fixture_wav), cfg_for_fixture)
+    return fixture_wav.read_bytes()
+
+
+def test_fish_audio_includes_prosody_speed_in_payload_by_default(tmp_path, monkeypatch):
+    """fish_audio設定にprosody_speedが無い場合、既定1.15がbodyのprosody.speedに載ること。"""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "dummy-key")
+    fixture_bytes = _make_fixture_bytes(tmp_path)
+    captured = {}
+
+    def fake_post(url, payload, api_key, model, timeout_sec=None):
+        captured["payload"] = payload
+        return fixture_bytes
+
+    backend = tts.FishAudioTTSBackend(voice="Kyoko", _http_post=fake_post)
+    backend.synthesize("こんにちは", str(tmp_path / "out.wav"), _FISH_CFG)
+
+    assert captured["payload"]["prosody"] == {"speed": tts._FISH_AUDIO_DEFAULT_PROSODY_SPEED}
+
+
+def test_fish_audio_prosody_speed_fixation_smoke(tmp_path, monkeypatch):
+    """prosody形状の固定化スモーク（[中]バグ修正）: 実機検証済み(2026-07-20)の
+    speed=1.15 が既定値としてpayloadに載ることを固定する。ここが変わると同文の音声尺が
+    変わり、TTS駆動同期モードのショット尺・テロップ配置が全体的にずれる。
+    """
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "dummy-key")
+    fixture_bytes = _make_fixture_bytes(tmp_path)
+    captured = {}
+
+    def fake_post(url, payload, api_key, model, timeout_sec=None):
+        captured["payload"] = payload
+        return fixture_bytes
+
+    backend = tts.FishAudioTTSBackend(voice="Kyoko", _http_post=fake_post)
+    backend.synthesize("同期モードの実効テスト用テキスト", str(tmp_path / "out.wav"), _FISH_CFG)
+
+    # 固定: 既定prosody形状は {"speed": 1.15}（実APIで5.67秒→4.95秒を実測済み）。
+    assert captured["payload"]["prosody"] == {"speed": 1.15}
+    assert tts._FISH_AUDIO_DEFAULT_PROSODY_SPEED == 1.15
+
+
+def test_fish_audio_uses_configured_prosody_speed(tmp_path, monkeypatch):
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "dummy-key")
+    fixture_bytes = _make_fixture_bytes(tmp_path)
+    captured = {}
+
+    def fake_post(url, payload, api_key, model, timeout_sec=None):
+        captured["payload"] = payload
+        return fixture_bytes
+
+    custom_cfg = {"tts": {"engine": "fish_audio", "fish_audio": {"prosody_speed": 1.3}}}
+    backend = tts.FishAudioTTSBackend(voice="Kyoko", _http_post=fake_post)
+    backend.synthesize("こんにちは", str(tmp_path / "out.wav"), custom_cfg)
+
+    assert captured["payload"]["prosody"] == {"speed": 1.3}
+
+
+def test_fish_audio_omits_prosody_when_speed_is_1(tmp_path, monkeypatch):
+    """prosody_speed==1.0（等倍）のときはbodyにprosodyキーを載せない（従来挙動を維持）。"""
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "dummy-key")
+    fixture_bytes = _make_fixture_bytes(tmp_path)
+    captured = {}
+
+    def fake_post(url, payload, api_key, model, timeout_sec=None):
+        captured["payload"] = payload
+        return fixture_bytes
+
+    custom_cfg = {"tts": {"engine": "fish_audio", "fish_audio": {"prosody_speed": 1.0}}}
+    backend = tts.FishAudioTTSBackend(voice="Kyoko", _http_post=fake_post)
+    backend.synthesize("こんにちは", str(tmp_path / "out.wav"), custom_cfg)
+
+    assert "prosody" not in captured["payload"]
+
+
+def test_say_backend_command_uses_configured_rate(tmp_path, monkeypatch):
+    """sayフォールバックの読み上げ速度が定数 _SAY_RATE_WPM で `-r` 指定されること。"""
+    run_calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+
+    def fake_run(cmd, **kwargs):
+        run_calls.append(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(tts.shutil, "which", lambda name: "/usr/bin/say")
+    monkeypatch.setattr(tts, "_voice_available", lambda v: True)
+    monkeypatch.setattr(tts, "_file_nonempty", lambda p: True)
+    monkeypatch.setattr(tts, "_ffprobe_duration", lambda b, p: 2.0)
+    monkeypatch.setattr(tts.subprocess, "run", fake_run)
+
+    backend = tts.SayTTSBackend(voice="Kyoko")
+    cfg = {"ffmpeg_bin": "/x/ffmpeg", "ffprobe_bin": "/x/ffprobe"}
+    meta = backend.synthesize("こんにちは", str(tmp_path / "out.wav"), cfg)
+
+    assert meta["backend"] == "say"
+    say_cmd = run_calls[0]
+    assert "-r" in say_cmd
+    assert str(tts._SAY_RATE_WPM) in say_cmd
+    # -r の直後に速度値が来ていること
+    assert say_cmd[say_cmd.index("-r") + 1] == str(tts._SAY_RATE_WPM)

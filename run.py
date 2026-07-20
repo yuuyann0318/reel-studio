@@ -40,6 +40,24 @@ _FFMPEG_TIMEOUT_SEC = 1800
 
 _LOUDNORM_JSON_RE = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.DOTALL)
 
+# テロップアニメーション解決のため参照する編集プロファイル名（studio/server/jobs.py と共通）。
+_TELOP_PROFILE_NAME = "ttp_reference"
+
+
+def _resolve_animation_enabled():
+    """編集プロファイルの telop.animation=="none" を尊重してテロップのアニメ有無を返す。
+
+    プロファイル読み込み失敗時は True（従来のアニメ有りへフォールバック）。
+    """
+    try:
+        from premiere.profile import load_profile as _load_full_profile
+        _profile = _load_full_profile(_TELOP_PROFILE_NAME) or {}
+        if ((_profile.get("telop") or {}).get("animation")) == "none":
+            return False
+    except Exception:
+        pass
+    return True
+
 
 def _slugify(theme, max_len=24):
     s = re.sub(r"[^0-9A-Za-z一-龥ぁ-んァ-ヶー]+", "-", theme or "reel").strip("-")
@@ -320,7 +338,7 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 dict(s, duration_sec=shot_display_durations.get(s["id"], s["duration_sec"])) for s in shots
             ]
             telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=hook_shot_id)
-            ass_text = subtitles.generate_ass(telop_pieces)
+            ass_text = subtitles.generate_ass(telop_pieces, animation_enabled=_resolve_animation_enabled())
             ass_path.write_text(ass_text, encoding="utf-8")
             report["stages"]["subtitles"]["piece_count"] = len(telop_pieces)
     except Exception:

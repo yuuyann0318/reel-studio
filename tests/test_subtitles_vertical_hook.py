@@ -166,3 +166,43 @@ def test_generate_vertical_hook_ass_default_accent_color_is_ffd84d_when_unspecif
     ass_text = subtitles.generate_vertical_hook_ass(pieces)
     default_bgr = subtitles.hex_to_ass_bgr(subtitles.DEFAULT_SUBTITLE_STYLE["accent_color"])
     assert "\\c{}".format(default_bgr) in ass_text
+
+
+# --- animation_enabled（縦書きテロップのカットイン化: fad/列staggerを無効化） ---
+
+def test_vertical_hook_dialogue_lines_animation_disabled_has_no_fad():
+    lines = subtitles.build_vertical_hook_dialogue_lines(
+        0.0, 3.0, "今話題のAI動画", anchor="right", animation_enabled=False
+    )
+    assert len(lines) == 1
+    assert "\\fad(" not in lines[0]
+
+
+def test_vertical_hook_dialogue_lines_animation_disabled_disables_column_stagger():
+    """animation_enabled=False では2列目以降のStart遅延(stagger)を無効化し、全列out_startで開始する。"""
+    text = "あいうえおかきくけこさし"  # 12文字 -> 2列
+    lines = subtitles.build_vertical_hook_dialogue_lines(
+        0.0, 3.0, text, anchor="right", animation_enabled=False
+    )
+    assert len(lines) == 2
+    assert lines[0].startswith("Dialogue: 0,0:00:00.00,")
+    assert lines[1].startswith("Dialogue: 0,0:00:00.00,")  # staggerなし=1列目と同じStart
+
+
+def test_vertical_hook_dialogue_lines_default_is_animated_backward_compatible():
+    lines = subtitles.build_vertical_hook_dialogue_lines(0.0, 3.0, "今話題のAI動画", anchor="right")
+    assert "\\fad(140,100)" in lines[0]
+
+
+def test_generate_vertical_hook_ass_animation_disabled_has_no_fad_anywhere():
+    pieces = [
+        {"out_start": 0.0, "out_end": 2.0, "lines": [], "emphasis": [], "style": "big", "caption": "今話題のAI"},
+        {"out_start": 2.0, "out_end": 4.0, "lines": [], "emphasis": [], "style": "base", "caption": "悔しくて調べた"},
+    ]
+    ass_text = subtitles.generate_vertical_hook_ass(pieces, animation_enabled=False)
+    dialogue_lines = [l for l in ass_text.splitlines() if l.startswith("Dialogue:")]
+    assert dialogue_lines
+    for line in dialogue_lines:
+        assert "\\fad(" not in line
+    # \pos による配置指定自体は残る。
+    assert "\\pos(" in ass_text

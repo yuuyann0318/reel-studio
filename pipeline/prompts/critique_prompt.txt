@@ -28,6 +28,20 @@
 10. コンプライアンス: 景品表示法違反の断定・誇大表現（「絶対稼げる」「100%成功」「必ず儲かる」「元本保証」等）、
     特定個人名・アカウント名、プロフィール誘導、解約条件の不明示表現が一切ないか。効果の断定は
     「私の場合は」等の個人の体験談として語られているか。
+11. 広告っぽさの排除(UGCネイティブ): 広告構文（『ぜひ』『おすすめします』『〜してみてください』『今なら』
+    『実感してください』『叶える』『贅沢な』『上質な』）が残っていないか。caption_jpが要約・見出し化されて
+    narration_jpと乖離していないか（default styleは全文テロップでほぼ同文が正。vertical_hookは13字目安の短文可）。
+    visual_promptがcinematic/studio/luxurious等の綺麗すぎる広告映像になっていないか（スマホ生活感が正）。
+
+# 広告っぽさの徹底排除(UGCネイティブ・絶対厳守)
+- これは広告ではなく『友達に送る早口の体験談』。次の広告構文を全面禁止:
+  『ぜひ』『おすすめします』『〜してみてください』『今なら』『実感してください』『叶える』『贅沢な』『上質な』
+- 語りは粗くてよい。『〜なんで』『〜だったんだけど』『正直』等の砕けた口語を積極的に使う(下品な語は不可)
+- 1文=1ショット。1文は8〜20字目安に短く割る(長い文は文ごと分割してショットを増やす)
+- caption_jpは要約・見出し化せず、そのショットのnarration_jpとほぼ同文にする(TikTokの全文テロップ文化。40字以内は維持)。
+  ただしvertical_hookスタイルは縦書きが映える13字目安の短文のままでよい。
+- visual_promptは『スマホで撮ったリアルな生活感』に限定: smartphone footage, handheld, everyday Japanese bathroom/bedroom/drugstore shelf, natural imperfect lighting, extreme close-up of skin/hands/product texture
+- visual_promptで禁止: cinematic, professional, studio lighting, elegant, luxurious, perfect, model, advertisement
 
 # 書き直しのルール
 - ドラフトの良い部分（強いhook・具体的な体験描写）は残し、弱い部分だけを外科的に書き直す。全取っ替えはしない。
