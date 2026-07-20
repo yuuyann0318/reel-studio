@@ -233,22 +233,31 @@ def test_job_events_unknown_job_id_reports_not_found_in_stream():
     assert payload["error"]["code"] == "not_found"
 
 
-def test_list_bgm_assets_has_three_moods():
+def test_list_bgm_assets_covers_all_starter_moods():
+    # BGMライブラリ拡張後: 4mood(upbeat/calm/emotional/dramatic) × 3本のスターター12曲 +
+    # 従来の synthetic-placeholder 3曲。既定moodは4種以上を必ずカバーする。
     resp = client.get("/api/assets/bgm")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 3
-    assert {"upbeat", "calm", "emotional"} == {e["mood"] for e in data}
+    assert len(data) >= 12
+    moods = {e["mood"] for e in data}
+    assert {"upbeat", "calm", "emotional", "dramatic"} <= moods
 
 
 def test_list_sfx_assets_has_eight_effects_with_license_and_duration():
+    """2026-07: assets/sfx はローテーション用ライブラリ (100種以上) に拡張された。
+    ここでは「legacy 8種の後方互換 + ライブラリ全体が >=100件・全エントリにlicense/duration」を確認する。
+    """
     resp = client.get("/api/assets/sfx")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) == 8
+    assert len(data) >= 100
+    legacy_entries = [e for e in data if e["license"].startswith("synthetic-placeholder")]
+    assert len(legacy_entries) == 8
     for entry in data:
-        assert 0.3 <= entry["duration"] <= 1.5
-        assert entry["license"].startswith("synthetic-placeholder")
+        # 生成ライブラリは 0.15〜1.5s 幅で作られている
+        assert 0.05 <= entry["duration"] <= 2.0
+        assert "synthetic" in entry["license"]
 
 
 def test_media_bgm_mount_matches_frontend_media_url_scheme():

@@ -2,49 +2,1181 @@
   {
     "file": "whoosh_01.wav",
     "label_jp": "ホワッシュ（場面転換）",
+    "family": "legacy",
+    "tags": [
+      "transition"
+    ],
     "duration": 0.6,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   },
   {
     "file": "swoosh_01.wav",
     "label_jp": "スウォッシュ（動きの強調）",
+    "family": "legacy",
+    "tags": [
+      "transition"
+    ],
     "duration": 0.5,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   },
   {
     "file": "pop_01.wav",
     "label_jp": "ポップ（選択/決定）",
+    "family": "legacy",
+    "tags": [
+      "accent"
+    ],
     "duration": 0.3,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   },
   {
     "file": "ding_01.wav",
     "label_jp": "ディン（達成/通知）",
+    "family": "legacy",
+    "tags": [
+      "accent"
+    ],
     "duration": 1.2,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   },
   {
     "file": "click_01.wav",
     "label_jp": "クリック（タップ/操作）",
+    "family": "legacy",
+    "tags": [
+      "accent"
+    ],
     "duration": 0.3,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   },
   {
     "file": "riser_01.wav",
     "label_jp": "ライザー（盛り上げ）",
+    "family": "legacy",
+    "tags": [
+      "riser"
+    ],
     "duration": 1.5,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   },
   {
     "file": "impact_01.wav",
     "label_jp": "インパクト（強調/衝撃）",
+    "family": "legacy",
+    "tags": [
+      "impact"
+    ],
     "duration": 0.45,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   },
   {
     "file": "sparkle_01.wav",
     "label_jp": "スパークル（キラキラ演出）",
+    "family": "legacy",
+    "tags": [
+      "shimmer"
+    ],
     "duration": 1.0,
     "license": "synthetic-placeholder (generate_placeholder_sfx.py で ffmpeg 信号合成。著作権フリー。SFXオーバーレイ機能の実機検証用。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_001.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_002.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_003.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_004.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_005.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_006.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_007.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_008.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_009.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_010.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_011.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_012.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_013.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_014.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_015.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_016.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_017.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_018.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_019.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_020.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_021.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_022.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_023.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_024.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_025.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_026.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.25,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_027.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_028.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_029.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "whoosh_gen_030.wav",
+    "label_jp": "ホワッシュ（場面転換）",
+    "family": "whoosh",
+    "tags": [
+      "transition"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_001.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.08,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_002.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.08,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_003.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.08,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_004.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.08,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_005.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.08,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_006.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.12,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_007.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.12,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_008.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.12,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_009.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.12,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_010.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.12,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_011.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.18,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_012.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.18,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_013.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.18,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_014.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.18,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_015.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.18,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_016.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.24,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_017.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.24,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_018.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.24,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_019.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.24,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_020.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.24,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_021.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_022.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_023.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_024.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "pop_gen_025.wav",
+    "label_jp": "ポップ（アクセント）",
+    "family": "pop",
+    "tags": [
+      "accent"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_001.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.5,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_002.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.5,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_003.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.5,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_004.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.5,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_005.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.5,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_006.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_007.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_008.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_009.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_010.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_011.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_012.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_013.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_014.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_015.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.7,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_016.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.8,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_017.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.8,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_018.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.8,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_019.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.8,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "riser_gen_020.wav",
+    "label_jp": "ライザー（盛り上げ）",
+    "family": "riser",
+    "tags": [
+      "riser"
+    ],
+    "duration": 0.8,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_001.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_002.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_003.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_004.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_005.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_006.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_007.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_008.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_009.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_010.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_011.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_012.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_013.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_014.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_015.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_016.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_017.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_018.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.3,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_019.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.45,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "impact_gen_020.wav",
+    "label_jp": "インパクト（強調/衝撃）",
+    "family": "impact",
+    "tags": [
+      "impact"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_001.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_002.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.9,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_003.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 1.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_004.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_005.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.9,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_006.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 1.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_007.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_008.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.9,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_009.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 1.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_010.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_011.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.9,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_012.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 1.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_013.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.6,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_014.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 0.9,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
+  },
+  {
+    "file": "shimmer_gen_015.wav",
+    "label_jp": "シマー（キラキラ演出）",
+    "family": "shimmer",
+    "tags": [
+      "shimmer"
+    ],
+    "duration": 1.2,
+    "license": "synthetic-generated (generate_sfx_library.py で ffmpeg 信号合成。著作権フリー。ローテーション再生用ライブラリ。本番配布前にライセンスの明確な効果音へ差し替えてください)"
   }
 ]

@@ -31,7 +31,6 @@
   "edit": {
     "cut_sfx": {
       "enabled": true,
-      "file": "whoosh_01.wav",
       "gain_db": -18,
       "min_interval_sec": 1.5
     },

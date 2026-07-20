@@ -71,21 +71,29 @@ def _new_run_dir(theme):
     return run_id, run_dir
 
 
-def _resolve_bgm(mood):
+def _resolve_bgm(mood, seed=None, project_id=None):
+    """ムードから BGM の絶対パスを返す（pipeline.bgm_library.pick_bgm 経由）。
+
+    後方互換: 従来と同様の str(path) or None を返す。
+    seed / project_id で決定論選曲＋直近使用2曲回避（"BGMが毎回同じ" 対策）。
+    """
     if not mood or mood == "none":
         return None
-    if not _BGM_MANIFEST.exists():
-        return None
     try:
-        manifest = json.loads(_BGM_MANIFEST.read_text(encoding="utf-8"))
+        from pipeline import bgm_library
     except Exception:
+        bgm_library = None
+    if bgm_library is None:
         return None
-    for entry in manifest or []:
-        if entry.get("mood") == mood:
-            p = _ASSETS_DIR / "bgm" / entry.get("file", "")
-            if p.exists():
-                return str(p)
-    return None
+    entry = bgm_library.pick_bgm(mood, seed=(seed if seed is not None else project_id),
+                                 record_project_id=project_id)
+    if not entry:
+        return None
+    fname = entry.get("file", "")
+    if not fname:
+        return None
+    p = _ASSETS_DIR / "bgm" / fname
+    return str(p) if p.exists() else None
 
 
 def _parse_loudnorm_json(stderr_text):
@@ -349,7 +357,7 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     output_path = None
     try:
         with _timed_stage(report, "render"):
-            bgm_path = _resolve_bgm(plan.get("bgm_mood"))
+            bgm_path = _resolve_bgm(plan.get("bgm_mood"), project_id=run_id)
             report["stages"]["render"]["bgm_mood"] = plan.get("bgm_mood")
             report["stages"]["render"]["bgm_path"] = bgm_path
 
@@ -384,7 +392,9 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             if edit_prof is not None:
                 try:
                     durations = [shot_display_durations.get(s["id"], s["duration_sec"]) for s in shots]
-                    enhancement = render.compute_edit_enhancement_kwargs(durations, edit_prof)
+                    enhancement = render.compute_edit_enhancement_kwargs(
+                        durations, edit_prof, project_seed=run_id
+                    )
                     edit_sfx = enhancement["sfx_extra"]
                     bgm_curve = enhancement["bgm_curve"]
                     first_shot_impact_sec = enhancement["first_shot_impact_sec"]

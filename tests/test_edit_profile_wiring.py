@@ -82,7 +82,11 @@ def test_render_project_records_edit_profile_applied_true_on_success(monkeypatch
 
 
 def test_render_project_final_cmd_includes_cut_sfx_from_edit_profile(monkeypatch):
-    """mockバックエンド既定のプロジェクトでも、カットSEはskip_if_backend対象外なので付与される。"""
+    """mockバックエンド既定のプロジェクトでも、カットSEはskip_if_backend対象外なので付与される。
+
+    2026-07: カットSEはローテーション化されたため、特定ファイル名(whoosh_01.wav)ではなく
+    「assets/sfx/*.wav が -i 入力に混じっているか」で確認する。
+    """
     project = _make_project_with_two_shots("カットSE配線テスト")
     _setup_full_mode(monkeypatch)
     calls = _capture_ffmpeg(monkeypatch)
@@ -90,10 +94,13 @@ def test_render_project_final_cmd_includes_cut_sfx_from_edit_profile(monkeypatch
 
     jobs_mod._render_project(project["id"], project["plan"], cfg)
 
-    # 最後から2番目(pass1)か最後(pass2)のfinal_cmdにwhoosh_01.wavが入力として含まれる。
     final_cmds = [c for c in calls if "-filter_complex" in c]
     assert final_cmds, "final_cmd(filter_complex使用)が見つからない"
-    assert any("whoosh_01.wav" in " ".join(c) for c in final_cmds)
+    # ローテーションで選ばれる manifest 上のいずれかの wav がSFX入力に含まれる。
+    def _has_sfx_input(cmd):
+        joined = " ".join(cmd)
+        return "assets/sfx/" in joined and ".wav" in joined
+    assert any(_has_sfx_input(c) for c in final_cmds)
 
 
 def test_render_project_falls_back_when_edit_profile_load_raises(monkeypatch):

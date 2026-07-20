@@ -243,24 +243,89 @@ def compute_cut_sfx_events(shot_boundaries_sec, min_interval_sec):
     return events
 
 
-def build_edit_cut_sfx_specs(shot_boundaries_sec, edit_profile):
+def _family_weights_for_event(at_sec, hook_end_sec, cta_start_sec):
+    """カット位置(at_sec)がフック直後 / 本編 / CTA前のどこかで、望ましいSFXファミリー
+    の重み付けを返す。呼び出し側は pick_cut_sfx にこれを渡す（ビート対応の重み）。
+
+    - フック直後（at_sec <= hook_end_sec + 少しの余裕）: impact 系を最優先
+    - CTA前（cta_start_sec 直前・約1秒手前）: riser 系を優先
+    - 本編中: transition 系（whoosh/legacy）を中心にたまに pop/shimmer
+    """
+    # フック直後（フックの終わり付近のカット）: impact を主軸に。
+    if hook_end_sec is not None and at_sec <= hook_end_sec + 0.5:
+        return {"impact": 5, "whoosh": 2, "legacy": 1}
+    # CTA直前（CTA開始の少し前のカット）: riser を主軸に。
+    if cta_start_sec is not None and at_sec >= cta_start_sec - 1.5:
+        return {"riser": 5, "whoosh": 2, "shimmer": 1}
+    # 本編: transition系を中心にたまにアクセント。
+    return {"whoosh": 5, "legacy": 2, "pop": 1, "shimmer": 1}
+
+
+def build_edit_cut_sfx_specs(shot_boundaries_sec, edit_profile, project_seed=None,
+                              hook_end_sec=None, cta_start_sec=None):
     """edit_profile["cut_sfx"]設定から、build_final_cmdのsfx引数に追加できる
     {"path","at_sec","gain_db"} 群を構築する（純関数）。
 
-    cut_sfx.enabled=False、または resolved_path が無い（SFXファイル未解決）場合は
-    空リストを返す（=カットSEなしで従来どおりレンダを継続できる）。
+    cut_sfx.enabled=False の場合は空リストを返す。
+
+    後方互換の分岐:
+      1) cut_sfx.rotate=False (ttp_reference.json で file を明示指定) →
+         従来どおり resolved_path 固定でカットSEを全イベントに適用する。
+         resolved_path が無い場合は空リスト。
+      2) cut_sfx.rotate=True (or 未設定) かつ manifest がある →
+         カット位置ごとに pipeline.edit_profile.pick_cut_sfx() で決定論的に
+         別ファイルを選び、同一動画内で連続同音を避ける。
+         hook_end_sec / cta_start_sec のヒントがあれば位置別の重みで
+         impact/riser/transition を切り替える。
+      3) rotate=True だが manifest 空 → 従来の resolved_path フォールバック。
+         どちらも無ければ空リスト。
     """
     edit_profile = edit_profile or {}
     cfg = edit_profile.get("cut_sfx") or {}
     if not cfg.get("enabled", True):
         return []
-    path = cfg.get("resolved_path")
-    if not path:
-        return []
+
     min_interval = cfg.get("min_interval_sec", 1.5)
     gain_db = cfg.get("gain_db", -18)
     events = compute_cut_sfx_events(shot_boundaries_sec, min_interval)
-    return [{"path": path, "at_sec": t, "gain_db": gain_db} for t in events]
+    if not events:
+        return []
+
+    rotate = cfg.get("rotate", False)
+    manifest = cfg.get("manifest") or []
+
+    if not rotate or not manifest:
+        # 固定ファイルモード（後方互換）
+        path = cfg.get("resolved_path")
+        if not path:
+            return []
+        return [{"path": path, "at_sec": t, "gain_db": gain_db} for t in events]
+
+    # ローテーションモード: 遅延インポートで edit_profile の関数を使う
+    # （render.py -> edit_profile.py の依存を導入するが循環はしない）。
+    from pipeline import edit_profile as _ep
+
+    specs = []
+    last_file = None
+    for idx, at_sec in enumerate(events):
+        weights = _family_weights_for_event(at_sec, hook_end_sec, cta_start_sec)
+        picked = _ep.pick_cut_sfx(
+            seed=project_seed, index=idx, manifest=manifest,
+            family_weights=weights, avoid_file=last_file,
+        )
+        if not picked:
+            # フォールバック: 固定resolved_pathがあればそれで埋める
+            path = cfg.get("resolved_path")
+            if not path:
+                continue
+            specs.append({"path": path, "at_sec": at_sec, "gain_db": gain_db})
+            continue
+        picked_path = _ep.resolve_sfx_file_path(picked.get("file"))
+        if not picked_path:
+            continue
+        specs.append({"path": picked_path, "at_sec": at_sec, "gain_db": gain_db})
+        last_file = picked.get("file")
+    return specs
 
 
 # パンチイン(緩急ズーム)で使うzoompanの出力解像度。正規化後クリップ(1080x1920)と一致させる。
@@ -367,13 +432,17 @@ def build_first_shot_impact_filter(duration_sec=0.3, start_scale=1.04, fps=30):
     ).format(z=z_expr, size=_PUNCH_IN_OUTPUT_SIZE, fps=fps)
 
 
-def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile):
+def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_seed=None):
     """editプロファイルと各ショットの表示尺（秒・ショット順のリスト）から、build_final_cmdへ
     渡す追加引数 {"sfx_extra","bgm_curve","first_shot_impact_sec"} をまとめて計算する純関数。
 
     ショットが0件でも例外を出さず安全な値（sfx_extra=[], bgm_curve=None,
     first_shot_impact_sec=None）を返す。呼び出し側は sfx_extra を既存の sfx リストへ
     追加（+=）し、bgm_curve/first_shot_impact_sec をそのまま build_final_cmd に渡す。
+
+    project_seed（任意）: カットSEをローテーション（cut_sfx.rotate=True）するときの
+    決定論シード。プロジェクトごとに異なる seed を渡すと、同じ台本でも別プロジェクトなら
+    別のSFX並びになる。None（未指定）でも動作は継続する（同じ並びを再現）。
     """
     edit_profile = edit_profile or {}
     durations = [float(d) for d in (shot_durations_sec or [])]
@@ -385,7 +454,16 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile):
         cursor += d
     total_duration = cursor
 
-    sfx_extra = build_edit_cut_sfx_specs(boundaries, edit_profile) if durations else []
+    # ビート境界のヒント（カットSEローテーションの位置別重み付けに使う）。
+    hook_end_hint = boundaries[1] if len(boundaries) > 1 else None
+    cta_start_hint = boundaries[-1] if durations else None
+
+    sfx_extra = build_edit_cut_sfx_specs(
+        boundaries, edit_profile,
+        project_seed=project_seed,
+        hook_end_sec=hook_end_hint,
+        cta_start_sec=cta_start_hint,
+    ) if durations else []
 
     bgm_curve = None
     bgm_cfg = edit_profile.get("bgm_curve") or {}

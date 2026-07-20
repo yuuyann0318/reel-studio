@@ -18,6 +18,20 @@ pip install -r requirements.txt
 同梱の `bin/ffmpeg` / `bin/ffprobe` を使うため、システムにffmpegが無くても動く
 （`config.json` の `ffmpeg_bin`/`ffprobe_bin` がこのパスを指す）。
 
+### 初回セットアップ（SFX / BGM ライブラリの生成）
+
+SFX / BGM の生成物（`assets/sfx/*_gen_*.wav`, `assets/bgm/library/*.m4a`）は
+`.gitignore` によりリポジトリにコミットされない。clone / pull 直後は空なので、
+以下を1回実行してローカルに生成する（合計 3〜5 分・ffmpegのみ・外部通信なし）。
+
+```bash
+.venv/bin/python assets/sfx/generate_sfx_library.py \
+  && .venv/bin/python assets/bgm/generate_starter_pack.py
+```
+
+生成物は非コミット前提のため、SFX/BGM関連のテストは生成物が無ければ `pytest.skip`
+される。テストが skip されたら上記スクリプトを流してから `pytest -q` を再実行する。
+
 ## 使い方
 
 ```bash

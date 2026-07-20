@@ -212,19 +212,22 @@ def _duration_drift_info(out_duration, target_duration_sec):
     return round(drift, 2), warning
 
 
-def _resolve_bgm_by_mood(mood):
+def _resolve_bgm_by_mood(mood, seed=None, project_id=None):
+    """ムードから BGM ファイル名を1曲返す（pipeline.bgm_library.pick_bgm 経由）。
+
+    後方互換のため戻り値の型（str filename or None）は従来と同一。
+    seed（既定=project_id）で決定論選曲、直近使用2曲は自動回避される。
+    project_id を渡すと選曲結果を assets/bgm/.history.json に永続化する。
+    """
     if not mood or mood == "none":
         return None
-    if not BGM_MANIFEST.exists():
-        return None
     try:
-        manifest = json.loads(BGM_MANIFEST.read_text(encoding="utf-8"))
+        from pipeline import bgm_library
     except Exception:
         return None
-    for entry in manifest or []:
-        if entry.get("mood") == mood:
-            return entry.get("file")
-    return None
+    entry = bgm_library.pick_bgm(mood, seed=(seed if seed is not None else project_id),
+                                 record_project_id=project_id)
+    return entry.get("file") if entry else None
 
 
 class RenderConflictError(Exception):
@@ -703,7 +706,12 @@ class JobManager:
         # ショットが1本も生成できずに失敗しても plan.shots に企画内容（prompt/caption/尺）が
         # 残るようにする。以前は生成ループを抜けた後にまとめて project["plan"] を書いていた
         # ため、途中失敗時は create_project() 時点の空のplan（shots:[]）のままになっていた。
-        bgm_file = _resolve_bgm_by_mood(plan.get("bgm_mood"))
+        # 後方互換: plan に既に bgm.file が明示指定済みならそれを尊重（Studioで手動指定した場合等）
+        _explicit_bgm = plan.get("bgm") if isinstance(plan.get("bgm"), dict) else None
+        if _explicit_bgm and _explicit_bgm.get("file"):
+            bgm_file = _explicit_bgm.get("file")
+        else:
+            bgm_file = _resolve_bgm_by_mood(plan.get("bgm_mood"), project_id=project_id)
 
         def _planned_shot(i, shot):
             base = {
@@ -743,6 +751,8 @@ class JobManager:
         if project is not None:
             project["plan"] = studio_plan
             project["narration_segments"] = narration_segments
+            if bgm_file:
+                project["bgm_selected"] = bgm_file
             projects.save_project(project)
 
         # --- シーングループ（クリップ再利用）で生成する ---------------------------------

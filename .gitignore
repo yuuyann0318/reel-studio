@@ -5,6 +5,8 @@ output/
 work/
 bin/
 assets/bgm/*.mp3
+assets/bgm/.history.json
+assets/bgm/library/
 assets/fonts/
 assets/sfx/*.wav
 projects/
