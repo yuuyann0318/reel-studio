@@ -24,7 +24,7 @@ def test_load_edit_profile_returns_defaults_when_edit_section_missing(tmp_path, 
     profile = edit_profile.load_edit_profile()
 
     assert profile["cut_sfx"]["enabled"] is True
-    assert profile["cut_sfx"]["gain_db"] == -18
+    assert profile["cut_sfx"]["gain_db"] == -6
     assert profile["cut_sfx"]["min_interval_sec"] == 1.5
     assert profile["punch_in"]["max_zoom"] == 1.08
     assert profile["punch_in"]["skip_if_backend"] == "mock"
@@ -58,7 +58,7 @@ def test_load_edit_profile_ignores_non_dict_edit_section(tmp_path, monkeypatch):
 
     profile = edit_profile.load_edit_profile()
 
-    assert profile["cut_sfx"]["gain_db"] == -18
+    assert profile["cut_sfx"]["gain_db"] == -6
 
 
 def test_load_edit_profile_partial_override_merges_with_defaults(tmp_path, monkeypatch):

@@ -25,10 +25,48 @@ def test_check_plan_detects_keihyo_ng_word_in_narration():
     assert any(v["word"] == "絶対稼げる" for v in result["violations"])
 
 
-def test_check_plan_detects_competitor_brand_name():
-    result = compliance.check_plan(_plan(narration="みおさんのアカウントを参考にしました。"))
+def test_check_plan_detects_competitor_brand_name_via_custom_dict():
+    """特定の個人名・SNSアカウント名は DEFAULT_NG_WORDS には含めない設計だが、
+    呼び出し側 (ng_words) or ローカル辞書 (config.local/ngwords.json) 経由で
+    渡された文言が本文にあれば violations として検出される。"""
+    result = compliance.check_plan(
+        _plan(narration="サンプル花子さんのアカウントを参考にしました。"),
+        ng_words=compliance.DEFAULT_NG_WORDS + ["サンプル花子"],
+    )
     assert result["ok"] is False
-    assert any(v["word"] == "みお" for v in result["violations"])
+    assert any(v["word"] == "サンプル花子" for v in result["violations"])
+
+
+def test_check_plan_default_ng_words_do_not_contain_real_personal_names():
+    """DEFAULT_NG_WORDS には特定個人名・SNSアカウント名を tracked コードとして含めない
+    (公開リポジトリで実名を露出させないための恒久ルール)。"""
+    for w in compliance.DEFAULT_NG_WORDS:
+        assert not w.startswith("@"), "SNSアカウントハンドルは DEFAULT_NG_WORDS に置かない"
+    # 非空・全て文字列であることは維持
+    assert all(isinstance(w, str) and w for w in compliance.DEFAULT_NG_WORDS)
+
+
+def test_load_local_ng_words_absent_returns_empty(tmp_path, monkeypatch):
+    """`config.local/ngwords.json` が存在しない環境では空リストを返す
+    (tracked コードだけで壊れず動作すること)。"""
+    monkeypatch.setattr(compliance, "_LOCAL_NG_WORDS_PATH", tmp_path / "does_not_exist.json")
+    assert compliance._load_local_ng_words() == []
+    # get_effective_ng_words も DEFAULT のみを返す
+    assert compliance.get_effective_ng_words() == list(compliance.DEFAULT_NG_WORDS)
+
+
+def test_load_local_ng_words_merges_into_effective_list(tmp_path, monkeypatch):
+    """ローカル辞書に置いた実名は get_effective_ng_words() 経由でマージされ、
+    check_plan() 既定挙動でも検出される。"""
+    dict_path = tmp_path / "ngwords.json"
+    dict_path.write_text('{"ng_words": ["サンプル花子"]}', encoding="utf-8")
+    monkeypatch.setattr(compliance, "_LOCAL_NG_WORDS_PATH", dict_path)
+    effective = compliance.get_effective_ng_words()
+    assert "サンプル花子" in effective
+    # check_plan の既定パラメータでも検出される
+    result = compliance.check_plan(_plan(narration="サンプル花子さんの投稿。"))
+    assert result["ok"] is False
+    assert any(v["word"] == "サンプル花子" for v in result["violations"])
 
 
 def test_check_plan_detects_ng_word_in_caption():

@@ -131,17 +131,17 @@ async def create_project(request: Request):
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             _bad_request("invalid_product_url", "product_url は http/https の有効なURLである必要があります")
 
-    # reference_url（任意）: 参考動画リンクの入口。product_urlと同じ軽量チェック（スキームと
-    # ホストの形式だけ）に留める。実際の解析（pipeline.reference.analyze_reference）は
-    # ジョブ側（jobs.py _run_generate）がfail-openで行うため、ここでは形式検証のみ行う。
+    # reference_url（必須）: TTP v2 移行後、Studio 経路の LLM 企画生成には参考動画URLが必須。
+    # 未指定 or 空文字なら 400 応答（UI 側で「参考動画URLが必要です」の案内を表示する）。
+    # 実際の解析（pipeline.reference_v2.analyze_reference_v2）はジョブ側（jobs.py _run_generate）
+    # で行い、失敗した場合も job を fail させる（旧 v1 時代の fail-open は撤去）。
     reference_url = (body or {}).get("reference_url")
-    if reference_url is not None:
-        if not isinstance(reference_url, str) or not reference_url.strip():
-            _bad_request("invalid_reference_url", "reference_url は非空文字列である必要があります")
-        reference_url = reference_url.strip()
-        parsed = urlparse(reference_url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            _bad_request("invalid_reference_url", "reference_url は http/https の有効なURLである必要があります")
+    if reference_url is None or not isinstance(reference_url, str) or not reference_url.strip():
+        _bad_request("reference_url_required", "参考動画URLが必要です")
+    reference_url = reference_url.strip()
+    parsed = urlparse(reference_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        _bad_request("invalid_reference_url", "reference_url は http/https の有効なURLである必要があります")
 
     project = projects.create_project(
         theme.strip(), target_duration_sec, backend_name, status="generating", style=style, product_url=product_url,

@@ -72,7 +72,8 @@ class _SucceedingBackend:
 def _fake_run_director_with_meta(meta):
     def _fake(theme, cfg=None, target_duration_sec=None, no_llm=False, **kwargs):
         from pipeline import plan_schema
-        plan = plan_schema.build_rule_based_plan(theme, target_duration_sec=target_duration_sec or 15, shot_count=2)
+        # T11: build_rule_based_plan -> build_smoke_plan (TTP v2 Phase 2)。
+        plan = plan_schema.build_smoke_plan(theme, target_duration_sec=target_duration_sec or 15, shot_count=2)
         plan["meta"] = dict(meta)
         return plan
     return _fake

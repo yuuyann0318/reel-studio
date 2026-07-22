@@ -51,7 +51,10 @@ DEFAULT_EDIT_PROFILE = {
     "cut_sfx": {
         "enabled": True,
         "file": None,  # None -> _default_cut_sfx_file() で manifest から解決する
-        "gain_db": -18,
+        # BUG-53: SEが最終ミックスで埋もれる問題への対策として -18 → -6dB(実聴感 -10〜-6dB目安)。
+        # -12dB target への mean_volume 補正(最大 ±18dB)と合わせて、SFX の 50ms 窓 RMS が
+        # ベースライン(narration+BGM)+3dB を安定して超えるようにする。
+        "gain_db": -6,
         "min_interval_sec": 1.5,
     },
     "punch_in": {

@@ -158,7 +158,7 @@ def _full_edit_profile(**overrides):
 def test_compute_edit_enhancement_kwargs_empty_shots_returns_safe_defaults():
     profile = _full_edit_profile()
     kwargs = render.compute_edit_enhancement_kwargs([], profile)
-    assert kwargs == {"sfx_extra": [], "bgm_curve": None, "first_shot_impact_sec": None}
+    assert kwargs == {"sfx_extra": [], "bgm_curve": None, "first_shot_impact_sec": None, "main_dip_events": []}
 
 
 def test_compute_edit_enhancement_kwargs_builds_bgm_curve_boundaries_from_durations():
@@ -189,7 +189,7 @@ def test_compute_edit_enhancement_kwargs_all_disabled_returns_empty():
     profile["bgm_curve"]["enabled"] = False
     profile["first_shot_impact"]["enabled"] = False
     kwargs = render.compute_edit_enhancement_kwargs([2.0, 3.0], profile)
-    assert kwargs == {"sfx_extra": [], "bgm_curve": None, "first_shot_impact_sec": None}
+    assert kwargs == {"sfx_extra": [], "bgm_curve": None, "first_shot_impact_sec": None, "main_dip_events": []}
 
 
 # ---------------------------------------------------------------------------

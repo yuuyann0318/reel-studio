@@ -38,7 +38,7 @@
   『ぜひ』『おすすめします』『〜してみてください』『今なら』『実感してください』『叶える』『贅沢な』『上質な』
 - 語りは粗くてよい。『〜なんで』『〜だったんだけど』『正直』等の砕けた口語を積極的に使う(下品な語は不可)
 - 1文=1ショット。1文は8〜20字目安に短く割る(長い文は文ごと分割してショットを増やす)
-- caption_jpは要約・見出し化せず、そのショットのnarration_jpとほぼ同文にする(TikTokの全文テロップ文化。40字以内は維持)。
+- caption_jpは要約・見出し化せず、そのショットのnarration_jpとほぼ同文にする(TikTokの全文テロップ文化。30字以内(25字以内推奨)は維持)。
   ただしvertical_hookスタイルは縦書きが映える13字目安の短文のままでよい。
 - visual_promptは『スマホで撮ったリアルな生活感』に限定: smartphone footage, handheld, everyday Japanese bathroom/bedroom/drugstore shelf, natural imperfect lighting, extreme close-up of skin/hands/product texture
 - visual_promptで禁止: cinematic, professional, studio lighting, elegant, luxurious, perfect, model, advertisement
@@ -52,7 +52,7 @@
   narration_script全文と完全一致する状態を保つこと。各narration_jpは音読でduration_sec秒前後
   （目安: 1秒≒6文字）になる長さにすること。
 - visual_promptは英語のまま。caption_jpとナレーションの改稿に合わせて、映像の内容がズレる場合のみ直す。
-- caption_jpは40字以内厳守。vertical_hookスタイルの場合は13字程度を目安に短くする。
+- caption_jpは30字以内厳守(25字以内推奨)。vertical_hookスタイルの場合は13字程度を目安に短くする。
 - motion_presetは static / pan_left / pan_right / zoom_in / zoom_out / ken_burns のみ。
 - bgm_moodは upbeat / calm / emotional / none のみ。
 

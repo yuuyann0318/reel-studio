@@ -259,7 +259,7 @@ export async function putPlan(id, plan) {
       throw new ApiError("INVALID_TRIM", `ショット ${shot.id} のトリム範囲が素材長を超えています`, 422);
     }
   }
-  const ngWords = ["絶対稼げる", "絶対に稼げる", "100%成功", "100%儲かる", "元本保証", "必ず儲かる", "みお", "@mio_ai_insta_"];
+  const ngWords = ["絶対稼げる", "絶対に稼げる", "100%成功", "100%儲かる", "元本保証", "必ず儲かる"];
   for (const shot of plan.shots || []) {
     if (ngWords.some((w) => (shot.caption || "").includes(w))) {
       throw new ApiError("COMPLIANCE_NG_WORD", `禁止表現が含まれています: 「${shot.caption}」`, 422);

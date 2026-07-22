@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+import pytest
+
 from pipeline import director
 
 
@@ -8,6 +10,8 @@ def test_build_director_prompt_substitutes_placeholders():
     assert "30" in prompt
     assert "{THEME}" not in prompt
     assert "{TARGET_DURATION}" not in prompt
+    # {SCHEMA_EXAMPLE} placeholder は TTP v2 移行で撤去済み（プロンプト本文に元々含まれない）。
+    # 残留していないことは "{SCHEMA_EXAMPLE}" のリテラル文字列が現れないことで検査する。
     assert "{SCHEMA_EXAMPLE}" not in prompt
 
 
@@ -24,11 +28,14 @@ def test_run_director_no_llm_returns_rule_based_plan():
     assert len(plan["shots"]) >= 3
 
 
-def test_run_director_falls_back_when_claude_runner_unavailable(monkeypatch):
-    """call_claude_json が None（claude_runner未使用環境）でもルールベース代替へフォールバックする。"""
-    monkeypatch.setattr(director, "call_claude_json", None)
-    plan = director.run_director("テストテーマ", config={}, target_duration_sec=15, no_llm=False)
-    assert plan["meta"]["source"] == "rule"
+def test_run_director_raises_when_reference_missing_and_llm_mode(monkeypatch):
+    """TTP v2 移行後、reference=None かつ no_llm=False では明示エラーになる（KR4）。
+
+    従来の「call_claude_json が None なら rule 代替へフォールバック」挙動は撤去した。
+    テスト用途では no_llm=True を指定してスモーク plan を使うこと。
+    """
+    with pytest.raises(director.TTPReferenceRequiredError, match="--reference-url"):
+        director.run_director("テストテーマ", config={}, target_duration_sec=15, no_llm=False)
 
 
 # --- vertical_hookスタイル ---------------------------------------------------
@@ -47,27 +54,19 @@ def test_build_director_prompt_falls_back_to_default_for_unknown_style():
     assert unknown_prompt == default_prompt
 
 
-def test_run_director_no_llm_vertical_hook_sets_meta_style_and_paces_shots():
+def test_run_director_no_llm_vertical_hook_sets_meta_style():
+    """T4 相当: TTP v2 移行後、vertical_hook 用の shot count/duration 固定テンプレは
+    撤去したため、shot数/尺の厳密検査は削除。style メタが伝播することのみ検査する。"""
     plan = director.run_director(
         "今話題のAI動画アプリを試した結果", config={}, target_duration_sec=15, no_llm=True, style="vertical_hook"
     )
     assert plan["meta"]["source"] == "rule"
     assert plan["meta"]["style"] == "vertical_hook"
-    # 尺÷2秒目安（15秒->7〜8ショット）・各ショット1.5〜2.5秒程度の高速カット。
-    assert 6 <= len(plan["shots"]) <= 9
-    for shot in plan["shots"]:
-        assert 1.5 <= shot["duration_sec"] <= 2.5
 
 
 def test_run_director_no_llm_default_style_sets_meta_style_default():
     plan = director.run_director("テストテーマ", config={}, target_duration_sec=15, no_llm=True)
     assert plan["meta"]["style"] == "default"
-
-
-def test_run_director_sets_meta_style_even_when_claude_runner_unavailable(monkeypatch):
-    monkeypatch.setattr(director, "call_claude_json", None)
-    plan = director.run_director("テストテーマ", config={}, target_duration_sec=15, no_llm=False, style="vertical_hook")
-    assert plan["meta"]["style"] == "vertical_hook"
 
 
 # --- 商品アフィリエイト動画モード({PRODUCT_BLOCK}) --------------------------

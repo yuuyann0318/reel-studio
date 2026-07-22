@@ -31,7 +31,7 @@
   "edit": {
     "cut_sfx": {
       "enabled": true,
-      "gain_db": -18,
+      "gain_db": 0,
       "min_interval_sec": 1.5
     },
     "punch_in": {

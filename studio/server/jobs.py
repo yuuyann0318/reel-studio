@@ -138,19 +138,15 @@ def _parse_loudnorm_json(stderr_text):
 
 
 def _default_analyze_reference(url, cfg, progress_cb=None):
-    """pipeline.reference.analyze_reference への遅延importラッパー。
+    """pipeline.reference_v2.analyze_reference_v2 への遅延importラッパー（TTP v2 経路）。
 
-    pipeline/reference.py は別ワーカーが並行実装中のモジュールのため、jobs.py の
-    import時点（モジュール読み込み時）にトップレベルで `from pipeline import reference` を
-    行うと、未実装/未マージの間はjobs.py自体のimportが壊れてしまう。ここで実際に参考動画URLが
-    指定され解析が必要になった時点（関数呼び出し時）にのみimportすることでそれを避ける。
-
-    モジュール変数 `analyze_reference`（このラッパー関数）自体をテストでmonkeypatchすれば、
-    pipeline.reference の実装有無やネットワークアクセスに関わらず、_run_generate側の
-    分岐ロジック（成功/cached/失敗のfail-open処理）だけを単体テストできる。
+    TTP v2 移行後、Studio 経路も v2 解析（映像+ffmpeg+vision の多モーダル解析）に統一する。
+    実際に参考動画URLが指定され解析が必要になった時点で import することで、テストで
+    `analyze_reference` を monkeypatch すれば実ネットワーク・実 yt-dlp/ffmpeg 抜きで
+    _run_generate 側の分岐ロジックだけを検証できる（設計は v1 時代と同型）。
     """
-    from pipeline import reference as reference_mod
-    return reference_mod.analyze_reference(url, cfg, progress_cb=progress_cb)
+    from pipeline import reference_v2 as reference_mod
+    return reference_mod.analyze_reference_v2(url, cfg=cfg, progress_cb=progress_cb)
 
 
 analyze_reference = _default_analyze_reference
@@ -591,25 +587,61 @@ class JobManager:
             else:
                 self._emit(job_id, "product", 5, "商品画像を取得できなかったため通常モードで続行します")
 
-        # --- 参考動画の解析（fail-open。参考動画リンク指定時のみ・director企画生成の直前） ------
-        # 成功時はdirector側へ reference=spec を渡し、参考動画の構成・テンポを企画に反映させる。
-        # 解析に失敗（analyze_referenceがok:Falseを返す/例外を送出）してもfailさせない: 警告
-        # メッセージをemitしたうえで通常の台本生成のまま続行する（product_urlと同じ「パイプライン
-        # 全体が必ず完成すること」を優先する既存設計を踏襲。BUG-10コメント参照）。
+        # --- 参考動画の解析（TTP v2 経路。reference_url は create_project 側で必須化済み） ----
+        # 成功時は director 側へ reference=spec を渡し、TTP スケルトンで骨まで再現する。
+        # 解析失敗時は fail する（TTP v2 移行後、reference 無しでの LLM 企画生成は director 側で
+        # TTPReferenceRequiredError になるため、ここでは通常フォールバックを取らずに明確に失敗させる）。
+        # 進捗は download / cuts / vision / onsets / fusion の5段に細分化して emit する。
         reference_spec = None
         reference_url = payload.get("reference_url")
         if reference_url:
-            self._emit(job_id, "reference", 4, "参考動画を解析中…")
+            self._emit(job_id, "reference", 3, "参考動画を解析中…")
+            v2_stage_messages = {
+                "cache_check": (3, "参考動画のキャッシュを確認中…"),
+                "download": (4, "参考動画をダウンロード中…"),
+                "detect_cuts": (5, "カット検出中…"),
+                "extract_frames": (5, "フレーム抽出中…"),
+                "vision": (6, "映像を解析中(vision)…"),
+                "vision_batch": (6, "映像を解析中(vision)…"),
+                "onsets": (7, "音響オンセットを検出中…"),
+                "asr": (7, "文字起こし中…"),
+                "fusion": (8, "統合解析中…"),
+                "done": (9, "参考動画の解析が完了しました"),
+            }
+
+            def _reference_progress(stage, detail=None):
+                info = v2_stage_messages.get(stage)
+                if info is None:
+                    return
+                pct, msg = info
+                self._emit(job_id, "reference", pct, msg)
+
             try:
-                ref_result = analyze_reference(reference_url, cfg, progress_cb=None)
+                ref_result = analyze_reference(reference_url, cfg, progress_cb=_reference_progress)
             except Exception as exc:
                 ref_result = {
                     "ok": False, "spec": None, "source": None, "cached": False, "warnings": [],
                     "error": "参考動画の解析中に予期しないエラーが発生しました: {}".format(exc),
                 }
+            # v1 spec（version=1）が返ってきた場合は案内文つきエラーへ翻訳する。
+            # TTP v2 移行後は director 側で v2 骨組みしか読めないため、旧キャッシュ・旧クライアント
+            # 由来の v1 spec は明示的にリジェクトする（無理に director へ渡すと KeyError 系で
+            # 分かりにくく落ちる）。version キーが欠けている spec は下流の run_director 側の
+            # build_shot_skeleton が cuts/shots_ref を見て組み立てるため通過させる。
+            if ref_result.get("ok"):
+                spec_ver = (ref_result.get("spec") or {}).get("version")
+                if spec_ver == 1:
+                    ref_result = {
+                        "ok": False, "spec": None, "source": ref_result.get("source"),
+                        "cached": ref_result.get("cached"),
+                        "warnings": ref_result.get("warnings") or [],
+                        "error": ("旧バージョン(v1)の参考動画解析結果が検出されました。"
+                                   "TTP v2 移行後は v2 spec が必要です。"
+                                   "assets/reference_cache/ の旧キャッシュを削除して再試行してください。"),
+                    }
             if ref_result.get("ok"):
                 if ref_result.get("cached"):
-                    self._emit(job_id, "reference", 5, "解析結果を再利用します")
+                    self._emit(job_id, "reference", 9, "解析結果を再利用します")
                 reference_spec = ref_result.get("spec")
                 spec_duration = (reference_spec or {}).get("duration_sec")
                 if spec_duration:
@@ -633,12 +665,17 @@ class JobManager:
                 }
             else:
                 reason = ref_result.get("error") or "不明なエラー"
-                self._emit(
-                    job_id, "reference", 5,
-                    "参考動画を解析できなかったため通常の台本生成で続行します: {}".format(reason),
-                )
                 reference_meta = {"url": reference_url, "ok": False, "error": reason}
                 reference_spec = None
+                project = projects.get_project(project_id)
+                if project is not None:
+                    project["reference"] = reference_meta
+                    projects.save_project(project)
+                # TTP v2 移行後、reference 無しでの LLM 企画生成は director 側で例外になる。
+                # 通常フォールバックを取らずに明確に fail させ、UI 側で「参考動画URLを見直す」
+                # 誘導ができるようにする（旧 v1 時代の fail-open は撤去）。
+                fail("参考動画を解析できませんでした: {}".format(reason))
+                return
             project = projects.get_project(project_id)
             if project is not None:
                 project["reference"] = reference_meta
@@ -1562,19 +1599,22 @@ def _render_project(project_id, plan, cfg):
     edit_profile_applied = False
     bgm_curve = None
     first_shot_impact_sec = None
+    main_dip_events = None
     if edit_prof is not None:
         try:
             durations = [s["duration_sec"] for s in telop_shots]
             enhancement = render.compute_edit_enhancement_kwargs(
-                durations, edit_prof, project_seed=project_id,
+                durations, edit_prof, project_seed=project_id, plan=plan,
             )
             sfx_specs = sfx_specs + enhancement["sfx_extra"]
             bgm_curve = enhancement["bgm_curve"]
             first_shot_impact_sec = enhancement["first_shot_impact_sec"]
+            main_dip_events = enhancement.get("main_dip_events")
             edit_profile_applied = True
         except Exception:
             bgm_curve = None
             first_shot_impact_sec = None
+            main_dip_events = None
             edit_profile_applied = False
 
     renders_dir = projects.renders_dir(project_id)
@@ -1587,7 +1627,7 @@ def _render_project(project_id, plan, cfg):
         ffmpeg_bin, str(concat_path), str(narration_path), str(pass1_path), str(ass_path), str(FONTS_DIR),
         bgm_path=bgm_path, out_duration=out_duration, loudnorm_measured=None,
         bgm_gain_db=bgm_gain_db, sfx=sfx_specs, ducking=bgm_ducking,
-        bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec,
+        bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec, main_dip_events=main_dip_events,
     )
     res1 = render.run_ffmpeg(cmd1, timeout_sec=_FFMPEG_TIMEOUT_SEC)
     measured = _parse_loudnorm_json(res1["stderr"])
@@ -1602,14 +1642,14 @@ def _render_project(project_id, plan, cfg):
             ffmpeg_bin, str(concat_path), str(narration_path), str(output_path), str(ass_path), str(FONTS_DIR),
             bgm_path=bgm_path, out_duration=out_duration, loudnorm_measured=None,
             bgm_gain_db=bgm_gain_db, sfx=sfx_specs, ducking=bgm_ducking,
-            bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec,
+            bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec, main_dip_events=main_dip_events,
         )
     else:
         cmd2 = render.build_final_cmd(
             ffmpeg_bin, str(concat_path), str(narration_path), str(output_path), str(ass_path), str(FONTS_DIR),
             bgm_path=bgm_path, out_duration=out_duration, loudnorm_measured=measured,
             bgm_gain_db=bgm_gain_db, sfx=sfx_specs, ducking=bgm_ducking,
-            bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec,
+            bgm_curve=bgm_curve, first_shot_impact_sec=first_shot_impact_sec, main_dip_events=main_dip_events,
         )
     res2 = render.run_ffmpeg(cmd2, timeout_sec=_FFMPEG_TIMEOUT_SEC)
     if res2["returncode"] != 0:

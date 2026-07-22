@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """台本・キャプション文字列のコンプライアンス検査。
 
-CLAUDE.md「禁止事項（ONE運営）」準拠:
+運用ルール準拠:
 - 景品表示法NG表現（「絶対稼げる」「100%成功」等）を禁止
-- 競合名義（「みお」「@mio_ai_insta_」）を成果物へ一切登場させない
+- 特定の個人名・競合アカウント名を成果物へ一切登場させない
+  （具体的な実名リストは公開対象外の `config.local/ngwords.json` に別出しし、
+   ローカル環境ごとに管理する。ファイルが無ければ空リストで動作。）
 - 特定商取引法の観点（解約条件の不明示等）は注意フラグとして検出する
 
 違反があれば run を止め、理由を report に記録できるよう check_plan() が
@@ -13,7 +15,15 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import json
+import os
 import re
+from pathlib import Path
+
+# 公開対象に含めない実名NGワード辞書のパス（プロジェクト直下 `config.local/ngwords.json`）。
+# フォーマット: {"ng_words": ["...", ...]} または ["...", ...]（後者は後方互換）。
+# 無ければ空リスト扱い＝tracked コードだけで動作する。
+_LOCAL_NG_WORDS_PATH = Path(__file__).resolve().parents[1] / "config.local" / "ngwords.json"
 
 DEFAULT_NG_WORDS = [
     "絶対稼げる",
@@ -23,9 +33,38 @@ DEFAULT_NG_WORDS = [
     "元本保証",
     "必ず儲かる",
     "誰でも稼げる",
-    "みお",
-    "@mio_ai_insta_",
 ]
+
+
+def _load_local_ng_words():
+    """`config.local/ngwords.json` から追加NGワードを読み込む。無ければ空リスト。
+
+    tracked コード側には特定の実名は残さず、ローカル辞書で維持する運用のため。
+    JSON破損や読み取り失敗時は空リスト（例外は投げず、既定挙動を維持）。
+    """
+    path = _LOCAL_NG_WORDS_PATH
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        words = data.get("ng_words") or []
+    elif isinstance(data, list):
+        words = data
+    else:
+        return []
+    return [w for w in words if isinstance(w, str) and w]
+
+
+def get_effective_ng_words():
+    """DEFAULT_NG_WORDS にローカル辞書の追加分をマージして返す。"""
+    merged = list(DEFAULT_NG_WORDS)
+    for w in _load_local_ng_words():
+        if w not in merged:
+            merged.append(w)
+    return merged
 
 # 特定商取引法の観点で「言及している場合は解約条件も明示すべき」注意ワード
 # （出現したら警告のみ・runは止めない）
@@ -96,7 +135,7 @@ def check_plan(plan, ng_words=None, ng_patterns=None):
     （後方互換）。マッチした場合は violations に {"field","word","text","pattern"}
     を追加する（"word"にはマッチした実際の部分文字列を入れる）。
     """
-    ng_words = ng_words if ng_words is not None else DEFAULT_NG_WORDS
+    ng_words = ng_words if ng_words is not None else get_effective_ng_words()
     texts = _collect_texts(plan)
 
     violations = []

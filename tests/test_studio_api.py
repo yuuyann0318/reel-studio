@@ -73,9 +73,6 @@ def test_create_project_rejects_invalid_product_url(bad_url):
         "not-a-url",
         "ftp://example.com/video",
         "javascript:alert(1)",
-        "",
-        "   ",
-        123,
     ],
 )
 def test_create_project_rejects_invalid_reference_url(bad_url):
@@ -84,9 +81,27 @@ def test_create_project_rejects_invalid_reference_url(bad_url):
     assert resp.json()["error"]["code"] == "invalid_reference_url"
 
 
+@pytest.mark.parametrize(
+    "missing_val",
+    [None, "", "   ", 123],
+)
+def test_create_project_requires_reference_url(missing_val):
+    """TTP v2 移行後、参考動画URLは必須。未指定/空/型不一致は 400 reference_url_required。"""
+    body = {"theme": "テスト", "backend": "mock"}
+    if missing_val is not None:
+        body["reference_url"] = missing_val
+    resp = client.post("/api/projects", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "reference_url_required"
+
+
+_DUMMY_REFERENCE_URL = "https://www.tiktok.com/@example/video/123"
+
+
 def test_create_project_omits_product_url_when_not_provided(monkeypatch):
     """product_urlを指定しない従来どおりの呼び出しは、job_manager.start_generateへ
-    product_url=Noneで渡り、既存の非商品モードの挙動を壊さないこと。"""
+    product_url=Noneで渡り、既存の非商品モードの挙動を壊さないこと。
+    reference_url は TTP v2 で必須のためダミーを付ける。"""
     from studio.server import app as app_mod
 
     captured = {}
@@ -99,12 +114,15 @@ def test_create_project_omits_product_url_when_not_provided(monkeypatch):
 
     monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
 
-    resp = client.post("/api/projects", json={"theme": "テスト:商品URL無し", "backend": "mock"})
+    resp = client.post("/api/projects", json={
+        "theme": "テスト:商品URL無し", "backend": "mock",
+        "reference_url": _DUMMY_REFERENCE_URL,
+    })
     assert resp.status_code == 202
     project_id = resp.json()["id"]
     try:
         assert captured["product_url"] is None
-        assert captured["reference_url"] is None
+        assert captured["reference_url"] == _DUMMY_REFERENCE_URL
     finally:
         shutil.rmtree(projects.project_dir(project_id), ignore_errors=True)
 
@@ -129,7 +147,10 @@ def test_create_project_threads_style_into_start_generate(monkeypatch):
 
     monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
 
-    resp = client.post("/api/projects", json={"theme": "テスト:style疎通", "backend": "mock", "style": "vertical_hook"})
+    resp = client.post("/api/projects", json={
+        "theme": "テスト:style疎通", "backend": "mock", "style": "vertical_hook",
+        "reference_url": _DUMMY_REFERENCE_URL,
+    })
     assert resp.status_code == 202
     project_id = resp.json()["id"]
     try:
@@ -157,12 +178,15 @@ def test_create_project_threads_product_url_into_start_generate_and_persists_non
     monkeypatch.setattr(app_mod.job_manager, "start_generate", _fake_start_generate)
 
     product_url = "https://shop.example.com/item/42"
-    resp = client.post("/api/projects", json={"theme": "テスト:商品URL疎通", "backend": "mock", "product_url": product_url})
+    resp = client.post("/api/projects", json={
+        "theme": "テスト:商品URL疎通", "backend": "mock", "product_url": product_url,
+        "reference_url": _DUMMY_REFERENCE_URL,
+    })
     assert resp.status_code == 202
     project_id = resp.json()["id"]
     try:
         assert captured["product_url"] == product_url
-        assert captured["reference_url"] is None
+        assert captured["reference_url"] == _DUMMY_REFERENCE_URL
         fetched = client.get("/api/projects/{}".format(project_id)).json()
         assert fetched["product"] is None
     finally:
@@ -426,7 +450,20 @@ def test_generate_edit_render_e2e(monkeypatch):
 
     monkeypatch.setattr(director_mod, "run_director", _fake_run_director)
 
-    resp = client.post("/api/projects", json={"theme": "テストE2Eテーマ", "duration": 6, "backend": "mock"})
+    # TTP v2 移行後、実 v2 解析は avoid（重い）ため analyze_reference を差し替え、
+    # spec は director 側で no_llm=True に流されるので None のままで良い。
+    from studio.server import jobs as jobs_mod
+    monkeypatch.setattr(
+        jobs_mod, "analyze_reference",
+        lambda url, cfg, progress_cb=None: {
+            "ok": True, "spec": {"version": 2, "duration_sec": 6.0, "cuts": [], "sfx_events": [], "telops": []},
+            "source": "cache", "cached": True, "warnings": [], "error": None,
+        },
+    )
+    resp = client.post("/api/projects", json={
+        "theme": "テストE2Eテーマ", "duration": 6, "backend": "mock",
+        "reference_url": _DUMMY_REFERENCE_URL,
+    })
     assert resp.status_code == 202
     project_id = resp.json()["id"]
 

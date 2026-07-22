@@ -40,8 +40,9 @@ from pipeline.config import load_config
 from pipeline.visual.base import VisualBackend, VisualBackendError
 
 # `higgsfield` バイナリが PATH に無い環境向けの明示フォールバック（node同梱パス）。
-_NODE_BIN_FALLBACK = (
-    "/Users/yuuya/claude code/node-v22.11.0-darwin-arm64/bin/higgsfield"
+# 絶対ユーザー名を含めないため HOME 基準で解決する（この Mac では従来と同じ場所を指す）。
+_NODE_BIN_FALLBACK = os.path.join(
+    os.path.expanduser("~"), "claude code", "node-v22.11.0-darwin-arm64", "bin", "higgsfield"
 )
 
 _DEFAULT_MODEL = "seedance_2_0_mini"

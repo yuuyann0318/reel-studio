@@ -170,10 +170,10 @@ function toggleCreateForm(force) {
   setState({ showCreateForm: typeof force === "boolean" ? force : !state.showCreateForm, createError: null });
 }
 
-async function submitCreateProject({ theme, duration, backend, style }) {
+async function submitCreateProject({ theme, duration, backend, style, referenceUrl }) {
   setState({ createSubmitting: true, createError: null });
   try {
-    const { id } = await api.createProject({ theme, duration, backend, style });
+    const { id } = await api.createProject({ theme, duration, backend, style, referenceUrl });
     setState({ createSubmitting: false, showCreateForm: false, createForm: { theme: "", duration: 30, backend: "mock", style: "default" } });
     await loadProjects();
     await openProject(id); // status: generating のはずなので openProject 内で自動的に SSE 購読される
@@ -181,6 +181,8 @@ async function submitCreateProject({ theme, duration, backend, style }) {
     setState({ createSubmitting: false, createError: err });
   }
 }
+
+function setCreateError(err) { setState({ createError: err }); }
 
 // ---------- ショット / プラン編集 ----------
 function selectShot(id) { setState({ selectedShotId: id, previewMode: "shot" }); }
@@ -389,7 +391,7 @@ function renderHeader() {
 // ---------- 描画ディスパッチ ----------
 const actions = {
   loadProjects, openProject, reopenCurrent, closeProject,
-  toggleCreateForm, submitCreateProject,
+  toggleCreateForm, submitCreateProject, setCreateError,
   selectShot, moveShotSelection,
   updateShotField, updateShotTrim, toggleShotEnabled,
   updateBgm, addSfx, removeSfx, updateSfx, updateSubtitleStyle,

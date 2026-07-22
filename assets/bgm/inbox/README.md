@@ -17,9 +17,10 @@
 
 ## 手動取り込みコマンド
 
+プロジェクトルート (`reel-studio/`) で以下を実行してください。
+
 ```bash
-"/Users/yuuya/claude code/higgsfield-auto-reel/.venv/bin/python3" -c \
-  "from pipeline import bgm_library; print(bgm_library.import_inbox())"
+./.venv/bin/python3 -c "from pipeline import bgm_library; print(bgm_library.import_inbox())"
 ```
 
 ## 重複スキップ

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """claude -p ヘッドレス実行ラッパ（Fable 5「AIディレクター」呼び出し用）。
 
-/Users/yuuya/claude code/video-auto-editor/pipeline/claude_runner.py を移植
+video-auto-editor/pipeline/claude_runner.py を移植
 （同一パターン: subprocess.Popen / shell=False / start_new_session=True /
 SIGTERM→5秒→SIGKILL / エンベロープJSON→result文字列→最初の{〜最後の}救済抽出）。
 
@@ -51,11 +51,25 @@ def _kill_tree(proc):
         pass
 
 
-def _run_claude(claude_bin: str, prompt: str, model: "Optional[str]", timeout_sec: float) -> str:
+def _run_claude(
+    claude_bin: str,
+    prompt: str,
+    model: "Optional[str]",
+    timeout_sec: float,
+    allowed_tools: "Optional[str]" = None,
+    add_dirs: "Optional[list]" = None,
+    max_turns: int = 1,
+) -> str:
     cmd = [str(claude_bin), "-p", prompt, "--output-format", "json"]
     if model:
         cmd += ["--model", str(model)]
-    cmd += ["--max-turns", "1", "--permission-mode", "default", "--tools", ""]
+    if allowed_tools is not None:
+        # Read等をvisionのために許可する場合はここに渡す。既定(None)は従来のtools=""を維持。
+        cmd += ["--max-turns", str(max_turns), "--permission-mode", "default", "--allowedTools", str(allowed_tools)]
+    else:
+        cmd += ["--max-turns", str(max_turns), "--permission-mode", "default", "--tools", ""]
+    for d in (add_dirs or []):
+        cmd += ["--add-dir", str(d)]
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -165,7 +179,8 @@ def call_claude_json(prompt: str, timeout_sec: int = 600, model_override: "Optio
          "fallback_from": str|None, "fallback_reason": str|None}
     """
     cfg = load_config()
-    claude_bin = cfg.get("claude_bin", "claude")
+    # 空文字/未設定は PATH 解決(`claude` コマンド名)に委ねる。
+    claude_bin = cfg.get("claude_bin") or "claude"
     chain = [model_override] if model_override else _chain_for(cfg)
     primary = chain[0] if chain else None
 
@@ -212,3 +227,127 @@ def call_claude_json(prompt: str, timeout_sec: int = 600, model_override: "Optio
         "fallback_from": None,
         "fallback_reason": None,
     }
+
+
+def call_claude_vision_json(
+    prompt: str,
+    image_paths: list,
+    timeout_sec: int = 600,
+    model_override: "Optional[str]" = None,
+) -> dict:
+    """claude -p に Read ツール権限を付けて画像フレームを解析させ、内側JSON(配列 or dict)を返す。
+
+    docs/TTP_V2_MIGRATION.md の vision スパイクで確認済みの構成
+    (--allowedTools "Read" + --output-format json + 絶対パス埋め込み) を踏襲する。
+    画像パスは絶対パスで prompt に埋め込む前提。呼び出し側で1回のcallに複数画像をバッチする。
+    """
+    cfg = load_config()
+    # 空文字/未設定は PATH 解決(`claude` コマンド名)に委ねる。
+    claude_bin = cfg.get("claude_bin") or "claude"
+    chain = [model_override] if model_override else _chain_for(cfg)
+    primary = chain[0] if chain else None
+
+    add_dirs = []
+    seen = set()
+    for p in (image_paths or []):
+        if not p:
+            continue
+        d = os.path.dirname(os.path.abspath(str(p)))
+        if d and d not in seen:
+            seen.add(d)
+            add_dirs.append(d)
+
+    attempts = []
+    last_raw = ""
+    for model in chain:
+        try:
+            stdout = _run_claude(
+                claude_bin,
+                prompt,
+                model,
+                timeout_sec,
+                allowed_tools="Read",
+                add_dirs=add_dirs,
+                max_turns=max(2, len(image_paths or []) + 1),
+            )
+        except Exception as exc:
+            attempts.append({"model": model, "ok": False, "error": str(exc)[:300]})
+            continue
+        last_raw = stdout
+        inner, err = _extract_inner_array_or_dict(stdout)
+        if inner is not None:
+            attempts.append({"model": model, "ok": True})
+            actual_model = _actual_model_from_envelope(stdout, model)
+            fallback_from = None
+            fallback_reason = None
+            if model != primary and primary is not None:
+                prior_failure = next(
+                    (a for a in reversed(attempts) if a["model"] == primary and not a["ok"]), None
+                )
+                fallback_from = primary
+                fallback_reason = prior_failure["error"] if prior_failure else "unknown"
+            return {
+                "ok": True,
+                "data": inner,
+                "raw": stdout,
+                "model_used": actual_model,
+                "error": None,
+                "attempts": attempts,
+                "fallback_from": fallback_from,
+                "fallback_reason": fallback_reason,
+            }
+        attempts.append({"model": model, "ok": False, "error": err})
+
+    return {
+        "ok": False,
+        "data": None,
+        "raw": last_raw,
+        "model_used": None,
+        "error": "all_models_failed",
+        "attempts": attempts,
+        "fallback_from": None,
+        "fallback_reason": None,
+    }
+
+
+def _extract_inner_array_or_dict(stdout_str):
+    """visionプロンプトはJSON配列を返す場合とオブジェクトを返す場合の両対応。"""
+    try:
+        outer = json.loads((stdout_str or "").strip())
+    except Exception:
+        return None, "envelope_json_parse_failed"
+    if not isinstance(outer, dict):
+        return None, "envelope_not_dict"
+    if outer.get("is_error") is True:
+        status = outer.get("api_error_status")
+        msg = outer.get("result")
+        detail = "is_error_true"
+        if status is not None:
+            detail += "({})".format(status)
+        if isinstance(msg, str) and msg:
+            detail += ": {}".format(msg[:200])
+        return None, detail
+    result = outer.get("result")
+    if not isinstance(result, str):
+        try:
+            result = json.dumps(result, ensure_ascii=False)
+        except Exception:
+            return None, "result_not_stringifiable"
+    # まず配列を優先探索
+    fb = result.find("[")
+    lb = result.rfind("]")
+    fo = result.find("{")
+    lo = result.rfind("}")
+    candidates = []
+    if fb != -1 and lb > fb:
+        candidates.append(("array", result[fb:lb + 1]))
+    if fo != -1 and lo > fo:
+        candidates.append(("object", result[fo:lo + 1]))
+    # 開始位置が早い方（応答本体である可能性が高い）から試す
+    candidates.sort(key=lambda x: result.find(x[1][0]))
+    for _kind, blob in candidates:
+        try:
+            return json.loads(blob), None
+        except Exception:
+            continue
+    return None, "no_valid_json_in_result"

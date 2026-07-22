@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -27,6 +28,7 @@ from pipeline.config import load_config, project_root
 from pipeline import director
 from pipeline import compliance
 from pipeline import edit_profile
+from pipeline import reference_v2
 from pipeline import subtitles
 from pipeline import render
 from pipeline import tts as tts_mod
@@ -57,6 +59,66 @@ def _resolve_animation_enabled():
     except Exception:
         pass
     return True
+
+
+def _scale_shot_for_display(shot, display_duration_sec):
+    """BUG-55: shot の duration_sec を display_duration_sec に付け替えつつ、
+    caption_in_offset_sec / caption_out_offset_sec を同じ比で線形スケールする(shot 表示尺の
+    境界内に caption が収まるようにする)。原尺=0/None のときはスケール比=1で通す。
+    """
+    result = dict(shot)
+    result["duration_sec"] = display_duration_sec
+    original = shot.get("duration_sec")
+    if original and original > 0 and abs(display_duration_sec - original) > 1e-6:
+        scale = display_duration_sec / original
+        for key in ("caption_in_offset_sec", "caption_out_offset_sec"):
+            v = shot.get(key)
+            if v is None:
+                continue
+            result[key] = float(v) * scale
+    return result
+
+
+def _build_display_scaled_plan(plan, shot_display_durations):
+    """BUG-55: plan.shots と plan.sfx_plan の shot 内 offset を表示尺スケールで補正した plan コピーを返す。
+    元 plan は変更しない(compute_edit_enhancement_kwargs / sfx_planner 側で使う一時的コピー)。
+    """
+    if not isinstance(plan, dict):
+        return plan
+    scaled = dict(plan)
+    shots = plan.get("shots") or []
+    id_to_scale = {}
+    scaled_shots = []
+    for s in shots:
+        sid = s.get("id")
+        new_dur = shot_display_durations.get(sid, s.get("duration_sec"))
+        original = s.get("duration_sec") or 0.0
+        try:
+            new_dur_f = float(new_dur)
+        except (TypeError, ValueError):
+            new_dur_f = original
+        scale = (new_dur_f / original) if original and original > 0 else 1.0
+        id_to_scale[sid] = scale
+        scaled_shots.append(_scale_shot_for_display(s, new_dur_f))
+    scaled["shots"] = scaled_shots
+    if plan.get("sfx_plan") is not None:
+        scaled_sfx = []
+        for ev in plan.get("sfx_plan") or []:
+            if not isinstance(ev, dict):
+                continue
+            anc = ev.get("t_anchor") or {}
+            sid = anc.get("shot_id")
+            scale = id_to_scale.get(sid, 1.0)
+            new_anc = dict(anc)
+            if anc.get("offset_sec") is not None:
+                try:
+                    new_anc["offset_sec"] = float(anc.get("offset_sec", 0.0)) * scale
+                except (TypeError, ValueError):
+                    pass
+            new_ev = dict(ev, t_anchor=new_anc)
+            scaled_sfx.append(new_ev)
+        scaled["sfx_plan"] = scaled_sfx
+    return scaled
 
 
 def _slugify(theme, max_len=24):
@@ -117,6 +179,87 @@ class StageError(RuntimeError):
     pass
 
 
+def _load_fish_audio_key_from_secrets():
+    """~/.claude/secrets/fish_audio_key があれば FISH_AUDIO_API_KEY 環境変数へ載せる。
+
+    studio/start_server.sh と同じ方式で CLI 起動時にもキーを読み込む（キー値のログ出力は禁止・
+    存在有無だけ True/False で返す）。既に環境変数が設定されていれば上書きしない。
+    """
+    if os.environ.get("FISH_AUDIO_API_KEY"):
+        return True
+    key_file = Path.home() / ".claude" / "secrets" / "fish_audio_key"
+    try:
+        if key_file.is_file():
+            content = key_file.read_text(encoding="utf-8").strip()
+            if content:
+                os.environ["FISH_AUDIO_API_KEY"] = content
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _make_local_file_fetcher(local_path):
+    """--reference-file 指定時に reference_v2.default_fetch_video を差し替えるフェッチャを返す。
+
+    URL の代わりにローカル mp4 を採用し、同梱 ffmpeg で音声を分離する。tmp_dir を作って
+    その中に video.mp4 / audio.m4a を配置し、analyze_reference_v2 の想定と揃える
+    （tmp_dir は解析後に _cleanup() で削除される）。
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    local_abs = Path(local_path).expanduser().resolve()
+
+    def _fetch(url_ignored, cfg=None):
+        cfg = cfg or {}
+        if not local_abs.is_file():
+            raise RuntimeError("--reference-file が存在しません: {}".format(local_abs))
+        ffmpeg_bin = cfg.get("ffmpeg_bin") or str(project_root() / "bin" / "ffmpeg")
+        ffprobe_bin = cfg.get("ffprobe_bin") or str(project_root() / "bin" / "ffprobe")
+        tmp_dir = _tempfile.mkdtemp(prefix=reference_v2._TMP_DIR_CLEANUP_PREFIX_V2)
+        try:
+            video_path = str(Path(tmp_dir) / "video.mp4")
+            _shutil.copyfile(str(local_abs), video_path)
+            audio_path = str(Path(tmp_dir) / "audio.m4a")
+            try:
+                reference_v2._extract_audio(ffmpeg_bin, video_path, audio_path, copy=True)
+            except Exception:
+                reference_v2._extract_audio(ffmpeg_bin, video_path, audio_path, copy=False)
+            from pipeline import reference as ref_v1
+            duration = ref_v1._probe_duration(ffprobe_bin, video_path) or 0.0
+            return {
+                "video_path": video_path,
+                "audio_path": audio_path,
+                "duration_sec": duration,
+                "tmp_dir": tmp_dir,
+            }
+        except Exception:
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+
+    return _fetch
+
+
+class TTPReferenceMissingCLIError(SystemExit):
+    """CLI 起動時に --reference-url / --reference-file が無く LLM 経路が呼ばれたことを示す（exit=2）。"""
+
+
+def _emit_reference_required_error(theme):
+    msg = (
+        "参考動画URLが指定されていません。TTP v2 移行後、LLM 経路の企画生成には参考動画が必須です。\n\n"
+        "使い方の例:\n"
+        "  python run.py --theme \"{theme}\" --duration 30 --backend mock \\\n"
+        "    --reference-url \"https://www.tiktok.com/@example/video/123\"\n\n"
+        "  （ネットワーク不能な環境ではローカルの参考動画を渡せます）\n"
+        "  python run.py --theme \"{theme}\" --duration 30 --backend mock \\\n"
+        "    --reference-file /path/to/reference.mp4\n\n"
+        "  （テスト・スモーク用の決定論的テンプレ生成なら）\n"
+        "  python run.py --theme \"{theme}\" --duration 30 --backend mock --no-llm"
+    ).format(theme=theme)
+    print("[run] error: " + msg, file=sys.stderr)
+
+
 def resolve_ng_words(cfg):
     """config の brand_rules.ng_words を「デフォルトNGワードへの追加分」として解決する。
 
@@ -124,7 +267,7 @@ def resolve_ng_words(cfg):
     （景表法NG表現・競合名義等）は常に有効にする。config側の値は追加分としてマージする。
     """
     config_ng_words = (cfg.get("brand_rules") or {}).get("ng_words") or []
-    ng_words = list(compliance.DEFAULT_NG_WORDS)
+    ng_words = list(compliance.get_effective_ng_words())
     for w in config_ng_words:
         if w not in ng_words:
             ng_words.append(w)
@@ -154,7 +297,8 @@ def _timed_stage(report, name):
     return _Ctx()
 
 
-def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default"):
+def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default",
+                  reference_url=None, reference_file=None):
     report = {
         "theme": theme,
         "target_duration_sec": target_duration_sec,
@@ -170,6 +314,54 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     report["run_id"] = run_id
     report["run_dir"] = str(run_dir)
 
+    # --- Stage 0: 参考動画解析（reference_spec v2 の取得。director 直前で行う） ---
+    # LLM 経路(no_llm=False)では reference_url または reference_file が必須。無ければ
+    # director.run_director が TTPReferenceRequiredError を送出するので、その前段でも
+    # 分かりやすいエラーを出せるよう先にチェックする（実際の送出は director 側で行う）。
+    reference_spec = None
+    if reference_url or reference_file:
+        try:
+            with _timed_stage(report, "reference"):
+                if reference_file:
+                    fetch_video = _make_local_file_fetcher(reference_file)
+                    ref_input_url = "file://{}".format(Path(reference_file).expanduser().resolve())
+                else:
+                    fetch_video = None
+                    ref_input_url = reference_url
+                ref_result = reference_v2.analyze_reference_v2(
+                    ref_input_url, cfg=cfg, fetch_video=fetch_video,
+                )
+                if not ref_result.get("ok"):
+                    raise StageError(
+                        "参考動画の解析に失敗しました: {}".format(ref_result.get("error") or "unknown")
+                    )
+                reference_spec = ref_result.get("spec")
+                # spec を run_dir へ保存（下流のデバッグ・再現性用）
+                try:
+                    (run_dir / "reference_spec.json").write_text(
+                        json.dumps(reference_spec, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+                except Exception:
+                    pass
+                report["stages"]["reference"]["source"] = ref_result.get("source")
+                report["stages"]["reference"]["cached"] = bool(ref_result.get("cached"))
+                report["stages"]["reference"]["cuts_count"] = len(
+                    (reference_spec or {}).get("cuts") or []
+                )
+                report["stages"]["reference"]["telops_count"] = len(
+                    (reference_spec or {}).get("telops") or []
+                )
+                report["stages"]["reference"]["sfx_count"] = len(
+                    (reference_spec or {}).get("sfx_events") or []
+                )
+                report["stages"]["reference"]["warnings"] = list(ref_result.get("warnings") or [])
+                report["stages"]["reference"]["duration_sec"] = (
+                    reference_spec or {}
+                ).get("duration_sec")
+        except Exception:
+            _write_report(report)
+            return report
+
     # edit enhancement層（カット点SE/パンチイン/BGM音量カーブ/フックのインパクト）。
     # プロファイル読み込み自体が失敗しても従来レンダを継続する（edit_prof=Noneなら以降すべて無効化）。
     # 編集レシピ選択の入力: run_id は director 実行時にはまだ確定していないため、
@@ -184,7 +376,8 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     try:
         with _timed_stage(report, "director"):
             plan = director.run_director(
-                theme, cfg, target_duration_sec=target_duration_sec, no_llm=no_llm, quality=quality, style=style
+                theme, cfg, target_duration_sec=target_duration_sec, no_llm=no_llm, quality=quality, style=style,
+                reference=reference_spec,
             )
             (run_dir / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
             report["stages"]["director"]["source"] = plan.get("meta", {}).get("source")
@@ -356,8 +549,11 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     try:
         with _timed_stage(report, "subtitles"):
             hook_shot_id = shots[0]["id"] if shots else None
+            # BUG-55: 表示尺(shot_display_durations)がplan の duration_sec と異なる場合、
+            # caption_in_offset_sec / caption_out_offset_sec もその比で線形にスケールする。
+            # スケールしないと caption 終了時刻が次shot に食い込み表示重なりが発生する。
             telop_shots = [
-                dict(s, duration_sec=shot_display_durations.get(s["id"], s["duration_sec"])) for s in shots
+                _scale_shot_for_display(s, shot_display_durations.get(s["id"], s["duration_sec"])) for s in shots
             ]
             telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=hook_shot_id)
             # 動画ごとに決定論的にテロップスタイルを1つ選ぶ（run_idをseedにするので同じ動画は同じスタイル）。
@@ -413,20 +609,27 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             edit_sfx = []
             bgm_curve = None
             first_shot_impact_sec = None
+            main_dip_events = None
             if edit_prof is not None:
                 try:
                     durations = [shot_display_durations.get(s["id"], s["duration_sec"]) for s in shots]
+                    # BUG-55: SFX の shot 内 offset も表示尺スケールで補正する(caption と同機構)。
+                    # sfx_planner は plan.shots[i].caption_in_offset_sec / t_anchor.offset_sec を
+                    # そのまま使うため、原尺スケールのままだと SE が shot 外に飛ぶ。
+                    scaled_plan = _build_display_scaled_plan(plan, shot_display_durations)
                     enhancement = render.compute_edit_enhancement_kwargs(
-                        durations, edit_prof, project_seed=run_id
+                        durations, edit_prof, project_seed=run_id, plan=scaled_plan,
                     )
                     edit_sfx = enhancement["sfx_extra"]
                     bgm_curve = enhancement["bgm_curve"]
                     first_shot_impact_sec = enhancement["first_shot_impact_sec"]
+                    main_dip_events = enhancement.get("main_dip_events")
                     edit_profile_applied = True
                 except Exception:
                     edit_sfx = []
                     bgm_curve = None
                     first_shot_impact_sec = None
+                    main_dip_events = None
                     edit_profile_applied = False
             report["stages"]["render"]["edit_profile_applied"] = edit_profile_applied
 
@@ -453,6 +656,7 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                     str(ass_path), str(_FONTS_DIR), bgm_path=bgm_path, out_duration=out_duration,
                     loudnorm_measured=None, sfx=edit_sfx, bgm_curve=bgm_curve,
                     first_shot_impact_sec=first_shot_impact_sec,
+                    main_dip_events=main_dip_events,
                 )
             else:
                 cmd2 = render.build_final_cmd(
@@ -460,6 +664,7 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                     str(ass_path), str(_FONTS_DIR), bgm_path=bgm_path, out_duration=out_duration,
                     loudnorm_measured=measured, sfx=edit_sfx, bgm_curve=bgm_curve,
                     first_shot_impact_sec=first_shot_impact_sec,
+                    main_dip_events=main_dip_events,
                 )
             res2 = render.run_ffmpeg(cmd2, timeout_sec=_FFMPEG_TIMEOUT_SEC)
             if res2["returncode"] != 0:
@@ -492,7 +697,16 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
 def _write_report(report):
     out_dir = project_root() / "output"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload = json.dumps(report, ensure_ascii=False, indent=2)
+    # 既存互換: output/report.json は「最新1本」の意味で維持する。
+    (out_dir / "report.json").write_text(payload, encoding="utf-8")
+    # run_id ごとの永続保存: output/reports/<run_id>.json を追加で書き出す（複数本の並列/連続実行時、
+    # report.json が最新1本で上書きされて過去 run のトレースを失う問題への対処）。
+    run_id = report.get("run_id")
+    if run_id:
+        reports_dir = out_dir / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        (reports_dir / "{}.json".format(run_id)).write_text(payload, encoding="utf-8")
 
 
 def main(argv=None) -> int:
@@ -511,16 +725,39 @@ def main(argv=None) -> int:
         help="AIディレクターの企画スタイル。default=従来の企画・カット割り(既定) / "
              "vertical_hook=縦書きテロップ・高速カット向けのTTP構成",
     )
+    parser.add_argument(
+        "--reference-url", default=None,
+        help="参考動画URL（TikTok等）。TTP v2 移行後、LLM経路の企画生成には必須（--no-llm 指定時は不要）",
+    )
+    parser.add_argument(
+        "--reference-file", default=None,
+        help="参考動画のローカルmp4パス。DL不能な環境で --reference-url の代わりに使う",
+    )
     args = parser.parse_args(argv)
+
+    # Fish Audio API キー: ~/.claude/secrets/fish_audio_key があれば環境変数へ載せる
+    # （キー値のログ出力は禁止・存在有無だけ内部で保持）。
+    _load_fish_audio_key_from_secrets()
 
     cfg = load_config()
     target_duration_sec = args.duration if args.duration is not None else cfg.get("target_duration_sec", 30)
     backend_name = args.backend or cfg.get("backend", "mock")
     quality = args.quality or cfg.get("director_quality", "supreme")
 
-    report = run_pipeline(
-        args.theme, target_duration_sec, backend_name, args.no_llm, cfg, quality=quality, style=args.style
-    )
+    # TTP v2 モード必須ガード: reference_url/file が無く --no-llm でもない場合は
+    # 分かりやすい日本語エラー+使用例を表示して exit 2。
+    if not args.no_llm and not args.reference_url and not args.reference_file:
+        _emit_reference_required_error(args.theme)
+        return 2
+
+    try:
+        report = run_pipeline(
+            args.theme, target_duration_sec, backend_name, args.no_llm, cfg, quality=quality, style=args.style,
+            reference_url=args.reference_url, reference_file=args.reference_file,
+        )
+    except director.TTPReferenceRequiredError:
+        _emit_reference_required_error(args.theme)
+        return 2
 
     print("[run] run_id={}".format(report.get("run_id")))
     for name, info in report["stages"].items():

@@ -93,6 +93,11 @@ export function renderProjectList(container, state, actions) {
         </select>
         <div class="field-hint">縦書きフックは明朝体の縦組みテロップ＋約2秒刻みの高速カット構成</div>
       </div>
+      <div class="field">
+        <label for="f-reference-url">参考動画URL（必須）</label>
+        <input class="input" id="f-reference-url" name="reference_url" type="url" placeholder="https://www.tiktok.com/@example/video/123" value="${escapeHtml(createForm.referenceUrl || "")}" required maxlength="500" autocomplete="off" />
+        <div class="field-hint">TTP v2 では参考動画URLが必須です。構成・テンポを再現しますが文言はコピーしません</div>
+      </div>
       ${createError ? `<div class="field-hint" style="color:var(--danger)" role="alert">${escapeHtml(createError.message)}${createError.code ? ` (code: ${escapeHtml(createError.code)})` : ""}</div>` : ""}
       <div class="form-actions">
         <button type="submit" class="btn btn--primary btn--block" ${createSubmitting ? "disabled" : ""}>${createSubmitting ? "作成中…" : "生成開始"}</button>
@@ -131,11 +136,18 @@ export function renderProjectList(container, state, actions) {
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       const fd = new FormData(form);
+      const referenceUrl = String(fd.get("reference_url") || "").trim();
+      if (!referenceUrl) {
+        // TTP v2 移行後、参考動画URLは必須。空なら送信せずエラーメッセージを出す。
+        actions.setCreateError({ message: "参考動画URLが必要です（TTP v2）", code: "reference_url_required" });
+        return;
+      }
       actions.submitCreateProject({
         theme: fd.get("theme"),
         duration: Number(fd.get("duration")),
         backend: fd.get("backend"),
         style: fd.get("style"),
+        referenceUrl,
       });
     });
   }

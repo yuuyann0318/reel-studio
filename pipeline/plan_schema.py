@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""reel_plan（テーマ→9:16リール企画）のバリデーション・正規化・ルールベース代替生成。
+"""reel_plan（テーマ→9:16リール企画）のバリデーション・正規化・スモーク代替生成。
 
 video-auto-editor/pipeline/plan_schema.py のパターン（validate_plan が (ok, errors,
-normalized_plan) を返す・エラーは矯正リトライへ差し戻す・claude全滅時のルールベース
-代替を必ず用意する）を踏襲しつつ、対象が「編集判断(keep_segments)」ではなく
-「ゼロから作る企画(コンセプト/フック/台本/ショットリスト)」である点に合わせて
-スキーマを作り直した。
+normalized_plan) を返す・エラーは矯正リトライへ差し戻す）を踏襲しつつ、対象が
+「編集判断(keep_segments)」ではなく「ゼロから作る企画(コンセプト/フック/台本/ショットリスト)」
+である点に合わせてスキーマを作り直した。
 
-plan スキーマ:
+plan スキーマ（v1: 従来互換 / v2: TTP参考動画からのスケルトン写像モード）:
 {
-  "version": 1,
-  "meta": {"source": "ai"|"rule", "model_used": str|None, "fallback_from": str|None,
+  "version": 1 | 2,
+  "meta": {"source": "ai"|"rule"|"smoke", "model_used": str|None, "fallback_from": str|None,
             "fallback_reason": str|None, "attempt": int},
   "concept": str,
   "hook": str,
@@ -23,10 +22,23 @@ plan スキーマ:
       "duration_sec": number,        # >0
       "caption_jp": str,             # 画面焼込キャプション（日本語）
       "narration_jp": str,           # 任意。このショットのナレーション断片（音声主導タイミング
-                                      # 同期モード用。省略可＝後方互換。全shotsのnarration_jpを
-                                      # 連結したものがnarration_scriptと一致する想定）
+                                      # 同期モード用。省略可＝後方互換）
+      # 以下は v2(TTP) 拡張。すべて任意（後方互換）。
+      "caption_in_offset_sec": number,   # ショット内でテロップが出現する相対秒（0 <= x <= duration_sec）
+      "caption_out_offset_sec": number,  # ショット内でテロップが消滅する相対秒（in <= x <= duration_sec）
+      "telop_style_hint": dict,          # 参考spec由来の position/color/size_class 等（描画側ヒント）
     }, ...
   ],
+  # v2 拡張: SFX配置（renderが実際に配線するのはP3担当）。
+  "sfx_plan": [
+    {
+      "t_anchor": {"type": "cut"|"caption_in"|"shot_start", "shot_id": str, "offset_sec": number},
+      "family": "whoosh"|"impact"|"riser"|"pop"|"shimmer",  # kind→familyマッピング済
+      "gain_db": number,   # 任意
+    }, ...
+  ],
+  "hook_end_shot_id": str,           # 任意。フック区間の終端ショットid
+  "cta_start_shot_id": str,          # 任意。CTA区間の開始ショットid
   "bgm_mood": "upbeat"|"calm"|"emotional"|"none",
 }
 
@@ -39,7 +51,16 @@ BGM_MOODS = ("upbeat", "calm", "emotional", "none")
 
 MIN_SHOT_DURATION = 1.0
 MAX_SHOT_DURATION = 20.0
-MAX_CAPTION_CHARS = 40
+# テロップ最大文字数: PlayResX=1080 / MarginL=MarginR=60 / 既定フォントサイズ76px の実描画で
+# 2行に収まる実効上限が「30字前後」であることをフレーム目視で確認した(BUG-54)。
+# 30字超は subtitles.build_telop_pieces_from_shots が幅ベースでフォント縮小を試みるが、
+# それでも見切れリスクが残るため、企画段階でハード上限とする。プロンプトには
+# 「25字以内推奨」を明記して director が 25字前後を狙うようにする。
+MAX_CAPTION_CHARS = 30
+
+_SUPPORTED_PLAN_VERSIONS = (1, 2)
+_SUPPORTED_SFX_FAMILIES = ("whoosh", "impact", "riser", "pop", "shimmer")
+_SUPPORTED_SFX_ANCHOR_TYPES = ("cut", "caption_in", "shot_start")
 
 
 def _is_number(v):
@@ -58,15 +79,20 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
     if not isinstance(plan, dict):
         return False, ["plan はオブジェクト(dict)である必要があります"], None
 
-    if plan.get("version") != 1:
-        errors.append("version は 1 固定である必要があります (got: {!r})".format(plan.get("version")))
+    version = plan.get("version")
+    if version not in _SUPPORTED_PLAN_VERSIONS:
+        errors.append(
+            "version は {} のいずれかである必要があります (got: {!r})".format(
+                list(_SUPPORTED_PLAN_VERSIONS), version
+            )
+        )
 
     meta = plan.get("meta")
     if not isinstance(meta, dict):
         errors.append("meta が存在しないかオブジェクトではありません")
         meta = {}
-    elif meta.get("source") not in ("ai", "rule"):
-        errors.append("meta.source は 'ai' か 'rule' である必要があります (got: {!r})".format(meta.get("source")))
+    elif meta.get("source") not in ("ai", "rule", "smoke"):
+        errors.append("meta.source は 'ai' か 'rule' か 'smoke' である必要があります (got: {!r})".format(meta.get("source")))
 
     concept = plan.get("concept")
     if not isinstance(concept, str) or not concept.strip():
@@ -89,9 +115,6 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
         errors.append("shots は非空リストである必要があります")
     else:
         seen_ids = set()
-        # scene_id（シーングループ）検証用: 同一 scene_id は連続ショットにのみ許可する
-        # （途切れて再出現＝飛び飛びの再利用はエラー）。prev_scene_id は直前ショットの
-        # 正規化済み scene_id（無ければ None）。seen_scene_ids は既出の scene_id 集合。
         seen_scene_ids = set()
         prev_scene_id = None
         for i, shot in enumerate(shots_raw):
@@ -110,6 +133,9 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
             caption_jp = shot.get("caption_jp", "")
             narration_jp = shot.get("narration_jp")
             scene_id_raw = shot.get("scene_id")
+            caption_in_off = shot.get("caption_in_offset_sec")
+            caption_out_off = shot.get("caption_out_offset_sec")
+            telop_style_hint = shot.get("telop_style_hint")
 
             ok_item = True
 
@@ -161,9 +187,40 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                     )
                 )
                 ok_item = False
-            # narration_jp は任意（省略可＝後方互換）。指定された場合のみ文字列であることを検証する。
             if narration_jp is not None and not isinstance(narration_jp, str):
                 errors.append("shots[{}(id={})].narration_jp は文字列である必要があります".format(i, sid))
+                ok_item = False
+
+            # v2 拡張フィールド: caption_in_offset_sec / caption_out_offset_sec / telop_style_hint
+            _dur = float(duration_sec) if _is_number(duration_sec) else None
+            if caption_in_off is not None:
+                if not _is_number(caption_in_off):
+                    errors.append("shots[{}(id={})].caption_in_offset_sec は数値である必要があります".format(i, sid))
+                    ok_item = False
+                elif _dur is not None and not (-1e-6 <= float(caption_in_off) <= _dur + 1e-6):
+                    errors.append(
+                        "shots[{}(id={})].caption_in_offset_sec は 0〜duration_sec の範囲である必要があります "
+                        "(got: {}, duration_sec: {})".format(i, sid, caption_in_off, _dur)
+                    )
+                    ok_item = False
+            if caption_out_off is not None:
+                if not _is_number(caption_out_off):
+                    errors.append("shots[{}(id={})].caption_out_offset_sec は数値である必要があります".format(i, sid))
+                    ok_item = False
+                elif _dur is not None and not (-1e-6 <= float(caption_out_off) <= _dur + 1e-6):
+                    errors.append(
+                        "shots[{}(id={})].caption_out_offset_sec は 0〜duration_sec の範囲である必要があります "
+                        "(got: {}, duration_sec: {})".format(i, sid, caption_out_off, _dur)
+                    )
+                    ok_item = False
+                elif caption_in_off is not None and _is_number(caption_in_off) and float(caption_out_off) < float(caption_in_off) - 1e-6:
+                    errors.append(
+                        "shots[{}(id={})].caption_out_offset_sec は caption_in_offset_sec 以上である必要があります "
+                        "(in={}, out={})".format(i, sid, caption_in_off, caption_out_off)
+                    )
+                    ok_item = False
+            if telop_style_hint is not None and not isinstance(telop_style_hint, dict):
+                errors.append("shots[{}(id={})].telop_style_hint はオブジェクトである必要があります".format(i, sid))
                 ok_item = False
 
             if ok_item:
@@ -181,6 +238,12 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                     normalized_shot["scene_id"] = scene_id
                 if narration_jp is not None:
                     normalized_shot["narration_jp"] = narration_jp.strip()
+                if caption_in_off is not None:
+                    normalized_shot["caption_in_offset_sec"] = float(caption_in_off)
+                if caption_out_off is not None:
+                    normalized_shot["caption_out_offset_sec"] = float(caption_out_off)
+                if telop_style_hint is not None:
+                    normalized_shot["telop_style_hint"] = dict(telop_style_hint)
                 normalized_shots.append(normalized_shot)
 
     bgm_mood = plan.get("bgm_mood")
@@ -189,7 +252,6 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
 
     # 同一 scene_id の連続ショットは、シーンマスター1本から切り出す前提のため
     # visual_prompt が一致していなければならない（1つのシーンに複数の絵は存在しない）。
-    # 矯正リトライへ回す（jobs.py 側は防御的に警告emitのみで先頭promptで続行）。
     scene_prompts = {}
     for shot in normalized_shots:
         sid = shot.get("scene_id")
@@ -207,6 +269,90 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
             )
             break
 
+    # v2 拡張トップレベル: sfx_plan / hook_end_shot_id / cta_start_shot_id
+    normalized_sfx_plan = None
+    sfx_plan_raw = plan.get("sfx_plan")
+    valid_shot_ids = {s["id"] for s in normalized_shots}
+    shot_duration_by_id = {s["id"]: s["duration_sec"] for s in normalized_shots}
+    if sfx_plan_raw is not None:
+        if not isinstance(sfx_plan_raw, list):
+            errors.append("sfx_plan はリストである必要があります")
+        else:
+            normalized_sfx_plan = []
+            for i, ev in enumerate(sfx_plan_raw):
+                if not isinstance(ev, dict):
+                    errors.append("sfx_plan[{}] はオブジェクトではありません".format(i))
+                    continue
+                anc = ev.get("t_anchor")
+                family = ev.get("family")
+                gain_db = ev.get("gain_db")
+                ok_ev = True
+                if not isinstance(anc, dict):
+                    errors.append("sfx_plan[{}].t_anchor はオブジェクトである必要があります".format(i))
+                    ok_ev = False
+                else:
+                    a_type = anc.get("type")
+                    a_shot_id = anc.get("shot_id")
+                    a_off = anc.get("offset_sec")
+                    if a_type not in _SUPPORTED_SFX_ANCHOR_TYPES:
+                        errors.append(
+                            "sfx_plan[{}].t_anchor.type が不正です (got: {!r}, expected one of {})".format(
+                                i, a_type, list(_SUPPORTED_SFX_ANCHOR_TYPES)
+                            )
+                        )
+                        ok_ev = False
+                    if not isinstance(a_shot_id, str) or a_shot_id not in valid_shot_ids:
+                        errors.append(
+                            "sfx_plan[{}].t_anchor.shot_id が shots に存在しません (got: {!r})".format(i, a_shot_id)
+                        )
+                        ok_ev = False
+                    if not _is_number(a_off):
+                        errors.append("sfx_plan[{}].t_anchor.offset_sec は数値である必要があります".format(i))
+                        ok_ev = False
+                    elif isinstance(a_shot_id, str) and a_shot_id in shot_duration_by_id:
+                        _d = shot_duration_by_id[a_shot_id]
+                        if not (-1e-6 <= float(a_off) <= _d + 1e-6):
+                            errors.append(
+                                "sfx_plan[{}].t_anchor.offset_sec は 0〜対象shotのduration_sec の範囲である必要があります "
+                                "(got: {}, shot={}, dur={})".format(i, a_off, a_shot_id, _d)
+                            )
+                            ok_ev = False
+                if family not in _SUPPORTED_SFX_FAMILIES:
+                    errors.append(
+                        "sfx_plan[{}].family が不正です (got: {!r}, expected one of {})".format(
+                            i, family, list(_SUPPORTED_SFX_FAMILIES)
+                        )
+                    )
+                    ok_ev = False
+                if gain_db is not None and not _is_number(gain_db):
+                    errors.append("sfx_plan[{}].gain_db は数値である必要があります".format(i))
+                    ok_ev = False
+                if ok_ev:
+                    norm_ev = {
+                        "t_anchor": {
+                            "type": anc["type"],
+                            "shot_id": anc["shot_id"],
+                            "offset_sec": float(anc["offset_sec"]),
+                        },
+                        "family": family,
+                    }
+                    if gain_db is not None:
+                        norm_ev["gain_db"] = float(gain_db)
+                    normalized_sfx_plan.append(norm_ev)
+
+    hook_end_shot_id = plan.get("hook_end_shot_id")
+    cta_start_shot_id = plan.get("cta_start_shot_id")
+    if hook_end_shot_id is not None:
+        if not isinstance(hook_end_shot_id, str) or hook_end_shot_id not in valid_shot_ids:
+            errors.append(
+                "hook_end_shot_id が shots に存在しません (got: {!r})".format(hook_end_shot_id)
+            )
+    if cta_start_shot_id is not None:
+        if not isinstance(cta_start_shot_id, str) or cta_start_shot_id not in valid_shot_ids:
+            errors.append(
+                "cta_start_shot_id が shots に存在しません (got: {!r})".format(cta_start_shot_id)
+            )
+
     if errors:
         return False, errors, None
 
@@ -222,7 +368,7 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
             ], None
 
     normalized_plan = {
-        "version": 1,
+        "version": version if version in _SUPPORTED_PLAN_VERSIONS else 1,
         "meta": meta,
         "concept": concept.strip(),
         "hook": hook.strip(),
@@ -230,156 +376,74 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
         "shots": normalized_shots,
         "bgm_mood": bgm_mood,
     }
+    if normalized_sfx_plan is not None:
+        normalized_plan["sfx_plan"] = normalized_sfx_plan
+    if hook_end_shot_id is not None:
+        normalized_plan["hook_end_shot_id"] = hook_end_shot_id
+    if cta_start_shot_id is not None:
+        normalized_plan["cta_start_shot_id"] = cta_start_shot_id
     return True, [], normalized_plan
 
 
 # ---------------------------------------------------------------------------
-# ルールベース代替plan（claude 全滅時 / --no-llm 指定時のフォールバック）
+# スモーク代替plan（テスト / --no-llm 用の最小plan）
 # ---------------------------------------------------------------------------
-
-_NG_PREFIXES_FOR_TEMPLATE = ("絶対稼げる", "100%成功")  # compliance.py のNGワードとは独立に、そもそもテンプレへ混入させない
-
+# 旧テンプレ (_default_rule_based_plan / _vertical_hook_rule_based_plan) は
+# TTP v2 移行時に撤去済み。「ポイント1: 全体像を知る」等の固定文言は再導入禁止。
+# ここは本番企画には使用禁止。スモーク（煙テスト）用の最小plan生成に絞る。
+# ---------------------------------------------------------------------------
 
 STYLE_NAMES = ("default", "vertical_hook")
 
-# vertical_hookは縦書きテロップで映えるよう短いcaptionを使う（8〜14字目安）。
-# テーマ文字列そのものは任意長のため、テンプレへ埋め込む際はここまでに切り詰める。
-_VERTICAL_HOOK_THEME_TRUNCATE = 14
 
+def build_smoke_plan(theme, target_duration_sec=30, shot_count=None, style="default", aspect=None):
+    """テスト/--no-llm スモーク専用の最小plan。**本番企画には使用禁止**。
 
-def _default_rule_based_plan(theme, target_duration_sec, shot_count):
-    shot_count = max(3, int(shot_count or 5))
-    per_shot = round(float(target_duration_sec) / shot_count, 2)
-    per_shot = max(MIN_SHOT_DURATION, min(MAX_SHOT_DURATION, per_shot))
+    「無地背景 + テーマ文字テロップ + 目標尺を等分」の煙テスト用最小構成。
+    5部構成TTP等の固定文言テンプレは持たない（TTP v2 移行時に撤去）。
+    景表法NG表現（絶対稼げる/100%成功等）は一切含まない。
 
-    concept = "「{}」を、初心者にもわかる3つのポイントで紹介するショート動画。".format(theme)
-    hook = "{}、実は今日から始められます。".format(theme)
-    narration_parts = [
-        "{}について、今日は3つのポイントに絞って紹介します。".format(theme),
-        "1つ目は、まず全体像を知ること。何をどう始めればいいか、最初の一歩を明確にします。",
-        "2つ目は、小さく試してみること。完璧を目指さず、まず手を動かすことが上達の近道です。",
-        "3つ目は、続ける仕組みを作ること。毎日少しずつでも積み重ねれば、必ず形になります。",
-        "気になった方は、ぜひ保存していつでも見返してくださいね。",
-    ]
-    narration_script = "".join(narration_parts)
-
-    caption_templates = [
-        "{}を始めよう".format(theme)[:MAX_CAPTION_CHARS],
-        "ポイント1: 全体像を知る",
-        "ポイント2: 小さく試す",
-        "ポイント3: 続ける仕組み",
-        "今日から一歩踏み出そう",
-    ]
-    motion_cycle = ["zoom_in", "pan_right", "pan_left", "ken_burns", "zoom_out"]
-    visual_templates = [
-        "abstract geometric background representing the theme '{}', soft gradient, clean minimal style".format(theme),
-        "abstract icon representing step one, simple flat design, soft gradient background",
-        "abstract icon representing step two, simple flat design, soft gradient background",
-        "abstract icon representing step three, simple flat design, soft gradient background",
-        "abstract uplifting geometric background, warm gradient, clean minimal style",
-    ]
-
-    shots = []
-    for i in range(shot_count):
-        idx = i % len(caption_templates)
-        shots.append(
-            {
-                "id": "s{}".format(i + 1),
-                "visual_prompt": visual_templates[idx % len(visual_templates)],
-                "motion_preset": motion_cycle[i % len(motion_cycle)],
-                "duration_sec": per_shot,
-                "caption_jp": caption_templates[idx],
-            }
-        )
-    return concept, hook, narration_script, shots
-
-
-def _vertical_hook_caption_for_index(i, shot_count, theme_short):
-    """5部構成TTP（フック/自分ごと化/本題/注意喚起/締め）に沿ったcaptionを組み立てる。"""
-    main_points = ["やることは3つだけ", "最初の一歩がカギ", "コツはシンプル", "続けるほど伸びる", "ポイントを整理しよう"]
-    if i == 0:
-        if theme_short.startswith("今話題の"):
-            return theme_short[:MAX_CAPTION_CHARS]
-        return "今話題の{}".format(theme_short)[:MAX_CAPTION_CHARS]
-    if i == shot_count - 1:
-        return "続きは保存して見返してね"
-    if shot_count >= 4 and i == 1:
-        return "悔しくて調べまくった結果"
-    if shot_count >= 5 and i == shot_count - 2:
-        return "実はここに落とし穴が"
-    main_start = 2 if shot_count >= 4 else 1
-    return main_points[(i - main_start) % len(main_points)]
-
-
-def _vertical_hook_rule_based_plan(theme, target_duration_sec, shot_count):
-    # 高速カット構成: shots数の目安は尺÷2秒（下限3）。
-    if shot_count is None:
-        shot_count = max(3, int(round(float(target_duration_sec) / 2.0)))
-    shot_count = max(3, int(shot_count))
-    per_shot = round(float(target_duration_sec) / shot_count, 2)
-    per_shot = max(1.5, min(2.5, per_shot))  # vertical_hookは1.5〜2.5秒/ショットの高速カット目安
-
-    theme_short = theme[:_VERTICAL_HOOK_THEME_TRUNCATE]
-    hook_subject = theme_short if theme_short.startswith("今話題の") else "今話題の{}".format(theme_short)
-    concept = "「{}」を、今話題の切り口×自分ごと化のフックでテンポよく紹介する縦型ショート動画。".format(theme)
-    hook = "{}、実は今日から始められます。".format(hook_subject)
-    narration_script = (
-        "{}が今すごく話題になっていて、正直悔しくて調べまくりました。".format(theme)
-        + "結果からいうと、やることはシンプルで、最初の一歩さえ間違えなければ誰でも進められます。"
-        + "ただ、意外な落とし穴もあるので注意してください。"
-        + "気になった方は、保存していつでも見返してくださいね。"
-    )
-
-    motion_cycle = ["zoom_in", "pan_right", "zoom_out", "pan_left", "ken_burns"]
-    visual_templates = [
-        "abstract geometric background representing the theme '{}', soft gradient, clean minimal style, fast-paced".format(theme),
-        "abstract icon representing a relatable realization moment, simple flat design, soft gradient background",
-        "abstract icon representing a key point, simple flat design, soft gradient background",
-        "abstract icon representing a caution or surprising fact, simple flat design, soft gradient background",
-        "abstract uplifting geometric background, warm gradient, clean minimal style",
-    ]
-
-    shots = []
-    for i in range(shot_count):
-        shots.append(
-            {
-                "id": "s{}".format(i + 1),
-                "visual_prompt": visual_templates[i % len(visual_templates)],
-                "motion_preset": motion_cycle[i % len(motion_cycle)],
-                "duration_sec": per_shot,
-                "caption_jp": _vertical_hook_caption_for_index(i, shot_count, theme_short),
-            }
-        )
-    return concept, hook, narration_script, shots
-
-
-def build_rule_based_plan(theme, target_duration_sec=30, shot_count=None, style="default"):
-    """テンプレートベースの決定論的フォールバックplan。claude CLI不通時 / --no-llm 指定時に使う。
-
-    景表法NG表現（絶対稼げる/100%成功等）は一切使わないテンプレート文言のみで構成する。
-    style: "default"（従来のテンプレート、shot_count省略時は5） | "vertical_hook"
-    （縦書きテロップ・高速カット向けの5部構成TTPテンプレート、shot_count省略時は尺÷2秒目安）。
+    Args:
+        theme: 動画のテーマ文字列。
+        target_duration_sec: 目標尺（秒）。
+        shot_count: ショット数。None なら 3。
+        style: "default" or "vertical_hook"（未知値は "default" に正規化される。
+               スモーク用途では style ごとの中身は同一で、meta.style のみ記録する）。
+        aspect: 任意。ログ用途のみ（生成物には影響しない）。
     """
     theme = (theme or "このテーマ").strip()
     style = style if style in STYLE_NAMES else "default"
+    n = 3 if shot_count is None else max(1, int(shot_count))
+    per_shot = round(float(target_duration_sec) / n, 3)
+    per_shot = max(MIN_SHOT_DURATION, min(MAX_SHOT_DURATION, per_shot))
 
-    if style == "vertical_hook":
-        concept, hook, narration_script, shots = _vertical_hook_rule_based_plan(theme, target_duration_sec, shot_count)
-        reason = "--no-llm指定 または claude CLI不通のためテンプレートベース生成(vertical_hook)"
-    else:
-        concept, hook, narration_script, shots = _default_rule_based_plan(theme, target_duration_sec, shot_count)
-        reason = "--no-llm指定 または claude CLI不通のためテンプレートベース生成"
+    concept = "「{}」のスモーク検証用プレースホルダplan。".format(theme)
+    hook = "{}".format(theme)
+    caption = theme[:MAX_CAPTION_CHARS] if theme else "テスト"
+    narration_script = theme
 
+    shots = []
+    for i in range(n):
+        shots.append({
+            "id": "s{}".format(i + 1),
+            "visual_prompt": (
+                "abstract neutral background placeholder for smoke test of theme '{}'".format(theme)
+            ),
+            "motion_preset": "static",
+            "duration_sec": per_shot,
+            "caption_jp": caption,
+        })
     return {
         "version": 1,
         "meta": {
-            "source": "rule",
+            "source": "smoke",
             "model_used": None,
             "fallback_from": None,
             "fallback_reason": None,
             "attempt": 0,
-            "reason": reason,
+            "reason": "スモーク（煙テスト）用最小plan。本番企画には使用禁止。",
             "style": style,
+            "smoke": True,
         },
         "concept": concept,
         "hook": hook,
@@ -387,3 +451,20 @@ def build_rule_based_plan(theme, target_duration_sec=30, shot_count=None, style=
         "shots": shots,
         "bgm_mood": "upbeat",
     }
+
+
+def build_rule_based_plan(theme, target_duration_sec=30, shot_count=None, style="default"):
+    """後方互換の薄いエイリアス。実体は build_smoke_plan。
+
+    旧テンプレ (「ポイント1: 全体像を知る」等) は TTP v2 移行時に撤去した。
+    本番企画には使わないこと（テスト/スモーク専用）。source は "rule" として
+    返すことで、jobs.py 側の meta 参照や既存テスト（メタが "rule" を期待する
+    ものが T9〜T11 の書換え途上で残る場合）と衝突しないようにする。
+    """
+    plan = build_smoke_plan(
+        theme, target_duration_sec=target_duration_sec, shot_count=shot_count, style=style
+    )
+    # 旧呼び出し側との整合のため "source" のみ "rule" に写像する（中身はスモーク）。
+    plan["meta"]["source"] = "rule"
+    plan["meta"]["reason"] = "--no-llm指定 or 旧呼び出し互換のためスモーク代替plan"
+    return plan

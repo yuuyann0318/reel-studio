@@ -1,0 +1,563 @@
+{
+  "version": 2,
+  "url": "https://www.tiktok.com/@tiktok/video/7106594312292453675",
+  "duration_sec": 24.401995,
+  "transcript": "",
+  "segments": [],
+  "beats": [
+    {
+      "role": "hook",
+      "start": 0.0,
+      "end": 5.172,
+      "text": "",
+      "summary": "Aerial Minecraft build of a stone-lined pond for a family of frogs, teasing the setup."
+    },
+    {
+      "role": "challenge",
+      "start": 5.172,
+      "end": 7.708,
+      "text": "",
+      "summary": "On-screen quiz prompt: how many frogs can you find in 10 seconds, single frog shown on black."
+    },
+    {
+      "role": "body",
+      "start": 7.708,
+      "end": 19.753,
+      "text": "",
+      "summary": "Reveal of the decorated pond filled with many frogs, gentle push-in while viewer counts."
+    },
+    {
+      "role": "cta",
+      "start": 19.753,
+      "end": 24.4,
+      "text": "",
+      "summary": "Frogs isolated on black for counting, then final beauty shots of the finished frog pond."
+    }
+  ],
+  "rhythm": {
+    "sentence_count": 0,
+    "avg_sentence_len": 0,
+    "max_sentence_len": 0,
+    "tone": "",
+    "endings": []
+  },
+  "cuts": [
+    {
+      "t": 4.972,
+      "confidence": 0.9
+    },
+    {
+      "t": 7.708,
+      "confidence": 0.9
+    },
+    {
+      "t": 19.753,
+      "confidence": 0.85
+    },
+    {
+      "t": 21.722,
+      "confidence": 0.9
+    }
+  ],
+  "shots_ref": [
+    {
+      "index": 0,
+      "start": 0.0,
+      "end": 4.972,
+      "visual_desc_en": "Aerial Minecraft high-angle view of a stone-lined pond being built and filled with water on a grassy plain.",
+      "motion": "static"
+    },
+    {
+      "index": 1,
+      "start": 4.972,
+      "end": 7.708,
+      "visual_desc_en": "A single blocky green Minecraft frog centered on a plain black background for the counting quiz.",
+      "motion": "static"
+    },
+    {
+      "index": 2,
+      "start": 7.708,
+      "end": 19.753,
+      "visual_desc_en": "Aerial Minecraft view of the decorated frog pond with many green frogs around lily pads, flowers and lanterns.",
+      "motion": "static"
+    },
+    {
+      "index": 3,
+      "start": 19.753,
+      "end": 21.722,
+      "visual_desc_en": "Many blocky Minecraft frogs scattered across a plain black background isolating them for counting.",
+      "motion": "static"
+    },
+    {
+      "index": 4,
+      "start": 21.722,
+      "end": 24.4,
+      "visual_desc_en": "Aerial Minecraft high-angle view of the finished frog pond with frogs on lily pads and stone edges.",
+      "motion": "static"
+    }
+  ],
+  "telops": [
+    {
+      "start": 2.486,
+      "end": 4.972,
+      "text": "Gorillo built a pond for\na family of frogs...",
+      "position": "top",
+      "style": {
+        "color": "white",
+        "stroke": "black stroke",
+        "size_class": "large"
+      },
+      "emphasis_words": []
+    },
+    {
+      "start": 5.172,
+      "end": 7.708,
+      "text": "how many frogs can you\nfind in 10 seconds?",
+      "position": "bottom",
+      "style": {
+        "color": "white",
+        "stroke": "no stroke",
+        "size_class": "large"
+      },
+      "emphasis_words": [
+        "frogs",
+        "10 seconds"
+      ]
+    }
+  ],
+  "sfx_events": [
+    {
+      "t": 0.697,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 0.975,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 1.393,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 1.718,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 2.694,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 2.972,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 3.158,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 3.204,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 4.505,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 4.969,
+      "kind": "transition",
+      "anchor": "cut",
+      "confidence": 0.9
+    },
+    {
+      "t": 5.201,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 5.201,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 5.387,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 5.712,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 6.223,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 6.455,
+      "kind": "riser",
+      "anchor": "cut",
+      "confidence": 0.7
+    },
+    {
+      "t": 6.455,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 6.687,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 6.966,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 7.709,
+      "kind": "transition",
+      "anchor": "cut",
+      "confidence": 0.9
+    },
+    {
+      "t": 8.22,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 9.195,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 9.706,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 9.706,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 10.217,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 10.96,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 11.471,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 11.703,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 12.214,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 12.446,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 12.725,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 12.957,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 13.421,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 13.978,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 14.211,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 14.396,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 14.721,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 14.954,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 15.464,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 15.975,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 16.208,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 16.44,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 16.718,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 16.951,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 17.461,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 17.694,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 17.972,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 19.644,
+      "kind": "transition",
+      "anchor": "cut",
+      "confidence": 0.85
+    },
+    {
+      "t": 19.969,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 20.201,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 20.201,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 20.48,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 20.712,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 20.944,
+      "kind": "riser",
+      "anchor": "cut",
+      "confidence": 0.7
+    },
+    {
+      "t": 20.944,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 21.223,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 21.223,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 21.455,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 21.687,
+      "kind": "transition",
+      "anchor": "cut",
+      "confidence": 0.9
+    },
+    {
+      "t": 21.966,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 22.198,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 22.198,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 22.477,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 22.709,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 22.941,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 23.22,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 23.22,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 23.452,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    },
+    {
+      "t": 23.731,
+      "kind": "impact",
+      "anchor": "none",
+      "confidence": 0.5
+    },
+    {
+      "t": 23.963,
+      "kind": "shimmer",
+      "anchor": "none",
+      "confidence": 0.4
+    }
+  ],
+  "bgm": {
+    "present": true,
+    "mood_guess": "playful upbeat"
+  },
+  "hook_end_sec": 7.708,
+  "cta_start_sec": 19.753,
+  "warnings": [
+    "ASR文字起こし・ビートが空のため、beats/hook_end_sec/cta_start_secはvisionのテロップとカット構成から推定した。",
+    "ショット区間内でmotionがstaticとzoom_inで割れる箇所があり、最頻値としてstaticを採用した。",
+    "sfxオンセットは大半がconfidence0.4のshimmerで、実SEか環境音かの判別は未確定。",
+    "ASR失敗: Fish AudioのAPIキーが未設定です(FISH_AUDIO_API_KEYが空です)",
+    "ASR不能のため transcript/beats を空で継続します"
+  ]
+}

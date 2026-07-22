@@ -69,9 +69,22 @@ async function loadAssets() {
 }
 
 // ---------- ホーム: 入力操作 ----------
+// TTP v2 移行後、参考動画URLは必須。空なら送信ボタンを無効化する。
+function _isReferenceUrlValid(url) {
+  const s = (url || "").trim();
+  if (!s) return false;
+  try {
+    const u = new URL(s);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch (_e) {
+    return false;
+  }
+}
 function syncSubmitButton() {
   const btn = document.getElementById("s-submit");
-  if (btn) btn.disabled = !state.theme.trim() || state.submitting;
+  if (!btn) return;
+  const ok = state.theme.trim() && _isReferenceUrlValid(state.referenceUrl) && !state.submitting;
+  btn.disabled = !ok;
 }
 
 async function submitCreate() {
@@ -79,12 +92,16 @@ async function submitCreate() {
   if (!theme) return;
   const productUrl = (state.productUrl || "").trim();
   const referenceUrl = (state.referenceUrl || "").trim();
+  if (!_isReferenceUrlValid(referenceUrl)) {
+    setState({ submitError: { message: "参考動画URLが必要です（http/https の TikTok 等のURLを貼ってください）" } });
+    return;
+  }
   setState({ submitting: true, submitError: null });
   try {
     const { id } = await api.createProject({
       theme, duration: 30, backend: state.backend, style: state.style,
       productUrl: productUrl || undefined, // 空なら送らない（通常モードのまま）
-      referenceUrl: referenceUrl || undefined, // 空なら送らない（通常の台本生成のまま）
+      referenceUrl, // TTP v2: 必須
     });
     setState({ submitting: false });
     await beginGenerate(id);
@@ -597,10 +614,10 @@ function renderHome() {
         <div class="s-hint" style="margin-top:8px;">貼ると商品画像を自動で取得して動画の主役にします。assets/products/inbox に入れた画像も使われます</div>
       </div>
 
-      <div class="s-section-title">参考動画リンク（任意）</div>
+      <div class="s-section-title">参考動画リンク（必須）</div>
       <div class="s-input-wrap">
-        <input type="url" class="s-url-input" id="s-reference-url" placeholder="https://www.tiktok.com/@example/video/123" maxlength="500" value="${escapeHtml(state.referenceUrl)}">
-        <div class="s-hint" style="margin-top:8px;">TikTokのURLを貼ると、その動画の構成・テンポを再現した台本になります（文言はコピーしません）</div>
+        <input type="url" class="s-url-input" id="s-reference-url" placeholder="https://www.tiktok.com/@example/video/123" maxlength="500" required value="${escapeHtml(state.referenceUrl)}">
+        <div class="s-hint" style="margin-top:8px;">TikTokのURLを貼ると、その動画の構成・テンポを再現した台本になります（文言はコピーしません）。TTP v2 では参考動画URLが必須です</div>
       </div>
 
       <div class="s-section-title">見た目のスタイル</div>
@@ -618,7 +635,7 @@ function renderHome() {
 
       ${state.submitError ? `<div class="s-error-banner" role="alert">${escapeHtml(state.submitError.message)}</div>` : ""}
 
-      <button type="button" class="s-cta" id="s-submit" style="margin-top:18px;" ${(!state.theme.trim() || state.submitting) ? "disabled" : ""}>
+      <button type="button" class="s-cta" id="s-submit" style="margin-top:18px;" ${(!state.theme.trim() || !_isReferenceUrlValid(state.referenceUrl) || state.submitting) ? "disabled" : ""}>
         ${state.submitting ? "準備しています…" : "動画を作成"}
       </button>
     </div>
@@ -636,7 +653,7 @@ function renderHome() {
   const productUrlInput = el.querySelector("#s-product-url");
   productUrlInput.addEventListener("input", (e) => { state.productUrl = e.target.value; });
   const referenceUrlInput = el.querySelector("#s-reference-url");
-  referenceUrlInput.addEventListener("input", (e) => { state.referenceUrl = e.target.value; });
+  referenceUrlInput.addEventListener("input", (e) => { state.referenceUrl = e.target.value; syncSubmitButton(); });
   el.querySelectorAll("[data-chip]").forEach((btn) => btn.addEventListener("click", () => setState({ theme: btn.dataset.chip })));
   el.querySelectorAll("[data-style]").forEach((btn) => btn.addEventListener("click", () => setState({ style: btn.dataset.style })));
   el.querySelectorAll("[data-backend]").forEach((btn) => btn.addEventListener("click", () => setState({ backend: btn.dataset.backend })));

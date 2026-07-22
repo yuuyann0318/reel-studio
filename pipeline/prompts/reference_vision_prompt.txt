@@ -1,0 +1,42 @@
+あなたはショート動画（Instagram Reels / TikTok）のフレーム解析専門家です。
+以下に列挙する画像フレームをそれぞれ Read ツールで読み、画面内容を分析してください。
+
+# 入力: 分析対象のフレーム画像パス一覧
+{IMAGE_LIST_BLOCK}
+
+# タスク
+各画像について次を判定してください（前置き禁止・コードフェンス禁止・純粋なJSON配列のみ）:
+
+1. telop_text: 画面上のテロップ・字幕テキスト（全文）。無ければ空文字列。複数行なら改行 \n で連結。
+2. telop_position: テロップの主要な画面位置。"top" / "mid" / "bottom" / "none" のいずれか。
+3. telop_color: 主要な文字色（例: "white" / "yellow" / "pink" / "black"）。テロップ無なら空文字列。
+4. telop_stroke: 縁取り・シャドウ・帯背景の有無を短い英語で（例: "black stroke" / "yellow highlight" / "no stroke" / ""）。
+5. emphasis_words: 強調表示（大きさ・色・下線）されている単語の配列（無ければ [])。
+6. size_class: テロップの相対サイズ "small" / "medium" / "large" / "" のいずれか。
+7. visual_desc_en: 画面全体の映像内容を英語1文で。被写体・カメラワーク・動きが分かる短文（30語以内）。
+8. motion: 検出される動きの短い英語ラベル（例: "static" / "pan_left" / "zoom_in" / "cut_transition" / "person_talking"）。
+9. has_person: 画面に人物が写っているか true/false。
+10. has_product_logo: 商品ロゴ・ブランドロゴが写っているか true/false。
+
+# 出力スキーマ（必ずこのJSON配列のみを返す。最初の文字は [ 最後の文字は ] ）
+[
+  {
+    "index": 1,
+    "path": "/absolute/path/to/frame_001.png",
+    "telop_text": "…",
+    "telop_position": "top",
+    "telop_color": "white",
+    "telop_stroke": "black stroke",
+    "emphasis_words": ["…"],
+    "size_class": "large",
+    "visual_desc_en": "A young woman looks into the camera in a bright bedroom, medium close-up, static.",
+    "motion": "static",
+    "has_person": true,
+    "has_product_logo": false
+  }
+]
+
+# 制約
+- 各要素の index は上のリストの順番と一致させること（1始まり）。
+- 存在しないフィールドは空文字列 "" または空配列 [] にすること。null を入れないこと。
+- 出力の最初の文字は [ 、最後の文字は ] であること。それ以外の文字（説明・前置き）を一切含めないこと。

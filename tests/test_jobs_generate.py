@@ -26,7 +26,10 @@ def _isolated_projects_root(tmp_path, monkeypatch):
 
 def _fake_run_director_factory(shot_count):
     def _fake(theme, cfg=None, target_duration_sec=None, no_llm=False, **kwargs):
-        return plan_schema.build_rule_based_plan(
+        # T9: build_rule_based_plan -> build_smoke_plan へ移行(TTP v2 Phase 2)。
+        # BUG-10 の意図(ビジュアル失敗時も企画が失われないこと)は plan 中身に依存しないため、
+        # 置換だけで既存テストは通る。
+        return plan_schema.build_smoke_plan(
             theme, target_duration_sec=target_duration_sec or 15, shot_count=shot_count
         )
     return _fake

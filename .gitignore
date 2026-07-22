@@ -6,6 +6,7 @@ work/
 bin/
 assets/bgm/*.mp3
 assets/bgm/.history.json
+assets/bgm/.history.json.lock
 assets/bgm/library/
 assets/fonts/
 assets/sfx/*.wav
@@ -14,3 +15,31 @@ projects/
 assets/sfx/external/*.mp3
 # テロップ選択履歴(ランタイム状態)
 assets/profiles/.telop_history.json*
+
+# macOS メタデータ
+.DS_Store
+**/.DS_Store
+
+# 参考動画キャッシュ(第三者TikTok URL・OCR/文字起こしを含むため公開しない)
+# .gitkeep は残す
+assets/reference_cache/*.json
+!assets/reference_cache/.gitkeep
+
+# ローカル環境変数・秘密ファイル(念のため)
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+secrets/
+
+# ローカル環境専用の追加設定(実名NGワード辞書 等・公開対象外)
+config.local/
+
+# 内部開発文書(公開対象外・ローカル参照のみ)
+docs/BUG_INVENTORY.md
+docs/TTP_V2_MIGRATION.md
+docs/STUDIO-DESIGN.md
+docs/HIGGSFIELD_E2E.md
+docs/guide/
+docs/**/QA_LOG.md

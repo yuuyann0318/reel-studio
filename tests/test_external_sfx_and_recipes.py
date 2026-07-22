@@ -343,32 +343,43 @@ def test_integrate_scan_records_mean_volume_db(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_normalize_sfx_gain_boosts_quiet_source_toward_target():
-    """mean_volume=-24 (target -16 より小さい) は +8dB のブーストが乗る。"""
+    """mean_volume=-24 (target -12 より小さい) は +12dB のブーストが乗る(BUG-53: target -14→-12)."""
     out = render.normalize_sfx_gain_db(-18.0, -24.0)
-    assert out == pytest.approx(-18.0 + 8.0)
-
-
-def test_normalize_sfx_gain_cuts_loud_source_toward_target():
-    """mean_volume=-8 (target -16 より大きい) は -8dB のカットが乗る。"""
-    out = render.normalize_sfx_gain_db(-18.0, -8.0)
-    assert out == pytest.approx(-18.0 - 8.0)
-
-
-def test_normalize_sfx_gain_clamps_boost_to_plus_12db():
-    """target との差が +12dB を超える場合はクランプされる（無音源の過大ブースト回避）。"""
-    out = render.normalize_sfx_gain_db(-18.0, -60.0)  # diff = +44 → clamp +12
     assert out == pytest.approx(-18.0 + 12.0)
 
 
-def test_normalize_sfx_gain_clamps_cut_to_minus_12db():
-    """target との差が -12dB を超える場合はクランプされる（クリッピング一直線のカット回避）。"""
-    out = render.normalize_sfx_gain_db(-18.0, 5.0)  # diff = -21 → clamp -12
-    assert out == pytest.approx(-18.0 - 12.0)
+def test_normalize_sfx_gain_cuts_loud_source_toward_target():
+    """mean_volume=-8 (target -12 より大きい) は -4dB のカットが乗る(BUG-53: target -14→-12)."""
+    out = render.normalize_sfx_gain_db(-18.0, -8.0)
+    assert out == pytest.approx(-18.0 - 4.0)
 
 
-def test_normalize_sfx_gain_returns_base_when_mean_volume_missing():
-    """manifest 欠損 or 計測失敗（mean_volume_db=None）なら補正しない。"""
-    assert render.normalize_sfx_gain_db(-18.0, None) == pytest.approx(-18.0)
+def test_normalize_sfx_gain_clamps_boost_to_plus_max():
+    """target との差が MAX_ADJUST_DB を超える場合はクランプされる(無音源の過大ブースト回避)."""
+    # mean_volume を極端に小さくして adjust の絶対値が MAX_ADJUST_DB(18) を超えるようにする
+    over_by = render.SFX_MEAN_VOLUME_MAX_ADJUST_DB + 10.0
+    mv = render.SFX_MEAN_VOLUME_TARGET_DB - over_by  # adjust = target-mv = +over_by
+    out = render.normalize_sfx_gain_db(-18.0, mv)
+    assert out == pytest.approx(-18.0 + render.SFX_MEAN_VOLUME_MAX_ADJUST_DB)
+
+
+def test_normalize_sfx_gain_clamps_cut_to_minus_max():
+    """target との差が -MAX_ADJUST_DB を超える場合はクランプされる(クリッピング一直線のカット回避)."""
+    # mean_volume を強めに設定して adjust の絶対値が MAX_ADJUST_DB(18) を超えるようにする
+    over_by = render.SFX_MEAN_VOLUME_MAX_ADJUST_DB + 5.0
+    mv = render.SFX_MEAN_VOLUME_TARGET_DB + over_by  # adjust = target-mv = -over_by
+    out = render.normalize_sfx_gain_db(-18.0, mv)
+    assert out == pytest.approx(-18.0 - render.SFX_MEAN_VOLUME_MAX_ADJUST_DB)
+
+
+def test_normalize_sfx_gain_uses_assumed_mean_when_missing_bug53():
+    """BUG-53: mean_volume_db が None(合成SFX等)でも SFX_ASSUMED_MEAN_VOLUME_DB(-20) で補正する。
+    従来は補正なしで base_gain のまま返していたため、合成SFX が最終ミックスで埋もれていた。
+    target=-12 と assumed_mean=-20 の差 +8dB が base_gain に加算される。
+    """
+    out = render.normalize_sfx_gain_db(-18.0, None)
+    expected_adjust = render.SFX_MEAN_VOLUME_TARGET_DB - render.SFX_ASSUMED_MEAN_VOLUME_DB
+    assert out == pytest.approx(-18.0 + expected_adjust)
 
 
 def test_build_sfx_overlay_filters_applies_mean_volume_normalization():
@@ -376,15 +387,16 @@ def test_build_sfx_overlay_filters_applies_mean_volume_normalization():
     sfx = [
         {"path": "/a.mp3", "at_sec": 1.0, "gain_db": -18.0, "mean_volume_db": -24.0},
         {"path": "/b.mp3", "at_sec": 2.0, "gain_db": -18.0, "mean_volume_db": -8.0},
-        {"path": "/c.mp3", "at_sec": 3.0, "gain_db": -18.0},  # 補正なし
+        {"path": "/c.mp3", "at_sec": 3.0, "gain_db": -18.0},  # mean 未指定 → assumed_mean 補正
     ]
     parts, labels = render.build_sfx_overlay_filters(sfx, start_index=10)
-    # a: base -18 + adjust +8 = -10dB → linear = 10^(-10/20) ≒ 0.3162
-    # b: base -18 + adjust -8 = -26dB → linear = 10^(-26/20) ≒ 0.0501
-    # c: base -18 → linear = 10^(-18/20) ≒ 0.1259
-    assert "volume=0.3162" in parts[0]
-    assert "volume=0.0501" in parts[1]
-    assert "volume=0.1259" in parts[2]
+    # BUG-53(target -16→-12):
+    # a: base -18 + adjust (=-12-(-24)=+12) = -6dB → linear = 10^(-6/20) ≒ 0.5012
+    # b: base -18 + adjust (=-12-(-8) =-4)  = -22dB → linear = 10^(-22/20) ≒ 0.0794
+    # c: base -18 + adjust (=-12-(-20)=+8) = -10dB → linear = 10^(-10/20) ≒ 0.3162
+    assert "volume=0.5012" in parts[0]
+    assert "volume=0.0794" in parts[1]
+    assert "volume=0.3162" in parts[2]
     # ラベルと adelay は従来どおり
     assert "[sfx0]" in parts[0]
     assert "adelay=1000|1000" in parts[0]

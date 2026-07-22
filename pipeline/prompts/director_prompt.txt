@@ -37,14 +37,14 @@ hook / narration_scriptの書き出しは、次の心理トリガーのうち **
 - 効果・成果はすべて「私の場合は」の個人体験として語る（一般論としての効果断定をしない）。
 - 具体の解像度を上げる: 「朝」ではなく「3日目の朝」、「嬉しかった」ではなく「鏡の前で二度見した」のように、
   情景が目に浮かぶ粒度まで踏み込む。
-- caption_jp はそのショットのnarration_jpとほぼ同文にする（TikTokの全文テロップ文化。要約・見出し化しない）。音を消して流し見してもテロップだけで筋が追えること（40字以内は維持）。
+- caption_jp はそのショットのnarration_jpとほぼ同文にする（TikTokの全文テロップ文化。要約・見出し化しない）。音を消して流し見してもテロップだけで筋が追えること（30字以内(25字以内推奨)は維持）。
 
 # 広告っぽさの徹底排除(UGCネイティブ・絶対厳守)
 - これは広告ではなく『友達に送る早口の体験談』。次の広告構文を全面禁止:
   『ぜひ』『おすすめします』『〜してみてください』『今なら』『実感してください』『叶える』『贅沢な』『上質な』
 - 語りは粗くてよい。『〜なんで』『〜だったんだけど』『正直』等の砕けた口語を積極的に使う(下品な語は不可)
 - 1文=1ショット。1文は8〜20字目安に短く割る(長い文は文ごと分割してショットを増やす)
-- caption_jpは要約・見出し化せず、そのショットのnarration_jpとほぼ同文にする(TikTokの全文テロップ文化。40字以内は維持)
+- caption_jpは要約・見出し化せず、そのショットのnarration_jpとほぼ同文にする(TikTokの全文テロップ文化。30字以内(25字以内推奨)は維持)
 - visual_promptは『スマホで撮ったリアルな生活感』に限定: smartphone footage, handheld, everyday Japanese bathroom/bedroom/drugstore shelf, natural imperfect lighting, extreme close-up of skin/hands/product texture
 - visual_promptで禁止: cinematic, professional, studio lighting, elegant, luxurious, perfect, model, advertisement
 
@@ -64,7 +64,7 @@ hook / narration_scriptの書き出しは、次の心理トリガーのうち **
    - visual_prompt: 英語。text-to-video / image-to-video 生成AI向けのビジュアル指示（具体的・簡潔に）
    - motion_preset: 次のいずれか一つ: static, pan_left, pan_right, zoom_in, zoom_out, ken_burns
    - duration_sec: このショットの長さ（秒、1〜20の数値）。全ショットの合計が目標尺±許容誤差に収まること
-   - caption_jp: 画面に焼き込む日本語テロップ。そのショットのnarration_jpとほぼ同文にする（要約・見出し化しない。TikTokの全文テロップ。40字以内は必須）
+   - caption_jp: 画面に焼き込む日本語テロップ。そのショットのnarration_jpとほぼ同文にする（要約・見出し化しない。TikTokの全文テロップ。30字以内は必須(25字以内推奨)）
    - narration_jp: このショットで読み上げるナレーション断片（日本語）。narration_scriptを
      shots順に分割したものの1片であり、全shotsのnarration_jpを順に連結するとnarration_script
      全文と完全一致すること。音読したときduration_sec秒前後になる長さにすること
@@ -73,13 +73,12 @@ hook / narration_scriptの書き出しは、次の心理トリガーのうち **
 
 # 制約（絶対厳守・コンプライアンス）
 - 景品表示法に違反する断定的・誇大な表現（「絶対稼げる」「100%成功」「必ず儲かる」「元本保証」「誰でも稼げる」等）は narration_script / hook / caption_jp に一切含めないこと。
-- 特定の個人名・競合アカウント名（「みお」「@mio_ai_insta_」等）を一切含めないこと。
+- 特定の個人名・SNSアカウント名を一切含めないこと（実在の第三者への言及・匂わせも禁止）。
 - 「解約できない」「返金しない」等、解約条件を不明示にする表現・特定商取引法に抵触しうる表現を使わないこと。
 - shots数は「1文=1ショット」を基本にする（完成尺÷1.5〜2秒が目安）。duration_secの合計が目標尺±許容誤差に収まること。
 - JSON以外の文字列（説明文・コードフェンス```）を一切含めないこと。出力の最初の文字は { 、最後の文字は } であること。
 
-# 出力スキーマ例（このJSON構造のみを出力すること。値は例です。文章の質は下回らないこと）
-{SCHEMA_EXAMPLE}
+# 出力スキーマ（このJSON構造のみを出力すること。参考動画TTPスケルトンが上記に注入されている場合は、そのスケルトンの数値・構造をそのまま保持し、埋め字フィールドのみを書くこと）
 
 ## シーングループ(生成コスト削減のため必ず守ること)
 - 連続する2〜4ショットを1つの『シーン』にまとめ、同じ scene_id を付ける(例: "sc1")

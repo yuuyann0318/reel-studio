@@ -16,7 +16,8 @@ from pipeline.config import load_config
 def test_resolve_ng_words_uses_defaults_when_brand_rules_missing():
     ng_words = run.resolve_ng_words({})
     assert "絶対稼げる" in ng_words
-    assert "みお" in ng_words
+    # DEFAULT_NG_WORDS(景表法系)が常に有効であることを担保
+    assert set(compliance.DEFAULT_NG_WORDS).issubset(set(ng_words))
 
 
 def test_resolve_ng_words_uses_defaults_when_ng_words_key_missing():
@@ -119,7 +120,7 @@ def test_run_pipeline_defaults_style_to_default_when_unspecified(monkeypatch):
 def test_main_argparse_style_default_is_default(monkeypatch):
     captured = {}
 
-    def _fake_run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default"):
+    def _fake_run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default", **_):
         captured["style"] = style
         return {"run_id": "r1", "stages": {}, "ok": True, "output_path": None, "qa": None}
 
@@ -134,7 +135,7 @@ def test_main_argparse_style_default_is_default(monkeypatch):
 def test_main_argparse_style_vertical_hook_is_forwarded(monkeypatch):
     captured = {}
 
-    def _fake_run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default"):
+    def _fake_run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default", **_):
         captured["style"] = style
         return {"run_id": "r1", "stages": {}, "ok": True, "output_path": None, "qa": None}
 
@@ -252,3 +253,183 @@ def test_run_pipeline_missing_narration_jp_on_some_shots_falls_back_to_full_mode
 
     assert report["stages"]["tts"]["mode"] == "full"
     assert called["text"] == "全文ナレーションです。"
+
+
+# ---------------------------------------------------------------------------
+# TTP v2 移行: CLI に --reference-url / --reference-file を追加した経路の検証
+# ---------------------------------------------------------------------------
+
+def test_main_rejects_no_reference_when_llm_mode(monkeypatch, capsys):
+    """--reference-url / --reference-file が無く --no-llm でもない起動は exit 2 + 案内文。"""
+    exit_code = run.main(["--theme", "参考動画無しテスト", "--backend", "mock"])
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "参考動画URLが指定されていません" in captured.err
+    assert "--reference-url" in captured.err
+    assert "--no-llm" in captured.err
+
+
+def test_main_allows_no_llm_without_reference(monkeypatch):
+    """--no-llm 起動は reference 無しでも通る（決定論テンプレート経路）。"""
+    calls = {}
+
+    def _fake_run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default", **kw):
+        calls["no_llm"] = no_llm
+        calls["reference_url"] = kw.get("reference_url")
+        return {"run_id": "r1", "stages": {}, "ok": True, "output_path": None, "qa": None}
+
+    monkeypatch.setattr(run, "run_pipeline", _fake_run_pipeline)
+    exit_code = run.main(["--theme", "no-llm経路", "--backend", "mock", "--no-llm"])
+    assert exit_code == 0
+    assert calls["no_llm"] is True
+    assert calls["reference_url"] is None
+
+
+def test_run_pipeline_records_reference_stage_with_cached_spec(monkeypatch, tmp_path):
+    """--reference-url 指定時の Stage 0 で report.stages.reference に cuts/telops/sfx 件数が
+    記録されること。director/tts/render/qa は fake で早期停止して reference段のみを検証する。"""
+    cfg = load_config()
+
+    fake_spec = {
+        "version": 2, "url": "https://example.com/v/x", "duration_sec": 12.0,
+        "cuts": [{"t": 3.0}, {"t": 6.0}],
+        "telops": [{"start": 0.0, "end": 2.0, "text": "t"}],
+        "sfx_events": [{"t": 3.0, "kind": "impact", "confidence": 0.8}],
+        "warnings": [],
+    }
+
+    def _fake_analyze(url, cfg=None, fetch_video=None, **kw):
+        return {"ok": True, "spec": fake_spec, "source": "cache", "cached": True, "warnings": [], "error": None}
+
+    monkeypatch.setattr(run.reference_v2, "analyze_reference_v2", _fake_analyze)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("stop-after-reference")
+
+    monkeypatch.setattr(run.director, "run_director", _boom)
+
+    report = run.run_pipeline(
+        "参考ステージテスト", 12.0, "mock", False, cfg, quality="single",
+        reference_url="https://example.com/v/x",
+    )
+
+    assert report["stages"]["reference"]["ok"] is True
+    assert report["stages"]["reference"]["cached"] is True
+    assert report["stages"]["reference"]["cuts_count"] == 2
+    assert report["stages"]["reference"]["telops_count"] == 1
+    assert report["stages"]["reference"]["sfx_count"] == 1
+    # 保存されている reference_spec.json が読める
+    spec_path = Path(report["run_dir"]) / "reference_spec.json"
+    assert spec_path.exists()
+
+
+def test_run_pipeline_reference_analysis_failure_stops_run(monkeypatch):
+    """reference 解析が失敗したら reference stage を error にして run を停止する。"""
+    cfg = load_config()
+
+    monkeypatch.setattr(
+        run.reference_v2, "analyze_reference_v2",
+        lambda url, cfg=None, fetch_video=None, **kw: {
+            "ok": False, "spec": None, "error": "取得失敗", "warnings": [],
+        },
+    )
+
+    def _should_not_be_called(*a, **kw):
+        raise AssertionError("参考動画解析失敗後 director が呼ばれてはいけない")
+
+    monkeypatch.setattr(run.director, "run_director", _should_not_be_called)
+
+    report = run.run_pipeline(
+        "解析失敗テスト", 12.0, "mock", False, cfg, quality="single",
+        reference_url="https://example.com/v/fail",
+    )
+    assert report["stages"]["reference"]["ok"] is False
+    assert "取得失敗" in report["stages"]["reference"]["error"]
+    assert report["ok"] is False
+
+
+def test_load_fish_audio_key_from_secrets(monkeypatch, tmp_path):
+    """~/.claude/secrets/fish_audio_key があれば FISH_AUDIO_API_KEY へ載る（既存値は上書きしない）。"""
+    monkeypatch.delenv("FISH_AUDIO_API_KEY", raising=False)
+    secrets_dir = tmp_path / ".claude" / "secrets"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "fish_audio_key").write_text("dummy-key-value\n", encoding="utf-8")
+    monkeypatch.setattr(run.Path, "home", staticmethod(lambda: tmp_path))
+    assert run._load_fish_audio_key_from_secrets() is True
+    assert run.os.environ["FISH_AUDIO_API_KEY"] == "dummy-key-value"
+
+
+def test_load_fish_audio_key_preserves_existing_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("FISH_AUDIO_API_KEY", "already-set")
+    monkeypatch.setattr(run.Path, "home", staticmethod(lambda: tmp_path))
+    assert run._load_fish_audio_key_from_secrets() is True
+    assert run.os.environ["FISH_AUDIO_API_KEY"] == "already-set"
+
+
+# ---------------------------------------------------------------------------
+# BUG-55: 表示尺スケールで caption/SFX offsets を線形補正するヘルパ
+# ---------------------------------------------------------------------------
+
+def test_scale_shot_for_display_scales_caption_offsets_proportionally():
+    """BUG-55: display_duration が duration_sec の 0.5 倍なら caption offsets も 0.5 倍される。"""
+    shot = {
+        "id": "s1", "duration_sec": 4.0,
+        "caption_in_offset_sec": 2.0, "caption_out_offset_sec": 4.0,
+    }
+    result = run._scale_shot_for_display(shot, 2.0)
+    assert result["duration_sec"] == 2.0
+    assert result["caption_in_offset_sec"] == 1.0
+    assert result["caption_out_offset_sec"] == 2.0
+
+
+def test_scale_shot_for_display_no_change_when_display_equals_original():
+    shot = {"id": "s1", "duration_sec": 3.0, "caption_in_offset_sec": 1.5}
+    result = run._scale_shot_for_display(shot, 3.0)
+    assert result["caption_in_offset_sec"] == 1.5
+
+
+def test_scale_shot_for_display_leaves_shot_without_offsets_unchanged():
+    shot = {"id": "s1", "duration_sec": 4.0, "caption_jp": "テスト"}
+    result = run._scale_shot_for_display(shot, 2.0)
+    assert result["duration_sec"] == 2.0
+    assert "caption_in_offset_sec" not in result
+    assert result["caption_jp"] == "テスト"
+
+
+def test_build_display_scaled_plan_scales_sfx_plan_offsets():
+    """BUG-55: sfx_plan の t_anchor.offset_sec も表示尺スケールで線形補正される。"""
+    plan = {
+        "shots": [
+            {"id": "s1", "duration_sec": 4.0, "caption_in_offset_sec": 2.0,
+             "caption_out_offset_sec": 4.0},
+            {"id": "s2", "duration_sec": 2.0},
+        ],
+        "sfx_plan": [
+            {"family": "whoosh",
+             "t_anchor": {"type": "shot_start", "shot_id": "s1", "offset_sec": 3.0}},
+            {"family": "impact",
+             "t_anchor": {"type": "shot_start", "shot_id": "s2", "offset_sec": 1.0}},
+        ],
+    }
+    display = {"s1": 2.0, "s2": 2.0}  # s1: 4→2 (0.5倍), s2: 2→2 (等倍)
+    scaled = run._build_display_scaled_plan(plan, display)
+    assert scaled["shots"][0]["duration_sec"] == 2.0
+    assert scaled["shots"][0]["caption_in_offset_sec"] == 1.0
+    assert scaled["shots"][0]["caption_out_offset_sec"] == 2.0
+    # s1 のSFX offset は 0.5倍
+    assert scaled["sfx_plan"][0]["t_anchor"]["offset_sec"] == 1.5
+    # s2 は等倍
+    assert scaled["sfx_plan"][1]["t_anchor"]["offset_sec"] == 1.0
+    # 元 plan は変更されない
+    assert plan["shots"][0]["duration_sec"] == 4.0
+    assert plan["sfx_plan"][0]["t_anchor"]["offset_sec"] == 3.0
+
+
+def test_build_display_scaled_plan_handles_missing_sfx_plan():
+    plan = {
+        "shots": [{"id": "s1", "duration_sec": 3.0}],
+    }
+    display = {"s1": 2.0}
+    scaled = run._build_display_scaled_plan(plan, display)
+    assert "sfx_plan" not in scaled
+    assert scaled["shots"][0]["duration_sec"] == 2.0

@@ -760,6 +760,7 @@ def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None
             build_dialogue_line(
                 piece["out_start"], piece["out_end"], lines, emphasis, piece_style, color_map=color_map,
                 animation_enabled=animation_enabled,
+                font_px_override=piece.get("font_px_override"),
             )
         )
     return "\n".join(lines_out) + "\n"
@@ -1018,7 +1019,7 @@ def _pop_override_block(duration_sec):
 
 
 def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base", color_map=None,
-                        animation_enabled=True):
+                        animation_enabled=True, font_px_override=None):
     style_name = "Big" if style == "big" else "Base"
     start = seconds_to_ass_time(out_start)
     end = seconds_to_ass_time(out_end)
@@ -1028,6 +1029,10 @@ def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base", 
     # animation_enabled=False のときは \fad/\fscx/\fscy/\t 系のアニメ指定を一切付けない
     # （テロップをカットインで即時表示する。既定Trueは完全後方互換）。
     override = _pop_override_block(duration_sec) if animation_enabled else ""
+    # BUG-54: piece に font_px_override があれば Dialogue にインラインで {\fs<n>} を付与し
+    # そのcaptionだけフォントを縮小する(Style行は既定サイズ据え置き)。
+    if font_px_override is not None:
+        override = "{{\\fs{}}}".format(int(font_px_override)) + override
     text = override + build_dialogue_text(lines, emphasis, color_map=color_map)
     return "Dialogue: 0,{},{},{},,0,0,0,,{}".format(start, end, style_name, text)
 
@@ -1046,6 +1051,7 @@ def generate_ass(telop_pieces, animation_enabled=True, telop_style=None):
             build_dialogue_line(
                 piece["out_start"], piece["out_end"], piece["lines"], piece.get("emphasis"), piece.get("style", "base"),
                 animation_enabled=animation_enabled,
+                font_px_override=piece.get("font_px_override"),
             )
         )
     return "\n".join(lines_out) + "\n"
@@ -1117,6 +1123,66 @@ def _pick_balanced_break(text, max_chars):
     return best
 
 
+# --- 幅ベースの折り返し（BUG-54: 見切れ対策） -------------------------------------
+# 「1行に収まる字数」を字数固定ではなく描画幅で算出し、収まらなければフォントサイズを
+# 段階縮小して再計算する。全角=フォントpx、半角=フォントpx*0.5 で近似する
+# （日本語主体captionでは十分な精度）。
+CAPTION_SAFE_WIDTH_RATIO = 0.90  # PlayResX=1080 × 0.9 = 972 を上限に MarginL/R を引く
+CAPTION_FONT_STEP_PX = 8  # 縮小ステップ幅
+CAPTION_MIN_FONT_PX = 48  # フォント縮小の下限（下線割れ・可読性下限）
+
+
+def _char_visual_width_px(ch, font_px):
+    """1文字の描画幅の近似(px)。半角(ASCII)は0.5倍、全角は1倍の font_px 相当。"""
+    if ord(ch) < 128:
+        return float(font_px) * 0.5
+    return float(font_px) * 1.0
+
+
+def _line_visual_width_px(line, font_px):
+    return sum(_char_visual_width_px(c, font_px) for c in line)
+
+
+def caption_safe_width_px(margin_l=MARGIN_L, margin_r=MARGIN_R):
+    """1行に使える横幅(px)。PlayResX * ratio - MarginL/R を返す。"""
+    return float(PLAY_RES_X) * CAPTION_SAFE_WIDTH_RATIO - float(margin_l) - float(margin_r)
+
+
+def wrap_caption_by_width(text, font_px, safe_width_px=None, max_lines=2,
+                          min_font_px=CAPTION_MIN_FONT_PX, font_step_px=CAPTION_FONT_STEP_PX):
+    """描画幅ベースで折り返し、収まらなければフォントを段階縮小して再試行する。
+
+    Returns: (lines: List[str], effective_font_px: int)
+    - font_px を初期値として、1行あたりの最大文字数を floor(safe_width_px / font_px)
+      として wrap_caption_kinsoku で折り返す(既存の文節境界・禁則ロジックを継続利用)。
+    - 分割後の各行の実測描画幅が safe_width_px 以下、かつ行数が max_lines 以内なら OK。
+    - どちらかを満たさなければ font_px -= font_step_px して再計算。min_font_px を下回っても
+      収まらない場合は「min_font_px でベストエフォート」の結果を返す(3行以上/若干見切れの
+      可能性は残るがレンダを止めないため)。
+    """
+    text = (text or "").strip()
+    if not text:
+        return [], int(font_px)
+    if safe_width_px is None:
+        safe_width_px = caption_safe_width_px()
+    safe_width_px = float(safe_width_px)
+    tried = int(font_px)
+    while True:
+        max_chars = max(1, int(safe_width_px // tried))  # 全角1文字=font_pxとみなす保守寄り
+        lines = wrap_caption_kinsoku(text, max_chars=max_chars, max_lines=max_lines)
+        fits_rows = len(lines) <= max_lines
+        fits_width = all(_line_visual_width_px(ln, tried) <= safe_width_px + 1e-6 for ln in lines)
+        if fits_rows and fits_width:
+            return lines, tried
+        next_try = tried - int(font_step_px)
+        if next_try < int(min_font_px):
+            # 下限に達しても収まらない場合: 下限フォントで最終計算(3行以上になるかもしれない)。
+            fallback_chars = max(1, int(safe_width_px // int(min_font_px)))
+            fallback_lines = wrap_caption_kinsoku(text, max_chars=fallback_chars, max_lines=max_lines)
+            return fallback_lines, int(min_font_px)
+        tried = next_try
+
+
 def wrap_caption_kinsoku(text, max_chars=13, max_lines=2):
     """caption_jpを最大max_lines行に分割する。
 
@@ -1153,34 +1219,65 @@ def build_telop_pieces_from_shots(shots, hook_shot_id=None):
     ショットの累積時間で out_start/out_end を決める（=render.py がクリップを
     順番に連結する前提と一致させる）。hook_shot_id と一致するショットは
     style="big" にして強調する（最初のショットが無指定ならデフォルトで強調）。
+
+    plan v2 拡張: shot に caption_in_offset_sec / caption_out_offset_sec が
+    設定されていれば、テロップの表示開始/終了時刻をショット内のその相対秒に
+    合わせる（既定はショット表示区間の先頭〜末尾。SEと字幕が同じ時刻源=
+    caption_in_offset_sec を共有し、映像意図と一致する）。未指定なら従来どおり
+    ショット全区間を使う（完全後方互換）。
     """
     pieces = []
     cursor = 0.0
     first_id = shots[0]["id"] if shots else None
     for shot in shots or []:
         dur = float(shot.get("duration_sec", 0.0))
-        out_start, out_end = cursor, cursor + dur
-        cursor = out_end
+        shot_start = cursor
+        shot_end = cursor + dur
+        cursor = shot_end
         caption = (shot.get("caption_jp") or "").strip()
         if not caption:
             continue
-        # 長文caption（>26字）は max_chars=13 のままだと2行目が最大27字となり
-        # 画面幅（既定フォント20字/行相当）を超えて枠外にはみ出す。ceil(len/2)を
-        # max_charsに使い両行が~ceil(len/2)+数字字以内に収まるようにする（[高]バグ修正）。
-        # <=26字は従来どおり13字禁則で（既存テスト・BUG-2/5挙動を維持）。
-        cap_len = len(caption)
-        if cap_len > 26:
-            wrap_max_chars = -(-cap_len // 2)  # ceil(cap_len / 2)
+        # plan v2: caption_in/out offset があればテロップ表示区間をそのオフセットに合わせる。
+        cap_in_off = shot.get("caption_in_offset_sec")
+        cap_out_off = shot.get("caption_out_offset_sec")
+        if cap_in_off is not None:
+            out_start = shot_start + float(cap_in_off)
         else:
-            wrap_max_chars = 13
-        lines = wrap_caption_kinsoku(caption, max_chars=wrap_max_chars, max_lines=2)
+            out_start = shot_start
+        if cap_out_off is not None:
+            out_end = shot_start + float(cap_out_off)
+        else:
+            out_end = shot_end
+        # 極端に反転している場合の安全側フォールバック（validate_plan で弾かれる前提だが、
+        # 直接 build_telop_pieces_from_shots を叩くコード経路のための保険）。
+        if out_end < out_start:
+            out_end = out_start
+        # BUG-55: caption offsets が shot 表示境界を越えて次shotに食い込むのを防ぐ。
+        # scale 済みでも小数誤差や director の offset がショット尺と等値の場合の余裕として
+        # shot_end で厳密にクランプする。フェードアウト分は ASS の \fad が Dialogue End
+        # から逆算して描画するため、End=shot_end に切ってあれば境界越え発生しない。
+        if out_end > shot_end:
+            out_end = shot_end
+        if out_start > shot_end:
+            out_start = shot_end
+        if out_start < shot_start:
+            out_start = shot_start
+        # BUG-54: 描画幅ベースで折り返し。既定フォント(base=76 / big=92)で2行に収まらない
+        # 場合はフォントを段階縮小(min 48px)して再計算する。piece に effective font_px を
+        # 載せ、build_dialogue_line で \fs<n> を Dialogue に前置する(Style行はいじらない)。
+        is_big = shot.get("id") == (hook_shot_id or first_id)
+        default_font_px = STYLE_BIG_FONTSIZE if is_big else STYLE_BASE_FONTSIZE
+        lines, effective_font_px = wrap_caption_by_width(caption, default_font_px)
         if not lines:
             continue
-        style = "big" if shot.get("id") == (hook_shot_id or first_id) else "base"
-        # "caption"は生のキャプション文字列（vertical_hookスタイルの縦書き組版で使う。
-        # "lines"は横書き禁則改行済みの行配列で、既定スタイルはこちらを使い続ける）。
-        pieces.append({
+        style = "big" if is_big else "base"
+        piece = {
             "out_start": out_start, "out_end": out_end, "lines": lines, "emphasis": [], "style": style,
             "caption": caption,
-        })
+        }
+        if int(effective_font_px) != int(default_font_px):
+            piece["font_px_override"] = int(effective_font_px)
+        # "caption"は生のキャプション文字列（vertical_hookスタイルの縦書き組版で使う。
+        # "lines"は横書き禁則改行済みの行配列で、既定スタイルはこちらを使い続ける）。
+        pieces.append(piece)
     return pieces

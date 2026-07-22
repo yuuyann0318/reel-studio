@@ -15,7 +15,8 @@ _DEFAULTS = {
     "backend": "mock",
     "ffmpeg_bin": str(_PROJECT_ROOT / "bin" / "ffmpeg"),
     "ffprobe_bin": str(_PROJECT_ROOT / "bin" / "ffprobe"),
-    "claude_bin": "/Users/yuuya/.local/bin/claude",
+    # 空文字 or 未設定なら claude_runner 側で `claude` コマンドを PATH 解決する。
+    "claude_bin": "",
     "claude_model": "claude-fable-5",
     "claude_timeout_sec": 600,
     "resolution": [1080, 1920],
@@ -49,6 +50,20 @@ _DEFAULTS = {
         "min_short_side": 400,
         "local_dir": "assets/products/inbox",
         "timeout_sec": 20,
+    },
+    "reference": {
+        "cache_dir": "assets/reference_cache",
+        "yt_dlp_bin": "bin/yt-dlp_macos",
+        "download_timeout_sec": 120,
+        "asr_timeout_sec": 120,
+        "max_video_sec": 180,
+        "scene_threshold": 0.30,
+        "max_vision_calls": 4,
+        "max_frames": 40,
+        "vision_batch_size": 10,
+        "vision_timeout_sec": 600,
+        "onset_jump_db": 6.0,
+        "onset_window_samples": 2048,
     },
 }
 

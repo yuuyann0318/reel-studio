@@ -192,11 +192,23 @@ def gain_db_to_linear(gain_db):
 # mean_volume(dB FS) がこの値になるように gain 補正を掛ける。実効的な聴感音量は
 # SFX の crest factor（ピーク/平均比）にも依存するため完璧ではないが、
 # 「効果音ラボ由来の音源だけ極端に大きい/小さい」を実用範囲まで詰めることが目的。
-SFX_MEAN_VOLUME_TARGET_DB = -16.0
+# BUG-53 修正: 従来 -16dB では最終ミックスで SE がベースライン+3dB を満たさず埋もれていた。
+# ミックス経路変更(loudnorm後段でSFXオーバーレイ + BGM/main の SE時刻ダッキング)と合わせて
+# -12dB にターゲットを上げる(narration RMS が loudnorm 後で -14dB 付近になるため、SE を
+# 3dB 上に載せて 50ms 窓 RMS がベースライン+3dB を安定して超えるようにする)。
+SFX_MEAN_VOLUME_TARGET_DB = -12.0
 
 # gain 補正の絶対値上限（±dB）。無音に近い音源への過大ブースト（ノイズ増幅）と、
-# インパクト系のピーク過大カットを両側で防ぐ。
-SFX_MEAN_VOLUME_MAX_ADJUST_DB = 12.0
+# インパクト系のピーク過大カットを両側で防ぐ。ブースト側の上限を +18dB へ引き上げる
+# (BUG-53: mean_volume=-24 の SFX 素材でも target -12dB 相当に届かせるため。
+#  -24 - (-12) = 12dB の adjust では届かず、+16〜+18 のブーストが必要になるケースがある)。
+SFX_MEAN_VOLUME_MAX_ADJUST_DB = 18.0
+
+
+# 合成SFX(whoosh_gen_*.wav 等)は manifest に mean_volume_db を持たないため補正が無効化される。
+# 実測で generate_sfx_library.py の合成SFXは mean_volume ≈ -20dB 前後になることが多く、
+# BUG-53(SE 埋もれ) の対策として mean_volume 欠損時はこの想定値で補正を進める。
+SFX_ASSUMED_MEAN_VOLUME_DB = -20.0
 
 
 def normalize_sfx_gain_db(base_gain_db, mean_volume_db,
@@ -204,17 +216,20 @@ def normalize_sfx_gain_db(base_gain_db, mean_volume_db,
                           max_adjust_db=SFX_MEAN_VOLUME_MAX_ADJUST_DB):
     """SFX の mean_volume(dB) を target に揃える補正量を base_gain_db に足して返す。
 
-    - mean_volume_db が None（manifest 欠損 or ffmpeg 計測失敗）→ base_gain_db をそのまま返す。
+    - mean_volume_db が None（manifest 欠損 or ffmpeg 計測失敗）→ SFX_ASSUMED_MEAN_VOLUME_DB
+      (-20dB 前後) で補正する(BUG-53: 合成SFXが manifest に mean 未記録のため常に補正なし
+      となっていた問題への対処。実測 -19〜-22dB のため -20dB を保守値として採用)。
     - 補正量 = target_db - mean_volume_db を ±max_adjust_db にクランプ。
     - 音源が target より小さい(-24dB など)→ 正の補正でブースト、
       音源が target より大きい(-8dB など)→ 負の補正でカット。
     """
     if mean_volume_db is None:
-        return float(base_gain_db)
-    try:
-        mv = float(mean_volume_db)
-    except (TypeError, ValueError):
-        return float(base_gain_db)
+        mv: float = SFX_ASSUMED_MEAN_VOLUME_DB
+    else:
+        try:
+            mv = float(mean_volume_db)
+        except (TypeError, ValueError):
+            return float(base_gain_db)
     adjust = float(target_db) - mv
     limit = abs(float(max_adjust_db))
     if adjust > limit:
@@ -243,8 +258,14 @@ def build_sfx_overlay_filters(sfx, start_index):
         at_sec = max(0.0, float(s.get("at_sec", 0.0) or 0.0))
         delay_ms = int(round(at_sec * 1000))
         label = "sfx{}".format(i)
+        # BUG-53: 外部SFX素材はステレオ(anime_*.mp3 等)だが narration は mono のため、
+        # channel_layouts 不一致で amix の出力が意図せず減衰する(実測: SFXが最終ミックスで
+        # 事実上消える)。aformat=channel_layouts=mono:sample_rates=48000 を強制して
+        # narration の layout に揃える(mono downmix は L/R 平均で -3dB 相当だがそのぶん
+        # gain_db 側で吸収する。48kHz は narration/BGM に合わせる)。
         filter_parts.append(
-            "[{idx}:a]volume={gain:.4f},adelay={delay}|{delay}[{label}]".format(
+            "[{idx}:a]aformat=channel_layouts=mono:sample_rates=48000,volume={gain:.4f},"
+            "adelay={delay}|{delay}[{label}]".format(
                 idx=idx, gain=gain_db_to_linear(effective_gain_db), delay=delay_ms, label=label
             )
         )
@@ -500,6 +521,48 @@ def resolve_punch_in_filter_for_shot(shot_index, duration_sec, edit_profile, bac
     return build_punch_in_zoompan_filter(pattern_name, max_zoom, duration_sec)
 
 
+# BGM ダッキング(SE時刻±sfx_dip_half_window_sec で -sfx_dip_db) の既定値。
+# BUG-53: SEが最終ミックスで埋もれる問題への追加対策として、SE時刻の窓のみ BGM を
+# 追加ダウンさせて SE の可聴性を担保する。
+SFX_DIP_HALF_WINDOW_SEC = 0.3
+SFX_DIP_GAIN_DB = -4.0
+# 本編ミックス全体(loudnorm 後の [main_loud_raw]) を SE 時刻で短時間ダッキングする値。
+# BGM だけ -4dB では narration が実測 RMS の大半を占めるため、SE の可聴性が担保できない
+# ことが実測で判明した(BUG-53 修正の追加対策)。narration+BGM をまとめて短時間 -6dB 下げ、
+# SE の 50ms 窓 RMS がベースライン+3dB を超えるヘッドルームを作る。dip 幅は 0.15s と狭くし
+# 過剰ダッキングで narration が体感的に途切れないようにする。
+MAIN_DIP_GAIN_DB = -6.0
+MAIN_DIP_HALF_WINDOW_SEC = 0.15
+
+
+def build_main_dip_volume_filter(dip_events, half_window_sec=MAIN_DIP_HALF_WINDOW_SEC,
+                                  dip_gain_db=MAIN_DIP_GAIN_DB):
+    """[main_loud] を SE 時刻の窓だけ -dip_gain_db ダッキングする volume フィルタ式を返す。
+
+    dip_events: [t_sec, ...]。t_sec ± half_window_sec の窓の間だけ dip_gain_db を掛ける。
+    dip_events が空/None なら "volume=1.0" を返す(=何もしない・後方互換)。
+    """
+    if not dip_events:
+        return "volume=1.0"
+    dip_lin = gain_db_to_linear(dip_gain_db)
+    window_terms = []
+    for t in dip_events:
+        try:
+            tv = float(t)
+        except (TypeError, ValueError):
+            continue
+        if tv < 0:
+            tv = 0.0
+        lo = max(0.0, tv - float(half_window_sec))
+        hi = tv + float(half_window_sec)
+        window_terms.append("between(t,{lo:.3f},{hi:.3f})".format(lo=lo, hi=hi))
+    if not window_terms:
+        return "volume=1.0"
+    in_any = "+".join(window_terms)
+    expr = "if(gt({in_any},0),{dip:.4f},1)".format(in_any=in_any, dip=dip_lin)
+    return "volume='{}':eval=frame".format(expr)
+
+
 def build_bgm_curve_volume_filter(bgm_curve, fallback_linear):
     """BGM音量カーブ（フック/本編/CTAの三段volume）用のvolumeフィルタ片を構築する。
 
@@ -510,6 +573,10 @@ def build_bgm_curve_volume_filter(bgm_curve, fallback_linear):
     bgm_curveありの場合: t（秒）がhook_end_sec未満ならhook音量、cta_start_sec以上なら
     cta音量、それ以外（本編区間）はbody音量、をffmpegのif()式でframe単位に評価する
     （volume=...:eval=frame）。
+
+    さらに bgm_curve["dip_events"] = [t_sec, ...] が指定されていれば、各 t_sec ±
+    sfx_dip_half_window_sec の窓の間だけ追加で SFX_DIP_GAIN_DB (=-4dB相当) を掛ける
+    (BUG-53: SE埋もれ対策の追加ダッキング)。dip_events が空/未指定なら従来どおり。
     """
     if not isinstance(bgm_curve, dict):
         return "volume={:.4f}".format(fallback_linear)
@@ -518,10 +585,34 @@ def build_bgm_curve_volume_filter(bgm_curve, fallback_linear):
     hook_lin = gain_db_to_linear(bgm_curve.get("hook_gain_db", -10))
     body_lin = gain_db_to_linear(bgm_curve.get("body_gain_db", -14))
     cta_lin = gain_db_to_linear(bgm_curve.get("cta_gain_db", -12))
-    expr = "if(lt(t,{hook_end:.3f}),{hook:.4f},if(gte(t,{cta_start:.3f}),{cta:.4f},{body:.4f}))".format(
+    base_expr = "if(lt(t,{hook_end:.3f}),{hook:.4f},if(gte(t,{cta_start:.3f}),{cta:.4f},{body:.4f}))".format(
         hook_end=hook_end, cta_start=cta_start, hook=hook_lin, cta=cta_lin, body=body_lin
     )
-    return "volume='{}':eval=frame".format(expr)
+    dip_events = bgm_curve.get("dip_events") or []
+    if dip_events:
+        half_w = float(bgm_curve.get("sfx_dip_half_window_sec", SFX_DIP_HALF_WINDOW_SEC))
+        dip_db = float(bgm_curve.get("sfx_dip_gain_db", SFX_DIP_GAIN_DB))
+        dip_lin = gain_db_to_linear(dip_db)
+        # 「いずれかの dip 窓内か?」を or 連鎖で判定し、真なら base_expr に dip_lin を掛ける。
+        window_terms = []
+        for t in dip_events:
+            try:
+                tv = float(t)
+            except (TypeError, ValueError):
+                continue
+            if tv < 0:
+                tv = 0.0
+            lo = max(0.0, tv - half_w)
+            hi = tv + half_w
+            window_terms.append("between(t,{lo:.3f},{hi:.3f})".format(lo=lo, hi=hi))
+        if window_terms:
+            # if(A + B + C + ... > 0, dip_lin, 1) を掛ける形で合成
+            in_any = "+".join(window_terms)
+            full_expr = "({base})*if(gt({in_any},0),{dip:.4f},1)".format(
+                base=base_expr, in_any=in_any, dip=dip_lin,
+            )
+            return "volume='{}':eval=frame".format(full_expr)
+    return "volume='{}':eval=frame".format(base_expr)
 
 
 def build_first_shot_impact_filter(duration_sec=0.3, start_scale=1.04, fps=30):
@@ -537,7 +628,7 @@ def build_first_shot_impact_filter(duration_sec=0.3, start_scale=1.04, fps=30):
     ).format(z=z_expr, size=_PUNCH_IN_OUTPUT_SIZE, fps=fps)
 
 
-def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_seed=None):
+def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_seed=None, plan=None):
     """editプロファイルと各ショットの表示尺（秒・ショット順のリスト）から、build_final_cmdへ
     渡す追加引数 {"sfx_extra","bgm_curve","first_shot_impact_sec"} をまとめて計算する純関数。
 
@@ -548,6 +639,16 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
     project_seed（任意）: カットSEをローテーション（cut_sfx.rotate=True）するときの
     決定論シード。プロジェクトごとに異なる seed を渡すと、同じ台本でも別プロジェクトなら
     別のSFX並びになる。None（未指定）でも動作は継続する（同じ並びを再現）。
+
+    plan（任意・後方互換）: pipeline.plan_schema.validate_plan() が返す plan dict。
+      - plan.sfx_plan があれば pipeline.sfx_planner.resolve_sfx_events() 経路で
+        「映像を意識した」SE配置を採用する（既存の機械配置=compute_cut_sfx_events は
+        plan v1 用フォールバックに降格）。shot_durations_sec は plan.shots と同順で
+        「実測済みの表示尺」を渡すこと（尺が変わってもSEがズレない）。
+      - plan.hook_end_shot_id / plan.cta_start_shot_id があれば
+        pipeline.sfx_planner.resolve_hook_cta_bounds() 経路で bgm_curve 境界を
+        実測境界から解決する（機械仮定 boundaries[1] / boundaries[-1] はフォールバック）。
+      - plan=None なら従来と完全に同じ挙動（後方互換）。
     """
     edit_profile = edit_profile or {}
     durations = [float(d) for d in (shot_durations_sec or [])]
@@ -559,22 +660,56 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
         cursor += d
     total_duration = cursor
 
-    # ビート境界のヒント（カットSEローテーションの位置別重み付けに使う）。
-    hook_end_hint = boundaries[1] if len(boundaries) > 1 else None
-    cta_start_hint = boundaries[-1] if durations else None
+    # plan v2 経路: sfx_plan / hook_end_shot_id / cta_start_shot_id を優先。
+    plan_has_sfx_plan = isinstance(plan, dict) and bool(plan.get("sfx_plan"))
+    plan_hook_end_sec = None
+    plan_cta_start_sec = None
+    if isinstance(plan, dict) and (plan.get("hook_end_shot_id") or plan.get("cta_start_shot_id")):
+        # 遅延importで循環を避ける
+        from pipeline import sfx_planner as _sp
+        plan_hook_end_sec, plan_cta_start_sec = _sp.resolve_hook_cta_bounds(plan, durations)
 
-    sfx_extra = build_edit_cut_sfx_specs(
-        boundaries, edit_profile,
-        project_seed=project_seed,
-        hook_end_sec=hook_end_hint,
-        cta_start_sec=cta_start_hint,
-    ) if durations else []
+    # ビート境界のヒント: plan v2 由来を優先、無ければ機械仮定 boundaries[1]/boundaries[-1]。
+    hook_end_hint = plan_hook_end_sec if plan_hook_end_sec is not None else (
+        boundaries[1] if len(boundaries) > 1 else None
+    )
+    cta_start_hint = plan_cta_start_sec if plan_cta_start_sec is not None else (
+        boundaries[-1] if durations else None
+    )
+
+    if plan_has_sfx_plan and durations:
+        # plan v2 経路: sfx_planner で解決
+        from pipeline import sfx_planner as _sp
+        cut_cfg = edit_profile.get("cut_sfx") or {}
+        # sfx_planner は enabled/min_interval を尊重する（enabled=False → 空 sfx）
+        if cut_cfg.get("enabled", True):
+            min_interval = cut_cfg.get("min_interval_sec", _sp.DEFAULT_MIN_INTERVAL_SEC)
+            default_gain = cut_cfg.get("gain_db", _sp.DEFAULT_GAIN_DB)
+            manifest = cut_cfg.get("manifest") or []
+            sfx_extra = _sp.resolve_sfx_events(
+                plan, durations,
+                edit_profile=edit_profile,
+                manifest=manifest,
+                project_seed=project_seed,
+                min_interval_sec=min_interval,
+                default_gain_db=default_gain,
+            )
+        else:
+            sfx_extra = []
+    else:
+        # plan v1 / plan 未指定: 従来経路（compute_cut_sfx_events 経由）
+        sfx_extra = build_edit_cut_sfx_specs(
+            boundaries, edit_profile,
+            project_seed=project_seed,
+            hook_end_sec=hook_end_hint,
+            cta_start_sec=cta_start_hint,
+        ) if durations else []
 
     bgm_curve = None
     bgm_cfg = edit_profile.get("bgm_curve") or {}
     if durations and bgm_cfg.get("enabled", True):
-        hook_end = boundaries[1] if len(boundaries) > 1 else total_duration
-        cta_start = boundaries[-1]
+        hook_end = hook_end_hint if hook_end_hint is not None else total_duration
+        cta_start = cta_start_hint if cta_start_hint is not None else total_duration
         bgm_curve = {
             "hook_end_sec": hook_end,
             "cta_start_sec": cta_start,
@@ -583,23 +718,45 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
             "cta_gain_db": bgm_cfg.get("cta_gain_db", -12),
             "fade_out_sec": bgm_cfg.get("fade_out_sec", 1.5),
         }
+        # BUG-53: SE時刻±0.3sで-4dBダッキング。sfx_extra の at_sec を dip_events に写す
+        # (plan.sfx_plan 経路・plan v1 経路の両方をカバー)。edit_profile 側で
+        # bgm_curve.sfx_dip_enabled=False を指定した場合はこの処理をスキップする。
+        if bgm_cfg.get("sfx_dip_enabled", True) and sfx_extra:
+            dip_events = []
+            for s in sfx_extra:
+                try:
+                    dip_events.append(float(s.get("at_sec", 0.0) or 0.0))
+                except (TypeError, ValueError):
+                    continue
+            if dip_events:
+                bgm_curve["dip_events"] = dip_events
+                if "sfx_dip_half_window_sec" in bgm_cfg:
+                    bgm_curve["sfx_dip_half_window_sec"] = float(bgm_cfg["sfx_dip_half_window_sec"])
+                if "sfx_dip_gain_db" in bgm_cfg:
+                    bgm_curve["sfx_dip_gain_db"] = float(bgm_cfg["sfx_dip_gain_db"])
 
     first_shot_impact_sec = None
     impact_cfg = edit_profile.get("first_shot_impact") or {}
     if durations and impact_cfg.get("enabled", True) and impact_cfg.get("scale_pop", True):
         first_shot_impact_sec = min(0.3, durations[0])
 
+    # BUG-53: main mix のダッキング窓時刻 = SE の at_sec 列。build_final_cmd の
+    # main_dip_events 引数へ渡すことで、SE の 50ms 窓 RMS がベースライン+3dB を超える
+    # ヘッドルームを作る。sfx_extra が空なら main_dip_events も空。
+    main_dip_events = [float(s.get("at_sec") or 0.0) for s in (sfx_extra or [])]
+
     return {
         "sfx_extra": sfx_extra,
         "bgm_curve": bgm_curve,
         "first_shot_impact_sec": first_shot_impact_sec,
+        "main_dip_events": main_dip_events,
     }
 
 
 def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_path, ass_path, fonts_dir,
                      bgm_path=None, out_duration=None, loudnorm_measured=None,
                      audio_prefilter=None, tp_target=-1.0, bgm_gain_db=None, sfx=None, ducking=True,
-                     bgm_curve=None, first_shot_impact_sec=None):
+                     bgm_curve=None, first_shot_impact_sec=None, main_dip_events=None):
     """字幕焼き込み＋ナレーション＋BGMダッキング＋SFXオーバーレイ＋loudnorm＋最終エンコード。
 
     入力: [0]=連結済み映像(音声なし), [1]=ナレーションwav, [2]=BGM(任意),
@@ -633,30 +790,35 @@ def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_pa
     cmd = [ffmpeg_bin, "-y", "-i", concat_video_path, "-i", narration_wav_path]
     next_index = 2
 
+    # BUG-53: ミックス経路を再構成。
+    #   - loudnorm 2パスは本編ミックス(ナレーション+BGM)のみに掛ける([main_mix])。
+    #   - SFXオーバーレイは loudnorm の後段で乗せる(=ラウドネス平坦化でSEのピークが潰されない)。
+    #   - SFX重畳後は alimiter でクリップ防止(SEオーバーレイは normalize=0 で合算するため)。
+    # BGM/ナレのミックス(=[main_mix]) を組み立てる chain 断片
     if bgm_path:
         cmd += ["-i", bgm_path]
         bgm_index = next_index
         next_index += 1
         fade_st = max(dur - fade_out_sec, 0.0)
         if ducking:
-            chain = (
+            main_chain = (
                 "[0:v]{impact}{subs}[vout];"
                 "[{bgm_idx}:a]aloop=loop=-1:size=2e9,atrim=0:{dur:.3f},afade=t=out:st={fade_st:.3f}:d={fade_out:.3f},{bgm_vol_filter}[bgm];"
                 "[1:a]{pre}apad=whole_dur={dur:.3f},asplit[voice][sc];"
                 "[bgm][sc]sidechaincompress=threshold=0.02:ratio=10:attack=20:release=500:makeup=1[duck];"
-                "[voice][duck]amix=inputs=2:duration=longest:normalize=0[premix]"
+                "[voice][duck]amix=inputs=2:duration=longest:normalize=0[main_mix]"
             ).format(impact=impact_prefix, subs=subtitles_filter, dur=dur, fade_st=fade_st, fade_out=fade_out_sec,
-                     pre=prefilter, loud=loudnorm_filter, bgm_idx=bgm_index, bgm_vol_filter=bgm_volume_filter)
+                     pre=prefilter, bgm_idx=bgm_index, bgm_vol_filter=bgm_volume_filter)
         else:
-            chain = (
+            main_chain = (
                 "[0:v]{impact}{subs}[vout];"
                 "[{bgm_idx}:a]aloop=loop=-1:size=2e9,atrim=0:{dur:.3f},afade=t=out:st={fade_st:.3f}:d={fade_out:.3f},{bgm_vol_filter}[bgm];"
                 "[1:a]{pre}apad=whole_dur={dur:.3f}[voice];"
-                "[voice][bgm]amix=inputs=2:duration=longest:normalize=0[premix]"
+                "[voice][bgm]amix=inputs=2:duration=longest:normalize=0[main_mix]"
             ).format(impact=impact_prefix, subs=subtitles_filter, dur=dur, fade_st=fade_st, fade_out=fade_out_sec,
-                     pre=prefilter, loud=loudnorm_filter, bgm_idx=bgm_index, bgm_vol_filter=bgm_volume_filter)
+                     pre=prefilter, bgm_idx=bgm_index, bgm_vol_filter=bgm_volume_filter)
     else:
-        chain = "[0:v]{impact}{subs}[vout];[1:a]{pre}apad=whole_dur={dur:.3f}[premix]".format(
+        main_chain = "[0:v]{impact}{subs}[vout];[1:a]{pre}apad=whole_dur={dur:.3f}[main_mix]".format(
             impact=impact_prefix, subs=subtitles_filter, dur=dur, pre=prefilter
         )
 
@@ -665,17 +827,27 @@ def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_pa
         cmd += ["-i", s["path"]]
     next_index += len(sfx or [])
 
+    # loudnorm を [main_mix] に適用 → [main_loud_raw]
+    chain = main_chain + ";[main_mix]{loud}[main_loud_raw]".format(loud=loudnorm_filter)
+
     if sfx_labels:
+        # BUG-53: SE時刻の窓だけ [main_loud_raw] を短時間ダッキングして SE ヘッドルームを作る。
+        # main_dip_events が None/空なら "volume=1.0" で完全パススルー(後方互換)。
+        # dip 深さは既定 MAIN_DIP_GAIN_DB(-3dB, 実測で narration RMS を過剰に潰さない値)。
+        dip_filter = build_main_dip_volume_filter(main_dip_events)
+        chain += ";[main_loud_raw]{dip}[main_loud]".format(dip=dip_filter)
+        # SFX を loudnorm 後段で重畳 → [final_mix] → 軽い hard cap → [aout]
         chain += ";" + ";".join(sfx_filter_parts)
-        mix_inputs = "[premix]" + "".join(sfx_labels)
-        chain += ";{mix_inputs}amix=inputs={n}:duration=longest:normalize=0[premix2]".format(
+        mix_inputs = "[main_loud]" + "".join(sfx_labels)
+        chain += ";{mix_inputs}amix=inputs={n}:duration=longest:normalize=0[final_mix]".format(
             mix_inputs=mix_inputs, n=1 + len(sfx_labels)
         )
-        premix_label = "premix2"
+        # BUG-53: alimiter(attack/release付き)は SE の transient を release=100ms のあいだ
+        # 潰し続けて 50ms RMS 窓のスパイクを平坦化するため使わない。asoftclip=type=tanh で
+        # ピークだけを瞬間的に丸めるだけにする(RMS には影響しない)。
+        chain += ";[final_mix]asoftclip=type=tanh:threshold=0.94[aout]"
     else:
-        premix_label = "premix"
-
-    chain += ";[{premix_label}]{loud}[aout]".format(premix_label=premix_label, loud=loudnorm_filter)
+        chain += ";[main_loud_raw]anull[aout]"
 
     cmd += ["-filter_complex", chain, "-map", "[vout]", "-map", "[aout]"]
 

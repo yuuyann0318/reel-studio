@@ -1,0 +1,59 @@
+あなたはショート動画（Instagram Reels / TikTok）の多モーダル解析結果を統合する専門家です。
+以下の入力（カット表・vision解析・ASRビート・オンセット表）を1つの reference_spec v2 に融合してください。
+JSONオブジェクトのみを出力してください（前置き禁止・コードフェンス禁止）。
+
+# 入力: 動画情報
+url: {URL}
+duration_sec: {DURATION}
+transcript: {TRANSCRIPT}
+segments(ASR): {SEGMENTS_JSON}
+
+# 入力: ASR由来のビート・リズム（reference_analysis_prompt 相当の結果）
+{ASR_ANALYSIS_JSON}
+
+# 入力: カット表（秒）
+{CUTS_JSON}
+
+# 入力: フレーム別vision解析
+{VISION_RESULTS_JSON}
+
+# 入力: SE/BGMオンセット候補
+{ONSETS_JSON}
+
+# タスク
+以下のスキーマ v2 に沿って統合してください。
+- cuts: 入力のカット表をそのまま採用（時系列・重複なし）。信頼度 confidence は 0〜1。
+- shots_ref: 各カット区間を1ショットとみなし、visionのvisual_desc_en/motionをその区間で最頻の内容にまとめる。
+  各ショットの start は当該カット時刻、end は次のカット時刻（最後は duration_sec）。
+- telops: visionで検出されたテロップを、時間順にまとめる。同一テロップが複数フレームで連続する場合は
+  start/end を統合。position/color/stroke/emphasis_words を保持。
+- sfx_events: 入力オンセット表をそのまま採用し、anchor と kind と confidence を保持。
+- bgm: 全区間で発話区間以外にも低〜中帯域の連続性が観測できるかどうかを present:true/false で。
+  mood_guess は英語で短く（例: "upbeat pop" / "chill lo-fi"）。判断不能なら空文字列。
+- hook_end_sec: 動画冒頭の "hook" ビートの終了秒（ASRビートから）。
+- cta_start_sec: 動画終盤の "cta" ビートの開始秒（ASRビートから）。
+- warnings: 統合中に気付いた不整合や欠損を1〜3個の日本語文で。
+
+# 出力スキーマ（このJSON構造のみを出力。最初の文字は { 最後の文字は } ）
+{
+  "version": 2,
+  "url": "{URL}",
+  "duration_sec": {DURATION},
+  "transcript": "…",
+  "segments": [],
+  "beats": [{"role": "hook", "start": 0.0, "end": 2.0, "text": "…", "summary": "…"}],
+  "rhythm": {"sentence_count": 0, "avg_sentence_len": 0, "max_sentence_len": 0, "tone": "", "endings": []},
+  "cuts": [{"t": 0.0, "confidence": 0.9}],
+  "shots_ref": [{"index": 0, "start": 0.0, "end": 2.0, "visual_desc_en": "…", "motion": "static"}],
+  "telops": [{"start": 0.0, "end": 2.0, "text": "…", "position": "top", "style": {"color": "white", "stroke": "black stroke", "size_class": "large"}, "emphasis_words": []}],
+  "sfx_events": [{"t": 0.5, "kind": "transition", "anchor": "cut", "confidence": 0.8}],
+  "bgm": {"present": true, "mood_guess": ""},
+  "hook_end_sec": 2.0,
+  "cta_start_sec": 18.0,
+  "warnings": []
+}
+
+# 制約
+- 全ての時刻は [0, duration_sec] の範囲内に収めること。
+- cuts の t は単調非減少。sfx_events の t も単調非減少。
+- 出力は最初 { 最後 } の1つのJSONオブジェクトのみ。前置き・後置き・説明・コードフェンスを一切含めない。
