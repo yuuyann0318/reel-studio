@@ -1,15 +1,23 @@
-# higgsfield-auto-reel
+# higgsfield-auto-reel (Reel Studio)
 
-テーマ文字列1つから、9:16縦型SNSショート動画(mp4)を全自動で1本生成するパイプライン。
+参考動画URL1つから、その構成（カット割り・テロップ・効果音の置き方）を解析して
+9:16縦型SNSショート動画(mp4)を全自動で1本生成するパイプライン。
 
-`video-auto-editor`（既存動画のAI編集）の姉妹プロジェクトで、こちらは「素材動画が
-無い状態からゼロで作る」パターン（企画→ビジュアル生成→ナレーション→字幕→BGM→
-最終レンダリング→QA→コンプライアンス検査）を担当する。
+## はじめての人へ（かんたんコース）
 
-## セットアップ
+1. このページ上の緑の「Code」→「Download ZIP」でダウンロードして解凍
+2. フォルダ内の **「かんたんセットアップ.command」をダブルクリック**（macOS専用）
+3. あとは画面の指示に従うだけ。詳しくは下のガイドへ:
+
+- セットアップガイド: https://yuuyann0318.github.io/reel-studio-manual/setup.html
+- 使い方マニュアル: https://yuuyann0318.github.io/reel-studio-manual/
+
+## セットアップ（手動でやりたい人向け）
 
 ```bash
-cd "/Users/yuuya/claude code/higgsfield-auto-reel"
+# <設置先> は自分でこのリポジトリを展開したパスに置き換える(例: ~/reel-studio)。
+# 空白を含まないパス推奨(スペース入りだと bash 経由で常時ダブルクォート必須になり事故の元)。
+cd <設置先>
 /usr/bin/python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -112,17 +120,18 @@ python run.py --theme "AIで副業を始める最初の一歩" --duration 20 --b
 **セットアップ手順**:
 
 ```bash
-# higgsfield CLIはPATHに無い場合、node同梱binを一時的に追加
-export PATH="/Users/yuuya/claude code/node-v22.11.0-darwin-arm64/bin:$PATH"
-
-higgsfield auth login       # ユーザー本人が実行（なりすまし不可・初回のみ）
+# Node.js が未導入なら先に入れる: https://nodejs.org/ から LTS(推奨)、または brew install node
+# その後、Higgsfield CLI を公式手順で導入
+npm install -g @higgsfield/cli
+which higgsfield                   # インストール先パスを確認
+higgsfield auth login              # ユーザー本人が実行(なりすまし不可・初回のみ)
 higgsfield workspace list --json   # ワークスペース(プラン/クレジット残高)を確認
 higgsfield workspace set <workspace_id>   # 未選択なら選択
 ```
 
-コード側はPATHに `higgsfield` が無くても、`shutil.which()` が失敗したら
-node同梱パス（`/Users/yuuya/claude code/node-v22.11.0-darwin-arm64/bin/higgsfield`）へ
-自動フォールバックする（`_resolve_cli_bin()`）ため、通常は追加設定不要。
+コード側は `shutil.which("higgsfield")` で PATH から解決する。
+制作環境固有の追加パス（開発機のNode配布パス等）に依存させないため、
+一般的な導入(nodejs.org / brew)で PATH に載っていれば追加設定不要。
 
 **エラー分類**: `HiggsfieldAuthError`（stderrに"Not authenticated"）/
 `HiggsfieldTimeoutError`（CLI自身のタイムアウト報告 or Python側subprocessタイムアウト）/
@@ -149,12 +158,12 @@ resolution=480p/720p, durationは整数秒, generate_audio=true既定）。
 ```json
 {
   "backend": "mock",
-  "claude_bin": "/Users/yuuya/.local/bin/claude",
+  "claude_bin": "<`which claude` の結果を貼る・例: $HOME/.local/bin/claude>",
   "claude_model": "claude-fable-5",
   "resolution": [1080, 1920],
   "target_duration_sec": 30,
   "voice": "Kyoko",
-  "brand_rules": {"ng_words": ["絶対稼げる", "100%成功", "みお", "@mio_ai_insta_", ...]},
+  "brand_rules": {"ng_words": ["絶対稼げる", "100%成功", ...]},
   "higgsfield": {
     "cli_bin": "higgsfield",
     "model": "seedance_2_0_mini",
