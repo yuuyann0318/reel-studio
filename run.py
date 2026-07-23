@@ -702,9 +702,27 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                     # sfx_planner は plan.shots[i].caption_in_offset_sec / t_anchor.offset_sec を
                     # そのまま使うため、原尺スケールのままだと SE が shot 外に飛ぶ。
                     scaled_plan = _build_display_scaled_plan(plan, shot_display_durations)
+                    # R2b F6: SE 音色マッチング用の永続キャッシュ（無ければ内部で生成する）。
+                    # librosa/soundfile が未導入なら SfxTimbreCache は空返しになるので影響なし。
+                    _timbre_cache = None
+                    if reference_spec is not None:
+                        try:
+                            from pipeline.sfx_matcher import SfxTimbreCache as _StC
+                            _timbre_cache = _StC(
+                                cache_path=str(project_root() / "assets" / "sfx" / "manifest_mfcc.json")
+                            )
+                        except Exception:
+                            _timbre_cache = None
                     enhancement = render.compute_edit_enhancement_kwargs(
                         durations, edit_prof, project_seed=run_id, plan=scaled_plan,
+                        reference_spec=reference_spec, sfx_timbre_cache=_timbre_cache,
                     )
+                    # timbre cache が新規計算した MFCC を JSON に永続化（次回以降 skip）
+                    if _timbre_cache is not None:
+                        try:
+                            _timbre_cache.save()
+                        except Exception:
+                            pass
                     edit_sfx = enhancement["sfx_extra"]
                     bgm_curve = enhancement["bgm_curve"]
                     first_shot_impact_sec = enhancement["first_shot_impact_sec"]

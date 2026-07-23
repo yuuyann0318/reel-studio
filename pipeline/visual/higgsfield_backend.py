@@ -152,6 +152,71 @@ def _resolve_cli_bin(configured):
     return configured
 
 
+def _augment_prompt_with_reference_visual(base_prompt, shot):
+    """R2b F4: 参考動画の映像情報（reference_visual）と motion_preset/motion_intensity を
+    元に、visual_prompt 末尾へカメラワーク・構図・色調の英語句を機械的に追記する。
+
+    LLM が visual_prompt にこれらを既に盛り込んでいるとは限らないため、Higgsfield 実
+    生成の直前に決定論で「camera slowly pans to the left」等を末尾補足として付ける。
+    reference_visual が空 or 参考情報が無い shot は基のまま返す（後方互換）。
+    """
+    if not isinstance(base_prompt, str):
+        base_prompt = ""
+    parts = []
+    rv = shot.get("reference_visual") if isinstance(shot, dict) else None
+    if isinstance(rv, dict):
+        cam = (rv.get("camera_move") or "").strip().lower()
+        intensity = (rv.get("intensity") or shot.get("motion_intensity") or "").strip().lower()
+        cam_phrase = None
+        if cam in ("pan_l", "pan_left"):
+            cam_phrase = "camera pans to the left"
+        elif cam in ("pan_r", "pan_right"):
+            cam_phrase = "camera pans to the right"
+        elif cam == "tilt_up":
+            cam_phrase = "camera tilts up"
+        elif cam == "tilt_down":
+            cam_phrase = "camera tilts down"
+        elif cam == "zoom_in":
+            cam_phrase = "camera slowly zooms in"
+        elif cam == "zoom_out":
+            cam_phrase = "camera slowly zooms out"
+        elif cam == "handheld":
+            cam_phrase = "handheld camera with natural micro-motion"
+        elif cam == "dolly":
+            cam_phrase = "smooth dolly move"
+        if cam_phrase:
+            if intensity == "strong":
+                cam_phrase = cam_phrase.replace("slowly ", "").replace("with natural ", "with pronounced ")
+                cam_phrase = cam_phrase + " (strong)"
+            elif intensity == "weak":
+                if "slowly" not in cam_phrase and "natural" not in cam_phrase:
+                    cam_phrase = "subtle " + cam_phrase
+            parts.append(cam_phrase)
+        shot_size = (rv.get("shot_size") or "").strip().lower()
+        if shot_size and shot_size != "":
+            if shot_size in ("closeup", "close_up", "close-up"):
+                parts.append("close-up composition")
+            elif shot_size == "medium":
+                parts.append("medium shot composition")
+            elif shot_size == "wide":
+                parts.append("wide shot composition")
+        color_mood = (rv.get("color_mood") or "").strip().lower()
+        if color_mood:
+            parts.append("{} color mood".format(color_mood))
+    if not parts:
+        return base_prompt
+    suffix = ", ".join(parts)
+    # 過剰重複を避ける（既に prompt に camera/pan/zoom 単語があれば追記しない）
+    lowered = base_prompt.lower()
+    if any(kw in lowered for kw in ("camera pan", "camera tilt", "camera zoom", "handheld", "dolly")):
+        # 既にカメラワーク文言がある場合はカメラ句だけスキップし、構図/色調のみ足す
+        rest = [p for p in parts if not p.startswith("camera") and "handheld" not in p and "dolly" not in p]
+        if not rest:
+            return base_prompt
+        return base_prompt.rstrip(". ") + ". " + ", ".join(rest)
+    return base_prompt.rstrip(". ") + ". " + suffix
+
+
 def _build_create_cmd(cli_bin, model, shot, resolution):
     """ジョブ投入コマンドを構築する（副作用なし・テスト対象）。
 
@@ -159,11 +224,16 @@ def _build_create_cmd(cli_bin, model, shot, resolution):
     委ね、明示的なフラグ指定はしない。フラグ名のkebab/snake表記ゆれを実機未検証の
     まま組み込むリスクを避けるため（--prompt/--aspect-ratio/--resolution/--duration
     の4つのみ実機確認済み)。
+
+    R2b F4: shot に reference_visual があれば camera_move / shot_size / color_mood を
+    英語句として visual_prompt 末尾に追加する（Higgsfield 実運用でも参考カメラワークを
+    伝えるため）。
     """
     duration_sec = _resolve_request_duration_sec(shot)
+    prompt = _augment_prompt_with_reference_visual(shot.get("visual_prompt", ""), shot)
     return [
         cli_bin, "generate", "create", model,
-        "--prompt", shot.get("visual_prompt", ""),
+        "--prompt", prompt,
         "--aspect-ratio", "9:16",
         "--resolution", resolution,
         "--duration", str(duration_sec),
@@ -177,9 +247,10 @@ def _build_cost_cmd(cli_bin, model, shot, resolution):
     行うべき(見積と実際の課金対象が一致する)ため、_build_image_args を共通利用する。
     """
     duration_sec = _resolve_request_duration_sec(shot)
+    prompt = _augment_prompt_with_reference_visual(shot.get("visual_prompt", ""), shot)
     return [
         cli_bin, "generate", "cost", model,
-        "--prompt", shot.get("visual_prompt", ""),
+        "--prompt", prompt,
         "--aspect-ratio", "9:16",
         "--resolution", resolution,
         "--duration", str(duration_sec),

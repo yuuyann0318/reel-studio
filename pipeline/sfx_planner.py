@@ -123,6 +123,51 @@ def _thin_by_min_interval(events, min_interval_sec):
     return kept
 
 
+_SFX_KIND_TO_FAMILY = {
+    "transition": "whoosh",
+    "impact": "impact",
+    "riser": "riser",
+    "pop": "pop",
+    "shimmer": "shimmer",
+}
+
+
+def _find_ref_event_for(family, plan_at_sec, reference_sfx_events, ref_total_sec, gen_total_sec, max_dist_sec=1.5):
+    """plan の SFX 発火時刻 (plan_at_sec) を参考尺座標に戻し、
+    同 family の参考 sfx_event のうち最も近いものを返す。
+
+    参考時刻→plan時刻: ref_t * (gen_total / ref_total) = plan_t → 逆に plan_t → ref_t。
+    R2b F6: family一致で ±max_dist_sec 以内に無ければ None を返し、呼び出し側は
+    決定論選定に戻る（timbre 情報無しでも壊れないようにするため）。
+    """
+    if not reference_sfx_events:
+        return None
+    ratio = 1.0
+    if ref_total_sec and gen_total_sec and ref_total_sec > 0 and gen_total_sec > 0:
+        ratio = float(gen_total_sec) / float(ref_total_sec)
+    inv_ratio = 1.0 / ratio if ratio > 0 else 1.0
+    ref_t_est = float(plan_at_sec) * inv_ratio
+    best = None
+    best_d = None
+    for ev in reference_sfx_events:
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("kind")
+        fam = _SFX_KIND_TO_FAMILY.get(kind) if kind else None
+        if fam != family:
+            continue
+        t = ev.get("t")
+        if not isinstance(t, (int, float)):
+            continue
+        d = abs(float(t) - ref_t_est)
+        if best_d is None or d < best_d:
+            best_d = d
+            best = ev
+    if best is None or best_d is None or best_d > max_dist_sec:
+        return None
+    return best
+
+
 def resolve_sfx_events(
     plan,
     shot_display_durations,
@@ -131,6 +176,9 @@ def resolve_sfx_events(
     project_seed=None,
     min_interval_sec=DEFAULT_MIN_INTERVAL_SEC,
     default_gain_db=DEFAULT_GAIN_DB,
+    reference_sfx_events=None,
+    reference_duration_sec=None,
+    sfx_timbre_cache=None,
 ):
     """plan.sfx_plan を build_final_cmd の sfx 引数へ渡せる形へ解決する（純関数）。
 
@@ -217,6 +265,16 @@ def resolve_sfx_events(
     # 遅延importで循環を避ける（sfx_planner はドメイン純粋 / edit_profile は I/O 込み）。
     from pipeline import edit_profile as _ep
 
+    # R2b F6: SE 音色マッチング。reference_sfx_events + sfx_timbre_cache が渡された場合、
+    # 参考音色（各 event.timbre_mfcc）に最も近いファイルを family 内から選定する。
+    gen_total_sec = sum(durations) if durations else 0.0
+    use_timbre = bool(reference_sfx_events and sfx_timbre_cache is not None)
+    try:
+        from pipeline import sfx_matcher as _sfx_matcher_mod  # 遅延 import
+    except Exception:
+        _sfx_matcher_mod = None
+        use_timbre = False
+
     specs = []
     last_file = None
     for idx, (at_sec, ev) in enumerate(kept):
@@ -225,7 +283,27 @@ def resolve_sfx_events(
             continue
         family_weights = {family: 1}
         picked = None
-        if manifest:
+
+        if use_timbre and manifest:
+            # 参考sfx_events から最も近い同family eventを検索し、timbre_mfcc を取り出す
+            ref_ev = _find_ref_event_for(
+                family, at_sec, reference_sfx_events,
+                reference_duration_sec, gen_total_sec,
+            )
+            target_mfcc = (ref_ev or {}).get("timbre_mfcc") if ref_ev else None
+            if target_mfcc:
+                # family一致 entries に絞ってから MFCC 類似で選定
+                family_entries = [
+                    e for e in manifest
+                    if isinstance(e, dict) and (e.get("family") == family)
+                ]
+                if family_entries and _sfx_matcher_mod is not None:
+                    picked = _sfx_matcher_mod.pick_best_by_timbre(
+                        target_mfcc, family_entries,
+                        cache=sfx_timbre_cache, avoid_file=last_file,
+                    )
+
+        if picked is None and manifest:
             picked = _ep.pick_cut_sfx(
                 seed=project_seed, index=idx, manifest=manifest,
                 family_weights=family_weights, avoid_file=last_file,

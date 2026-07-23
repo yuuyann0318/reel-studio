@@ -10,7 +10,10 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
 ## 絶対厳守のルール
 1. **shots の要素数を増減しない**。各 shot の id 名も変更しない。
 2. 各 shot の `duration_sec` / `caption_in_offset_sec` / `caption_out_offset_sec` /
-   `telop_style_hint` / `reference_visual` / `scene_id` はスケルトンの値をそのまま返すこと。
+   `telop_style_hint` / `reference_visual` / `motion_preset` / `motion_intensity` /
+   `scene_id` はスケルトンの値をそのまま返すこと。
+   （**特に motion_preset は参考動画の光学フロー機械判定に基づくマッピング結果です。
+   絶対に変更しないこと。**）
 3. `sfx_plan` / `hook_end_shot_id` / `cta_start_shot_id` もスケルトンの値をそのまま返すこと。
 4. **文言の丸写し禁止**: 参考動画のテロップ・字幕の語句を **15字以上連続して一致させないこと**
    （著作権侵害）。表現は必ず自分の言葉に言い換える。参考テロップは telop_style_hint
@@ -22,8 +25,13 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
    使っていたとしても、それをそのまま真似しないこと。同じ熱量・勢いは保ちながら、
    「私の場合は」の個人の体験・使用感の範囲に翻訳して書き直すこと。
 7. `caption_jp` は 30字以内(25字以内推奨)。`narration_jp` は音読で対応 shot の duration_sec 秒前後に
-   なる長さにする（目安: 1秒≒6文字）。全 shots の narration_jp を出現順に連結した
+   なる長さにする。全 shots の narration_jp を出現順に連結した
    文字列が `narration_script` と完全一致すること。
+   **話速の合わせ方（F7 参考リズム写像）**: skeleton の `narration_rhythm.chars_per_sec`
+   （参考動画の実測話速）が指定されていたら、それを目安に narration_jp の文字数を決めること。
+   各 shot に `expected_narration_chars` があれば、その値±20% を目標にすること
+   （例: expected=15 なら 12〜18字）。`narration_rhythm.avg_gap_sec` が大きい参考動画
+   （0.6秒以上）は「間」を大きく取る参考なので、shot境界を跨いだ文長を短めに設計すること。
 
 ## visual_prompt を書くときの最重要ルール（F10: 参考映像の忠実再現）
 - 各 shot に含まれる `reference_visual`（`desc_en` / `framing` / `location` /

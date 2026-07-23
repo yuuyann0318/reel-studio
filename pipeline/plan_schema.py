@@ -49,7 +49,7 @@ from __future__ import annotations
 MOTION_PRESETS = ("static", "pan_left", "pan_right", "zoom_in", "zoom_out", "ken_burns")
 BGM_MOODS = ("upbeat", "calm", "emotional", "none")
 
-MIN_SHOT_DURATION = 1.0
+MIN_SHOT_DURATION = 0.4  # R2b F12: supreme_plus の高速カット参考（0.5s）を通すため 1.0 → 0.4 へ緩和。
 MAX_SHOT_DURATION = 20.0
 # テロップ最大文字数: PlayResX=1080 / MarginL=MarginR=60 / 既定フォントサイズ76px の実描画で
 # 2行に収まる実効上限が「30字前後」であることをフレーム目視で確認した(BUG-54)。

@@ -46,6 +46,16 @@ try:
 except Exception:  # pragma: no cover
     snap_boundaries_to_beats = None  # type: ignore
 
+try:
+    from pipeline.optical_flow import camera_move_to_preset
+except Exception:  # pragma: no cover
+    camera_move_to_preset = None  # type: ignore
+
+try:
+    from pipeline.narration_rhythm import expected_chars_for_shot
+except Exception:  # pragma: no cover
+    expected_chars_for_shot = None  # type: ignore
+
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
 MAX_RETRIES = 2
@@ -298,6 +308,8 @@ def _map_reference_visual_to_shots(shots_ref, boundaries, shot_ids):
             "location": _mode("location", ""),
             "lighting": _mode("lighting", ""),
             "color_palette_hex": head.get("color_palette_hex") or [],
+            # R2b F2/F4: 光学フロー由来の強度（weak/strong）を skeleton まで運ぶ
+            "intensity": _mode("intensity", ""),
         }
         # 空/None の値は落として skeleton_json を小さく保つ
         rv = {k: v for k, v in rv.items() if v not in (None, "", [], {})}
@@ -702,6 +714,15 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         scaled = new_durations
         shot_ids = new_shot_ids
 
+    # R2b F7: narration_rhythm 参照（あれば各shotの目安文字数を計算）
+    rhythm = reference_spec.get("narration_rhythm") or {}
+    chars_per_sec = 0.0
+    try:
+        if isinstance(rhythm.get("chars_per_sec"), (int, float)):
+            chars_per_sec = float(rhythm["chars_per_sec"])
+    except Exception:
+        chars_per_sec = 0.0
+
     shots = []
     for i, sid in enumerate(shot_ids):
         shot = {
@@ -721,6 +742,26 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         # F10: 参考映像情報を skeleton の各 shot に載せる
         if sid in rv_map:
             shot["reference_visual"] = rv_map[sid]
+        # R2b F4: 参考 camera_move → plan.motion_preset を機械写像。
+        # skeleton にこのフィールドを載せると _validate_plan_matches_skeleton が
+        # 「plan がスケルトンと一致するか」の検査対象にし、LLM の作文余地が減る。
+        rv = rv_map.get(sid) or {}
+        cam = rv.get("camera_move") or rv.get("motion") or ""
+        if camera_move_to_preset is not None:
+            preset = camera_move_to_preset(cam)
+        else:
+            preset = "static"
+        # motion_preset は plan_schema の MOTION_PRESETS 範囲内である前提（上の mapping で保証）。
+        shot["motion_preset"] = preset
+        # 参考の intensity（weak/strong）を保持（mock/higgsfield backend が読む）。
+        intensity = rv.get("intensity")
+        if isinstance(intensity, str) and intensity:
+            shot["motion_intensity"] = intensity
+        # R2b F7: 期待文字数（chars_per_sec × duration）。0 は載せない。
+        if chars_per_sec > 0 and expected_chars_for_shot is not None:
+            ec = expected_chars_for_shot(float(scaled[i]), chars_per_sec)
+            if ec > 0:
+                shot["expected_narration_chars"] = ec
         shots.append(shot)
 
     return {
@@ -728,6 +769,12 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         "sfx_plan": sfx_plan,
         "hook_end_shot_id": hook_end_shot_id,
         "cta_start_shot_id": cta_start_shot_id,
+        # F7: 参考 rhythm を skeleton 経由で director プロンプトへ渡す
+        "narration_rhythm": {
+            "chars_per_sec": rhythm.get("chars_per_sec") if rhythm else 0.0,
+            "avg_gap_sec": rhythm.get("avg_gap_sec") if rhythm else 0.0,
+            "pause_points": (rhythm.get("pause_points") or []) if rhythm else [],
+        } if rhythm else None,
     }
 
 
@@ -831,6 +878,16 @@ def _validate_plan_matches_skeleton(plan, skeleton, target_duration_sec):
                         "shots[{}(id={})].{} がスケルトンと一致しません(plan={}, skeleton={}, 許容±{}秒). "
                         "スケルトン値をそのまま返してください。".format(i, sid, key, pv, sv, _SKELETON_CAPTION_MATCH_TOL)
                     )
+        # R2b F4: motion_preset の一致（スケルトン優先=機械判定の camera_move マッピング）
+        if "motion_preset" in ss:
+            pv = ps.get("motion_preset")
+            sv = ss.get("motion_preset")
+            if pv != sv:
+                errors.append(
+                    "shots[{}(id={})].motion_preset がスケルトンと一致しません(plan={!r}, skeleton={!r}). "
+                    "スケルトンの motion_preset をそのまま採用してください（参考動画の光学フロー判定に"
+                    "基づく機械マッピング結果）。".format(i, sid, pv, sv)
+                )
 
     # 合計尺の一致
     total = sum(float(s.get("duration_sec") or 0.0) for s in plan_shots)

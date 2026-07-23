@@ -70,28 +70,45 @@ def _shot_number_label(shot_id):
     return "#{}".format(m.group(1)) if m else "#{}".format(shot_id)
 
 
-def _motion_exprs(motion_preset, total_frames):
-    """motion_presetごとの zoompan z/x/y 式を返す。"""
+def _motion_exprs(motion_preset, total_frames, intensity=None):
+    """motion_presetごとの zoompan z/x/y 式を返す。
+
+    R2b F4: intensity ("weak" | "strong" | None) で強度を倍率化。既定 1.0、
+    weak=0.65、strong=1.5。ken_burns の場合は Z 変化の amount も同倍率で拡縮する。
+    従来（intensity=None）の挙動は 1.0 倍のまま維持（回帰なし）。
+    """
     t = total_frames if total_frames > 0 else 1
+    intensity_val = 1.0
+    if isinstance(intensity, str):
+        low = intensity.strip().lower()
+        if low == "strong":
+            intensity_val = 1.5
+        elif low == "weak":
+            intensity_val = 0.65
+    # zoom 上限/下限の変化量を intensity で拡縮
+    zoom_delta = round(0.3 * intensity_val, 3)
+    pan_zoom = round(1.15, 3)  # pan の zoom base は動かさない（画枠外を作らないため）
+    kb_zoom_delta = round(0.2 * intensity_val, 3)
+    kb_pan_frac = round(0.5 * intensity_val, 3)
     if motion_preset == "zoom_in":
-        z = "min(1+0.3*on/{t},1.3)".format(t=t)
+        z = "min(1+{d}*on/{t},{u})".format(d=zoom_delta, t=t, u=round(1 + zoom_delta, 3))
         x = "(iw-iw/zoom)/2"
         y = "(ih-ih/zoom)/2"
     elif motion_preset == "zoom_out":
-        z = "max(1.3-0.3*on/{t},1.0)".format(t=t)
+        z = "max({u}-{d}*on/{t},1.0)".format(d=zoom_delta, t=t, u=round(1 + zoom_delta, 3))
         x = "(iw-iw/zoom)/2"
         y = "(ih-ih/zoom)/2"
     elif motion_preset == "pan_left":
-        z = "1.15"
+        z = "{}".format(pan_zoom)
         x = "(iw-iw/zoom)*(1-on/{t})".format(t=t)
         y = "(ih-ih/zoom)/2"
     elif motion_preset == "pan_right":
-        z = "1.15"
+        z = "{}".format(pan_zoom)
         x = "(iw-iw/zoom)*(on/{t})".format(t=t)
         y = "(ih-ih/zoom)/2"
     elif motion_preset == "ken_burns":
-        z = "min(1+0.2*on/{t},1.2)".format(t=t)
-        x = "(iw-iw/zoom)*(on/{t})*0.5".format(t=t)
+        z = "min(1+{d}*on/{t},{u})".format(d=kb_zoom_delta, t=t, u=round(1 + kb_zoom_delta, 3))
+        x = "(iw-iw/zoom)*(on/{t})*{p}".format(t=t, p=kb_pan_frac)
         y = "(ih-ih/zoom)/2"
     else:  # static
         z = "1"
@@ -115,7 +132,12 @@ def build_mock_cmd(ffmpeg_bin, shot, out_path, fonts_dir=None):
     shot_id = shot.get("id", "")
     number_label = _shot_number_label(shot_id)
 
-    z, x, y = _motion_exprs(motion_preset, total_frames)
+    intensity = shot.get("motion_intensity")
+    if not intensity:
+        rv = shot.get("reference_visual") if isinstance(shot.get("reference_visual"), dict) else None
+        if rv:
+            intensity = rv.get("intensity")
+    z, x, y = _motion_exprs(motion_preset, total_frames, intensity=intensity)
 
     fonts_dir = fonts_dir or str(project_root() / "assets" / "fonts")
     font_path = fonts_dir.rstrip("/") + "/NotoSansJP-Black.ttf"

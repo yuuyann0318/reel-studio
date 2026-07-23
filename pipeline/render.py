@@ -628,7 +628,8 @@ def build_first_shot_impact_filter(duration_sec=0.3, start_scale=1.04, fps=30):
     ).format(z=z_expr, size=_PUNCH_IN_OUTPUT_SIZE, fps=fps)
 
 
-def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_seed=None, plan=None):
+def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_seed=None, plan=None,
+                                     reference_spec=None, sfx_timbre_cache=None):
     """editプロファイルと各ショットの表示尺（秒・ショット順のリスト）から、build_final_cmdへ
     渡す追加引数 {"sfx_extra","bgm_curve","first_shot_impact_sec"} をまとめて計算する純関数。
 
@@ -686,6 +687,14 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
             min_interval = cut_cfg.get("min_interval_sec", _sp.DEFAULT_MIN_INTERVAL_SEC)
             default_gain = cut_cfg.get("gain_db", _sp.DEFAULT_GAIN_DB)
             manifest = cut_cfg.get("manifest") or []
+            # R2b F6: 参考SEの音色 MFCC が使えるとき、family 内で cos 類似度が最も
+            # 近いファイルを選ぶ（timbre matching）。reference_spec や cache が未指定
+            # ならこの引数は自動で無視され、従来の決定論ローテに戻る（後方互換）。
+            ref_sfx_events = None
+            ref_duration = None
+            if isinstance(reference_spec, dict):
+                ref_sfx_events = reference_spec.get("sfx_events") or None
+                ref_duration = reference_spec.get("duration_sec")
             sfx_extra = _sp.resolve_sfx_events(
                 plan, durations,
                 edit_profile=edit_profile,
@@ -693,6 +702,9 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
                 project_seed=project_seed,
                 min_interval_sec=min_interval,
                 default_gain_db=default_gain,
+                reference_sfx_events=ref_sfx_events,
+                reference_duration_sec=ref_duration,
+                sfx_timbre_cache=sfx_timbre_cache,
             )
         else:
             sfx_extra = []

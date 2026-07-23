@@ -46,6 +46,10 @@ except Exception:  # pragma: no cover - CLI周りが未整備でもimportを壊�
 from pipeline.config import load_config, project_root
 from pipeline import reference as ref_v1  # v1 のフェッチ・ASR実装を再利用
 from pipeline import music as music_mod  # R2a F5: BPM/beat 抽出
+from pipeline import optical_flow as of_mod  # R2b F2: 光学フローによる camera_move 機械判定
+from pipeline import telop_refine as telop_refine_mod  # R2b F8: テロップ帯変化検出
+from pipeline import narration_rhythm as narration_rhythm_mod  # R2b F7: ナレーション話速統計
+from pipeline import sfx_matcher as sfx_matcher_mod  # R2b F6: SE音色 MFCC
 
 
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -1152,6 +1156,25 @@ def analyze_reference_v2(
         meta["music_confidence"] = music_features.get("confidence")
 
         # -----------------------------------------------------------------
+        # 光学フローによる camera_move 機械判定 (R2b F2)
+        # -----------------------------------------------------------------
+        _progress("optical_flow")
+        of_enabled = bool(ref_cfg.get("optical_flow_enabled", True))
+        of_shots: List[Dict[str, Any]] = []
+        if of_enabled:
+            try:
+                of_shots = of_mod.estimate_shots(
+                    video_path, cuts, duration_sec,
+                    samples_per_shot=int(ref_cfg.get("optical_flow_samples_per_shot", 4)),
+                    analysis_width=int(ref_cfg.get("optical_flow_analysis_width", 240)),
+                )
+            except Exception as exc:
+                warnings.append("optical_flow 失敗: {}".format(str(exc)[:200]))
+                of_shots = []
+        meta["optical_flow_shots"] = len(of_shots)
+        # 光学フロー結果は後段の fusion で LLM shots_ref を上書きするため、変数を保持
+
+        # -----------------------------------------------------------------
         # 融合 (fusion prompt)
         # -----------------------------------------------------------------
         _progress("fusion")
@@ -1196,6 +1219,80 @@ def analyze_reference_v2(
                     "warnings": warnings + errors + errors2,
                     "error": "spec v2 の検証に失敗しました", "meta": meta,
                 }
+
+        # -----------------------------------------------------------------
+        # R2b F2/F8/F7/F6: 決定論的な後段整形（LLM 融合結果を機械観測で補正）
+        # -----------------------------------------------------------------
+        # F2: 光学フローの camera_move で shots_ref を上書き
+        if of_shots:
+            shots_ref_updated, of_stats = of_mod.apply_optical_flow_to_shots_ref(
+                normalized_spec.get("shots_ref") or [], of_shots,
+                override_threshold=float(ref_cfg.get("optical_flow_override_threshold", 0.5)),
+            )
+            normalized_spec["shots_ref"] = shots_ref_updated
+            meta["optical_flow_apply"] = of_stats
+            # 空 shots_ref のときは of_shots をそのまま参考shotsとして採用（LLMが漏らしても救う）
+            if not (normalized_spec.get("shots_ref") or []):
+                normalized_spec["shots_ref"] = [
+                    {
+                        "start": s.get("start"), "end": s.get("end"),
+                        "camera_move": s.get("camera_move"),
+                        "camera_move_source": "optical_flow",
+                        "intensity": s.get("intensity"),
+                        "of_confidence": s.get("confidence"),
+                        "motion": s.get("camera_move"),
+                    } for s in of_shots
+                ]
+
+        # F8: テロップ帯変化検出で telops の start/end を秒精度補正
+        telop_refine_enabled = bool(ref_cfg.get("telop_refine_enabled", True))
+        if telop_refine_enabled and normalized_spec.get("telops"):
+            try:
+                change_times = telop_refine_mod.detect_telop_change_times(
+                    ffmpeg_bin, video_path,
+                    threshold=float(ref_cfg.get("telop_refine_threshold", 0.05)),
+                    timeout_sec=int(ref_cfg.get("telop_refine_timeout_sec", 90)),
+                )
+            except Exception as exc:
+                warnings.append("telop_refine 失敗: {}".format(str(exc)[:200]))
+                change_times = []
+            meta["telop_change_times"] = len(change_times)
+            if change_times:
+                refined_telops, tel_stats = telop_refine_mod.refine_telops(
+                    normalized_spec.get("telops") or [], change_times,
+                    tol_sec=float(ref_cfg.get("telop_refine_snap_tol_sec", 0.30)),
+                )
+                normalized_spec["telops"] = refined_telops
+                meta["telop_refine_stats"] = tel_stats
+
+        # F7: ナレーション rhythm 統計
+        try:
+            rhythm = narration_rhythm_mod.compute_narration_rhythm(
+                normalized_spec.get("segments") or [], duration_sec,
+                pause_min_sec=float(ref_cfg.get("narration_pause_min_sec", 0.35)),
+            )
+            normalized_spec["narration_rhythm"] = rhythm
+            meta["narration_rhythm"] = {
+                "chars_per_sec": rhythm.get("chars_per_sec"),
+                "avg_gap_sec": rhythm.get("avg_gap_sec"),
+                "pause_points": len(rhythm.get("pause_points") or []),
+            }
+        except Exception as exc:
+            warnings.append("narration_rhythm 失敗: {}".format(str(exc)[:200]))
+
+        # F6: SE 音色 MFCC（参考音色を sfx_events に付与。以後 sfx_planner で参照）
+        sfx_matcher_enabled = bool(ref_cfg.get("sfx_matcher_enabled", True))
+        if sfx_matcher_enabled and normalized_spec.get("sfx_events"):
+            try:
+                events_with_mfcc = sfx_matcher_mod.compute_reference_event_mfccs(
+                    audio_path, normalized_spec.get("sfx_events") or [],
+                    win_sec=float(ref_cfg.get("sfx_matcher_win_sec", 0.20)),
+                )
+                normalized_spec["sfx_events"] = events_with_mfcc
+                nonzero = sum(1 for e in events_with_mfcc if e.get("timbre_mfcc"))
+                meta["sfx_events_with_mfcc"] = nonzero
+            except Exception as exc:
+                warnings.append("sfx_matcher_mfcc 失敗: {}".format(str(exc)[:200]))
 
         _write_cache(cache_path, normalized_spec)
         _progress("done")
