@@ -21,7 +21,7 @@ Python 3.9 互換構文のみ。
 from __future__ import annotations
 
 from pipeline.subtitles import wrap_caption_kinsoku
-from premiere.export_xmeml import DEFAULT_FPS, frame_align_durations
+from premiere.export_xmeml import DEFAULT_FPS, frame_align_durations, fps_to_timebase_ntsc
 
 SRT_MAX_CHARS = 13
 SRT_MAX_LINES = 2
@@ -64,12 +64,17 @@ def build_srt(plan, fps=None):
              ここでも同じ丸めを行うことで、29.97のような小数を渡された場合でも
              xmeml側（29へ切り捨て）とタイミングが食い違わないようにする
              （独立レビューで指摘されたfps不整合バグの修正）。
+             さらにPhase Aで premiere.export_xmeml.fps_to_timebase_ntsc() を共通利用し、
+             NTSC分数fps(23.976/29.97/59.94)は整数timebase(24/30/60)へ正規化する
+             （SRTの表示秒とxmemlのフレーム→秒換算が同じtimebaseで一致するため）。
 
     Returns:
         str: UTF-8前提のSRTテキスト（改行は\\n、末尾は改行1つで終わる。エントリが
              1つも無ければ空文字列を返す）。
     """
-    fps = int(fps or DEFAULT_FPS)
+    if fps is None:
+        fps = DEFAULT_FPS
+    fps, _ntsc = fps_to_timebase_ntsc(fps)
     shots = _enabled_shots_in_order(plan)
 
     durations_sec = []

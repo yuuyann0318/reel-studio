@@ -103,7 +103,7 @@ def test_build_package_return_value_has_expected_keys():
     project = _make_ready_project()
     result = package_mod.build_package(project["id"])
 
-    assert set(result.keys()) == {"package_dir", "files", "tts", "profile_name"}
+    assert set(result.keys()) == {"package_dir", "files", "tts", "profile_name", "xmeml_warnings"}
     assert result["profile_name"] == "ttp_reference"
     assert result["tts"]["backend"] == "fake"
     assert result["tts"]["duration_sec"] == 1.23
@@ -114,8 +114,8 @@ def test_build_package_reel_xml_is_well_formed_and_includes_narration_clip():
     result = package_mod.build_package(project["id"])
     xml_text = (Path(result["package_dir"]) / "reel.xml").read_text(encoding="utf-8")
     minidom.parseString(xml_text)  # 例外が出なければ整形式
-    assert "<name>narration</name>" in xml_text
-    assert "<name>s1</name>" in xml_text
+    assert "<name>NAR narration</name>" in xml_text
+    assert "<name>S01</name>" in xml_text
 
 
 def test_build_package_captions_srt_matches_srt_module_output():

@@ -59,7 +59,49 @@ def _now_dirname():
     return "{}_{}".format(time.strftime("%Y%m%d%H%M%S"), uuid.uuid4().hex[:8])
 
 
-def _build_readme_text(project_id):
+def _missing_media_section(warnings):
+    """build_xmeml の warnings (missing_media) を README 用のセクション文字列にする。
+
+    素材ファイルが実在しない場合、Premiere取り込み時に「メディアがオフラインです」と
+    表示される。事前にファイル一覧を明記して、再リンクや素材の再収集を促す。
+    """
+    if not warnings:
+        return ""
+    missing = [w for w in warnings if w.get("kind") == "missing_media"]
+    if not missing:
+        return ""
+    lines = ["", "## ⚠️ オフラインになるファイル一覧", ""]
+    lines.append("このパッケージには、書き出し時点で見つからなかった素材への参照が含まれます。")
+    lines.append("Premiere取り込み後、以下のクリップは「メディアがオフラインです」と表示されます。")
+    lines.append("実ファイルを配置し直すか、Premiereの「メディアの再リンク」で場所を指定してください。")
+    lines.append("")
+    lines.append("| トラック | ファイル名 | 参照パス |")
+    lines.append("| --- | --- | --- |")
+    for w in missing:
+        lines.append("| {} | {} | `{}` |".format(w.get("role", ""), w.get("name", ""), w.get("abs_path", "")))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _track_contract_section():
+    """トラック構成規約の README セクション（premiere.export_xmeml の規約と一致）。"""
+    return (
+        "\n## トラック構成（規約）\n\n"
+        "このパッケージのシーケンス `reel_sequence` は以下の固定順で書き出されます。\n\n"
+        "| トラック | 用途 | 色ラベル | 命名 |\n"
+        "| --- | --- | --- | --- |\n"
+        "| V1 | 本編クリップ | Iris | `S01` `S02` … |\n"
+        "| V2 | テロップ用の予約（空） | — | — |\n"
+        "| V3 | 演出（赤丸オーバーレイ等） | Rose | `RC01 red_circle` |\n"
+        "| A1 | ナレーション | Forest | `NAR narration` |\n"
+        "| A2 | BGM | Lavender | `BGM bgm` |\n"
+        "| A3 | 効果音（SE） | Caribbean | `SE01 whoosh` 等（先頭語=family） |\n\n"
+        "シーケンス直下にはショット境界・フック終了/CTA開始・SFXの意図を"
+        "`marker` として書き出しています（Premiereのシーケンスマーカーとして表示）。\n"
+    )
+
+
+def _build_readme_text(project_id, missing_media_section=""):
     return (
         "# Premiereでの読み込み方\n\n"
         "このフォルダの中身を読み込むと、字幕付きの編集済みプロジェクトとしてPremiere Proで開けます。\n\n"
@@ -84,6 +126,8 @@ def _build_readme_text(project_id):
         "- 音声が聞こえない場合: `narration.wav` がA1トラックに読み込まれているか確認してください。\n"
         "- 字幕が出ない場合: `captions.srt` をタイムラインへドラッグ済みか、字幕トラックが表示（有効）に"
         "なっているか確認してください。\n"
+        + _track_contract_section()
+        + (missing_media_section or "")
     ).format(project_id=project_id)
 
 
@@ -138,10 +182,13 @@ def build_package(project_id, progress_cb=None):
     # （projects.resolve_media_relpathと同じ基点。pipeline.config.project_root()と本番では
     # 一致するが、PROJECTS_ROOTを差し替えるテスト等でも正しく解決できるようこちらを使う）。
     export_base_dir = projects.PROJECTS_ROOT.parent
-    xmeml_text = export_xmeml.build_xmeml(
+    xmeml_result = export_xmeml.build_xmeml(
         plan, str(export_base_dir),
         narration_path=str(narration_path), bgm_path=bgm_path, profile=prof,
+        return_warnings=True,
     )
+    xmeml_text = xmeml_result["xmeml"]
+    xmeml_warnings = xmeml_result.get("warnings") or []
     reel_xml_path = package_dir / "reel.xml"
     reel_xml_path.write_text(xmeml_text, encoding="utf-8")
 
@@ -164,7 +211,11 @@ def build_package(project_id, progress_cb=None):
     # (e) README_import.md -----------------------------------------------------
     _progress(90, "使い方(README)を作成中…")
     readme_path = package_dir / "README_import.md"
-    readme_path.write_text(_build_readme_text(project_id), encoding="utf-8")
+    missing_section = _missing_media_section(xmeml_warnings)
+    readme_path.write_text(
+        _build_readme_text(project_id, missing_media_section=missing_section),
+        encoding="utf-8",
+    )
 
     # (f) 返り値 ---------------------------------------------------------------
     files = [
@@ -179,4 +230,5 @@ def build_package(project_id, progress_cb=None):
         "files": files,
         "tts": tts_meta,
         "profile_name": DEFAULT_PROFILE_NAME,
+        "xmeml_warnings": xmeml_warnings,
     }

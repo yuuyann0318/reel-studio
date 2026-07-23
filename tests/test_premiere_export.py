@@ -218,11 +218,11 @@ def test_build_srt_and_xmeml_frame_alignment_match_for_trimmed_shots():
     srt_starts = _parse_srt_start_seconds(srt_text)
     assert len(srt_starts) == n_shots
 
-    # xmemlから各clipitem(<name>s{i}</name>)直後の<start>フレームを抽出する
+    # xmemlから各clipitem(<name>S0N</name>)直後の<start>フレームを抽出する
     xml_starts_sec = []
     for i in range(n_shots):
-        shot_id = "s{}".format(i + 1)
-        marker = "<name>{}</name>".format(shot_id)
+        display = "S{:02d}".format(i + 1)
+        marker = "<name>{}</name>".format(display)
         idx = xml_text.index(marker)
         clip_block = xml_text[idx:xml_text.index("</clipitem>", idx)]
         start_frame = int(clip_block.split("<start>")[1].split("</start>")[0])
@@ -238,17 +238,18 @@ def test_build_srt_and_xmeml_frame_alignment_match_for_trimmed_shots():
 
 def test_build_srt_fractional_fps_normalized_same_as_xmeml():
     """fpsに小数(例:29.97)を渡しても、srt.build_srtとexport_xmeml.build_xmemlの両方が
-    同じ int(fps) へ丸めるため、タイミングが食い違わない（独立レビュー指摘の回帰テスト。
-    このコードベースはNTSC=FALSE固定でドロップフレーム端数fpsを扱わない前提）。"""
+    fps_to_timebase_ntsc() 経由で同じ timebase(=30)+ntsc(=TRUE) に正規化するため、
+    タイミングが食い違わない（Phase A の NTSC 対応後）。"""
     fractional_fps = 29.97
     plan = {"shots": [_shot("s1", 0, True, "テスト", 0.0, 1.0)]}
     srt_text = srt.build_srt(plan, fps=fractional_fps)
     xml_text = export_xmeml.build_xmeml(plan, "/tmp/proj", profile=_ttp_profile(), fps=fractional_fps)
 
-    # 双方とも int(29.97)=29 で丸められ、1.0秒 -> round(1.0*29)=29フレーム -> 29/29=1.0秒 一致
+    # 双方とも timebase=30 に正規化され、1.0秒 -> round(1.0*30)=30フレーム -> 30/30=1.0秒 で一致
     assert "00:00:00,000 --> 00:00:01,000" in srt_text
-    assert "<start>0</start>\n            <end>29</end>" in xml_text
-    assert "<timebase>29</timebase>" in xml_text
+    assert "<start>0</start>\n            <end>30</end>" in xml_text
+    assert "<timebase>30</timebase>" in xml_text
+    assert "<ntsc>TRUE</ntsc>" in xml_text
 
 
 def test_build_xmeml_skips_shot_shorter_than_one_frame():
@@ -321,9 +322,9 @@ def test_build_xmeml_is_well_formed_xml():
 def test_build_xmeml_v1_track_has_only_enabled_shots_in_order():
     xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile())
     assert xml_text.count("<clipitem") >= 2
-    # order=0のs1がs2より先(タイムライン上start=0)に出る
-    idx_s1 = xml_text.index("<name>s1</name>")
-    idx_s2 = xml_text.index("<name>s2</name>")
+    # order=0のs1(=S01)がs2(=S02)より先(タイムライン上start=0)に出る
+    idx_s1 = xml_text.index("<name>S01</name>")
+    idx_s2 = xml_text.index("<name>S02</name>")
     assert idx_s1 < idx_s2
     assert "s3.mp4" not in xml_text  # disabledショットは含まれない
 
@@ -379,7 +380,7 @@ def test_build_xmeml_sfx_included_when_profile_audio_sfx_true():
 
 def test_build_xmeml_red_circle_placed_as_disabled_clip_on_v3():
     xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile())
-    v3_idx = xml_text.index("red_circle_overlay")
+    v3_idx = xml_text.index("RC01 red_circle")
     enabled_idx = xml_text.index("<enabled>FALSE</enabled>")
     # <enabled>FALSE</enabled> がred_circleクリップの直後の近傍にある(同一clipitem内)
     assert v3_idx < enabled_idx < v3_idx + 600
@@ -390,6 +391,7 @@ def test_build_xmeml_red_circle_omitted_when_profile_emphasis_false():
     prof = _ttp_profile()
     prof_no_circle = dict(prof, emphasis=dict(prof["emphasis"], red_circle=False))
     xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=prof_no_circle)
+    assert "RC01" not in xml_text
     assert "red_circle" not in xml_text
 
 
@@ -403,8 +405,8 @@ def test_build_xmeml_narration_spans_full_timeline_duration():
     xml_text = export_xmeml.build_xmeml(
         _plan_two_shots(), "/tmp/proj", narration_path="narration.wav", profile=_ttp_profile()
     )
-    assert "<name>narration</name>" in xml_text
-    narration_block = xml_text[xml_text.index("<name>narration</name>"):]
+    assert "<name>NAR narration</name>" in xml_text
+    narration_block = xml_text[xml_text.index("<name>NAR narration</name>"):]
     assert "<start>0</start>" in narration_block.split("</clipitem>")[0]
     assert "<end>150</end>" in narration_block.split("</clipitem>")[0]
 
@@ -482,7 +484,7 @@ def test_build_xmeml_golden_small_plan():
         "        </format>\n"
         "        <track>\n"
         '          <clipitem id="clipitem-v1-{clip_id_hash}">\n'
-        "            <name>s1</name>\n"
+        "            <name>S01</name>\n"
         "            <rate>\n"
         "              <timebase>30</timebase>\n"
         "              <ntsc>FALSE</ntsc>\n"
@@ -491,6 +493,9 @@ def test_build_xmeml_golden_small_plan():
         "            <end>30</end>\n"
         "            <in>0</in>\n"
         "            <out>30</out>\n"
+        "            <labels>\n"
+        "              <label2>Iris</label2>\n"
+        "            </labels>\n"
         '            <file id="file-v1-{file_id_hash}">\n'
         "              <name>s1.mp4</name>\n"
         "              <pathurl>file://localhost/golden/proj/projects/g1/clips/s1.mp4</pathurl>\n"
@@ -524,6 +529,12 @@ def test_build_xmeml_golden_small_plan():
         "        </track>\n"
         "      </audio>\n"
         "    </media>\n"
+        "    <marker>\n"
+        "      <name>S01開始</name>\n"
+        "      <comment>s1</comment>\n"
+        "      <in>0</in>\n"
+        "      <out>-1</out>\n"
+        "    </marker>\n"
         "  </sequence>\n"
         "</xmeml>\n"
     )
@@ -542,3 +553,181 @@ def test_build_xmeml_golden_small_plan():
         clip_id_hash=clip_id_hash, file_id_hash=file_id_hash,
     )
     assert xml_text == expected_filled
+
+
+# ---------------------------------------------------------------------------
+# Phase A: fps正規化 / 実在チェック / ラベル / マーカー / ネスト禁止
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("fps_in,expected_tb,expected_ntsc", [
+    (23.976, 24, "TRUE"),
+    (23.98, 24, "TRUE"),   # ±0.01 の許容誤差内
+    (24, 24, "FALSE"),
+    (24.0, 24, "FALSE"),
+    (29.97, 30, "TRUE"),
+    (29.96, 30, "TRUE"),   # ±0.01 の許容誤差内
+    (30, 30, "FALSE"),
+    (30.0, 30, "FALSE"),
+    (59.94, 60, "TRUE"),
+    (60, 60, "FALSE"),
+])
+def test_fps_to_timebase_ntsc_covers_reference_table(fps_in, expected_tb, expected_ntsc):
+    tb, ntsc = export_xmeml.fps_to_timebase_ntsc(fps_in)
+    assert (tb, ntsc) == (expected_tb, expected_ntsc)
+
+
+def test_fps_to_timebase_ntsc_unknown_falls_back_with_warning():
+    import warnings as _w
+    with _w.catch_warnings(record=True) as caught:
+        _w.simplefilter("always")
+        tb, ntsc = export_xmeml.fps_to_timebase_ntsc(25)
+        assert (tb, ntsc) == (25, "FALSE")
+        assert any("unknown fps" in str(w.message) for w in caught)
+
+
+def test_fps_to_timebase_ntsc_none_defaults_to_default_fps():
+    assert export_xmeml.fps_to_timebase_ntsc(None) == (export_xmeml.DEFAULT_FPS, "FALSE")
+
+
+def test_build_xmeml_ntsc_flag_applied_to_all_rates_for_ntsc_fps():
+    """23.976fpsだと シーケンス・各clipitem・各file の全 <rate> で timebase=24 / ntsc=TRUE。"""
+    xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile(), fps=23.976)
+    assert "<timebase>23</timebase>" not in xml_text
+    assert xml_text.count("<timebase>24</timebase>") >= 4  # sequence + format + clipitems + files
+    assert xml_text.count("<ntsc>TRUE</ntsc>") >= 4
+    assert "<ntsc>FALSE</ntsc>" not in xml_text
+
+
+def test_build_xmeml_v1_clips_have_iris_label():
+    xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile())
+    s01_block = xml_text.split("<name>S01</name>")[1].split("</clipitem>")[0]
+    assert "<labels>" in s01_block
+    assert "<label2>Iris</label2>" in s01_block
+
+
+def test_build_xmeml_narration_and_bgm_have_labels():
+    xml_text = export_xmeml.build_xmeml(
+        _plan_two_shots(), "/tmp/proj",
+        narration_path="narration.wav", bgm_path="assets/bgm/upbeat.mp3",
+        profile=_ttp_profile(),
+    )
+    nar_block = xml_text.split("<name>NAR narration</name>")[1].split("</clipitem>")[0]
+    bgm_block = xml_text.split("<name>BGM bgm</name>")[1].split("</clipitem>")[0]
+    assert "<label2>Forest</label2>" in nar_block
+    assert "<label2>Lavender</label2>" in bgm_block
+
+
+def test_build_xmeml_sfx_gets_family_name_and_caribbean_label():
+    prof = _ttp_profile()
+    prof_sfx_on = dict(prof, audio=dict(prof["audio"], sfx=True))
+    plan = _plan_two_shots()
+    plan["sfx"] = [{"file": "whoosh_gen_005.wav", "at_sec": 0.5, "gain_db": -6.0}]
+    xml_text = export_xmeml.build_xmeml(plan, "/tmp/proj", profile=prof_sfx_on)
+    assert "<name>SE01 whoosh</name>" in xml_text
+    se_block = xml_text.split("<name>SE01 whoosh</name>")[1].split("</clipitem>")[0]
+    assert "<label2>Caribbean</label2>" in se_block
+
+
+def test_build_xmeml_red_circle_has_rose_label():
+    xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile())
+    rc_block = xml_text.split("<name>RC01 red_circle</name>")[1].split("</clipitem>")[0]
+    assert "<label2>Rose</label2>" in rc_block
+
+
+def test_build_xmeml_emits_shot_boundary_markers():
+    xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile())
+    # 各shotの開始マーカーが sequence 直下 </media> の後に並ぶ
+    tail = xml_text.rsplit("</media>", 1)[1]
+    assert "<marker>" in tail
+    assert "<name>S01開始</name>" in tail
+    assert "<name>S02開始</name>" in tail
+    # コメントに shot_id が入る
+    assert "<comment>s1</comment>" in tail
+    assert "<comment>s2</comment>" in tail
+    # S01は timeline start=0
+    s01_marker = tail.split("<name>S01開始</name>")[1].split("</marker>")[0]
+    assert "<in>0</in>" in s01_marker
+    # S02は S01実尺(90フレーム)経過後
+    s02_marker = tail.split("<name>S02開始</name>")[1].split("</marker>")[0]
+    assert "<in>90</in>" in s02_marker
+
+
+def test_build_xmeml_emits_hook_and_cta_markers_from_plan_ids():
+    plan = _plan_two_shots()
+    plan["hook_end_shot_id"] = "s1"
+    plan["cta_start_shot_id"] = "s2"
+    xml_text = export_xmeml.build_xmeml(plan, "/tmp/proj", profile=_ttp_profile())
+    tail = xml_text.rsplit("</media>", 1)[1]
+    assert "<name>hook_end</name>" in tail
+    assert "<name>cta_start</name>" in tail
+    hook_marker = tail.split("<name>hook_end</name>")[1].split("</marker>")[0]
+    cta_marker = tail.split("<name>cta_start</name>")[1].split("</marker>")[0]
+    # hook終了 = s1(=0-90) の終了フレーム=90 / CTA開始 = s2の開始フレーム=90
+    assert "<in>90</in>" in hook_marker
+    assert "<in>90</in>" in cta_marker
+
+
+def test_build_xmeml_emits_sfx_intent_markers_when_sfx_enabled():
+    prof = _ttp_profile()
+    prof_sfx_on = dict(prof, audio=dict(prof["audio"], sfx=True))
+    plan = _plan_two_shots()
+    plan["sfx"] = [{"file": "whoosh_gen_005.wav", "at_sec": 1.0}]
+    xml_text = export_xmeml.build_xmeml(plan, "/tmp/proj", profile=prof_sfx_on)
+    tail = xml_text.rsplit("</media>", 1)[1]
+    assert "<name>SE01 whoosh</name>" in tail  # SEの意図マーカー
+    se_marker = tail.split("<marker>\n      <name>SE01 whoosh</name>")[1].split("</marker>")[0]
+    assert "sfx whoosh" in se_marker
+    assert "whoosh_gen_005.wav" in se_marker
+    assert "<in>30</in>" in se_marker  # at_sec=1.0 * 30fps
+
+
+def test_build_xmeml_no_nested_sequence_elements():
+    """FCP7 XMLはネスト sequence を許すが、Phase A では使わない前提を固定する。"""
+    xml_text = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile())
+    assert xml_text.count("<sequence") == 1
+    assert "</sequence>" in xml_text
+    assert xml_text.count("</sequence>") == 1
+
+
+def test_build_xmeml_return_warnings_reports_missing_media(tmp_path):
+    plan = _plan_two_shots()
+    result = export_xmeml.build_xmeml(
+        plan, str(tmp_path),  # tmp_pathの下に素材は無いので全部欠品
+        narration_path="narration.wav", bgm_path="assets/bgm/upbeat.mp3",
+        profile=_ttp_profile(), return_warnings=True,
+    )
+    assert isinstance(result, dict)
+    assert "xmeml" in result and "warnings" in result
+    kinds = {(w["role"], w["name"]) for w in result["warnings"]}
+    # V1のショット2本 + V3赤丸 + A1ナレ + A2 BGM が欠品として報告される
+    assert ("V1", "s1.mp4") in kinds
+    assert ("V1", "s2.mp4") in kinds
+    assert ("V3", "red_circle.png") in kinds
+    assert ("A1", "narration.wav") in kinds
+    assert ("A2", "upbeat.mp3") in kinds
+
+
+def test_build_xmeml_return_warnings_empty_when_all_files_exist(tmp_path):
+    """全素材が実在するときは warnings が空。"""
+    # 全部の素材ファイルをtmp_pathに作る
+    (tmp_path / "projects" / "p1" / "clips").mkdir(parents=True)
+    (tmp_path / "projects" / "p1" / "clips" / "s1.mp4").write_bytes(b"x")
+    (tmp_path / "projects" / "p1" / "clips" / "s2.mp4").write_bytes(b"x")
+    (tmp_path / "assets" / "overlays").mkdir(parents=True)
+    (tmp_path / "assets" / "overlays" / "red_circle.png").write_bytes(b"x")
+    (tmp_path / "narration.wav").write_bytes(b"x")
+    (tmp_path / "assets" / "bgm").mkdir(parents=True)
+    (tmp_path / "assets" / "bgm" / "upbeat.mp3").write_bytes(b"x")
+
+    result = export_xmeml.build_xmeml(
+        _plan_two_shots(), str(tmp_path),
+        narration_path="narration.wav", bgm_path="assets/bgm/upbeat.mp3",
+        profile=_ttp_profile(), return_warnings=True,
+    )
+    assert result["warnings"] == []
+
+
+def test_build_xmeml_return_warnings_default_returns_str_for_back_compat():
+    """既定 return_warnings=False は従来どおり str を返す（後方互換）。"""
+    out = export_xmeml.build_xmeml(_plan_two_shots(), "/tmp/proj", profile=_ttp_profile())
+    assert isinstance(out, str)
