@@ -26,6 +26,8 @@
     "resolution": "720p",
     "max_credits_per_shot": 20
   },
+  "claude_timeout_sec": 1200,
+  "claude_timeout_sec_supreme_plus": 1200,
   "fidelity": {
     "auto_evaluate": true,
     "targets": {

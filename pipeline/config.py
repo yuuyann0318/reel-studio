@@ -35,7 +35,10 @@ _DEFAULTS = {
         "stages": None,              # None なら quality に従う（supreme=write+polish）
         "quality_directive": None,   # 追加のプロンプト指示文（品質最優先など）
         # R2a F5: ビートスナップ（reference_spec.music.beat_times に shot 境界を吸着させる）
-        "beat_snap_enabled": False,
+        # None（既定）は director 側で quality によって自動決定する:
+        #   supreme_plus → True（品質最優先 = beat_snap ON） / それ以外 → False。
+        # 明示的に True/False を指定すれば director 側の自動判定より優先される。
+        "beat_snap_enabled": None,
         "beat_snap_tolerance_ms": 250,
     },
     "higgsfield": {

@@ -27,6 +27,7 @@ import copy
 import json
 import math
 import os
+import time
 from typing import Any, Dict, List, Optional  # noqa: F401  R2a F5 type hints
 
 try:
@@ -1088,7 +1089,7 @@ def build_critique_prompt(theme, target_duration_sec, target_tolerance_sec, styl
 
 def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
                   target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC, style="default", quality=None,
-                  product=None, reference=None):
+                  product=None, reference=None, checkpoint_dir=None):
     """テーマ + 参考動画spec v2 から reel_plan を生成する。
 
     no_llm=True: claude 呼び出しを一切行わず、build_smoke_plan で最小plan を返す
@@ -1099,6 +1100,9 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     quality: "supreme"（既定・write→polish の2段） / "single"（write のみ）。
     style: "default" / "vertical_hook"（プロンプトの書き分けのみ）。
     product: 商品アフィリエイト動画モード用の商品情報 {"name","url","image_count"}。
+    checkpoint_dir: R2b申し送り対応。指定するとステージ間で中間 plan を JSON
+        （plan_after_write.json / plan_after_polish.json / plan_after_rewrite.json）
+        として保存する。3段直列の途中で失敗しても人手でリカバリできるように残す。
 
     Raises:
         TTPReferenceRequiredError: reference=None かつ no_llm=False のとき。
@@ -1111,6 +1115,25 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
         quality = config.get("director_quality", DEFAULT_QUALITY)
     if quality not in QUALITY_LEVELS:
         quality = DEFAULT_QUALITY
+
+    # R2b申し送り対応: supreme_plus 用の1呼び出しタイムアウト延長。
+    # 3段直列(write→polish→rewrite) × スケルトン矯正リトライ(最大3回) を最後まで走らせる
+    # ため、既定10分では届かないケースがある。config で明示上書き可(claude_timeout_sec_supreme_plus)。
+    # codex-review 指摘(P2): 明示指定が無い場合は「短縮しない」— 既存値と 1200 の最大値を採用する。
+    # 明示的な claude_timeout_sec_supreme_plus はユーザー意思とみなしそのまま採用する。
+    if quality == "supreme_plus":
+        sp_explicit = config.get("claude_timeout_sec_supreme_plus")
+        if sp_explicit is not None:
+            sp_timeout = sp_explicit
+        else:
+            existing = config.get("claude_timeout_sec", 600)
+            try:
+                existing_num = float(existing)
+            except (TypeError, ValueError):
+                existing_num = 600.0
+            sp_timeout = max(existing_num, 1200)  # 既存値が長ければそちらを維持
+        config = dict(config)  # shallow copy — 元 config を汚さない
+        config["claude_timeout_sec"] = sp_timeout
 
     if no_llm:
         # 後方互換のため build_rule_based_plan (= build_smoke_plan の薄い alias) を使う。
@@ -1154,7 +1177,13 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     min_shot_sec_cfg = director_cfg.get("min_shot_sec")
     # R2a F5: config.director.beat_snap_enabled=True かつ reference.music.beat_times が
     # 非空のとき、shot 境界を最寄り拍にスナップする。
-    beat_snap_enabled = bool(director_cfg.get("beat_snap_enabled", False))
+    # R2b申し送り対応: supreme_plus では既定 ON にする(明示的に False が設定されていな
+    # い限り)。config.local/quality_max.json 未設定でも「品質最優先」意図を裏切らない。
+    beat_snap_raw = director_cfg.get("beat_snap_enabled", None)
+    if beat_snap_raw is None:
+        beat_snap_enabled = (quality == "supreme_plus")
+    else:
+        beat_snap_enabled = bool(beat_snap_raw)
     beat_snap_tol_ms = director_cfg.get("beat_snap_tolerance_ms", 250)
     try:
         beat_snap_tol_sec = float(beat_snap_tol_ms) / 1000.0
@@ -1179,16 +1208,35 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     if quality in ("supreme", "supreme_plus"):
         stages["angles"] = {"ok": False, "skipped": "reference"}
 
+    # R2b申し送り対応: ステージ中間 plan を checkpoint_dir に保存する薄いヘルパ。
+    # 例外は握って呼び出し側に伝播させない（保存失敗で本流を止めない）。
+    def _save_checkpoint(name, obj):
+        if not checkpoint_dir or obj is None:
+            return
+        try:
+            import pathlib as _pl
+            _p = _pl.Path(str(checkpoint_dir))
+            _p.mkdir(parents=True, exist_ok=True)
+            (_p / name).write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     write_trace = {}
     prompt = build_director_prompt(
         theme, target_duration_sec, target_tolerance_sec, style=style, angle_block="", product=product,
         reference_block=reference_block,
     )
+    write_start = time.monotonic()
     plan = _attempt_plan(
         prompt, config, MAX_RETRIES, target_duration_sec, target_tolerance_sec,
         trace=write_trace, skeleton=skeleton, reference=reference,
     )
-    stages["write"] = {"ok": plan is not None, "model_used": write_trace.get("last_model_used")}
+    stages["write"] = {
+        "ok": plan is not None,
+        "model_used": write_trace.get("last_model_used"),
+        "elapsed_sec": round(time.monotonic() - write_start, 3),
+    }
+    _save_checkpoint("plan_after_write.json", plan)
 
     if plan is None:
         # 全滅（write 失敗）: スモークにフォールバックせず、例外を投げる。
@@ -1203,14 +1251,20 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
         critique_prompt = build_critique_prompt(
             theme, target_duration_sec, target_tolerance_sec, style, plan, reference_block=reference_block
         )
+        polish_start = time.monotonic()
         polished = _attempt_plan(
             critique_prompt, config, POLISH_MAX_RETRIES, target_duration_sec, target_tolerance_sec,
             trace=polish_trace, skeleton=skeleton, reference=reference,
         )
-        stages["polish"] = {"ok": polished is not None, "model_used": polish_trace.get("last_model_used")}
+        stages["polish"] = {
+            "ok": polished is not None,
+            "model_used": polish_trace.get("last_model_used"),
+            "elapsed_sec": round(time.monotonic() - polish_start, 3),
+        }
         if polished is not None:
             plan = polished
         # polish 不合格: write のドラフトをそのまま採用。
+        _save_checkpoint("plan_after_polish.json", plan)
 
     if quality == "supreme_plus":
         # F12: 3段目 rewrite ステージ。critique 出力をもう一度 director プロンプトに戻し、
@@ -1225,13 +1279,19 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
             "narration_jp の表現と参考映像情報の反映度だけをさらに向上させて再出力』してください。\n\n"
             "ドラフト:\n" + json.dumps(plan, ensure_ascii=False, indent=2) + "\n\n---\n\n" + rewrite_prompt
         )
+        rewrite_start = time.monotonic()
         rewritten = _attempt_plan(
             rewrite_prompt, config, POLISH_MAX_RETRIES, target_duration_sec, target_tolerance_sec,
             trace=rewrite_trace, skeleton=skeleton, reference=reference,
         )
-        stages["rewrite"] = {"ok": rewritten is not None, "model_used": rewrite_trace.get("last_model_used")}
+        stages["rewrite"] = {
+            "ok": rewritten is not None,
+            "model_used": rewrite_trace.get("last_model_used"),
+            "elapsed_sec": round(time.monotonic() - rewrite_start, 3),
+        }
         if rewritten is not None:
             plan = rewritten
+        _save_checkpoint("plan_after_rewrite.json", plan)
 
     plan.setdefault("meta", {})
     plan["meta"]["style"] = style

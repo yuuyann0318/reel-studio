@@ -463,6 +463,9 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             plan = director.run_director(
                 theme, cfg, target_duration_sec=target_duration_sec, no_llm=no_llm, quality=quality, style=style,
                 reference=reference_spec,
+                # R2b申し送り対応: 3段直列(supreme_plus)の途中失敗からリカバリできるよう
+                # 中間 plan を run_dir に随時保存する。既存プロファイル(supreme/single)にも影響なし。
+                checkpoint_dir=run_dir,
             )
             (run_dir / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
             report["stages"]["director"]["source"] = plan.get("meta", {}).get("source")
