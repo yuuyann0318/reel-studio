@@ -20,6 +20,7 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import json
 import shutil
 import time
 import uuid
@@ -126,6 +127,9 @@ def _build_readme_text(project_id, missing_media_section=""):
         "- 音声が聞こえない場合: `narration.wav` がA1トラックに読み込まれているか確認してください。\n"
         "- 字幕が出ない場合: `captions.srt` をタイムラインへドラッグ済みか、字幕トラックが表示（有効）に"
         "なっているか確認してください。\n"
+        "- `timeline.json`（機械可読）: このパッケージに同梱されているサイドカーファイルです。"
+        "各ショットの表示区間・テロップ表示秒・SE配置秒・BGM音量カーブが記載されており、"
+        "自作ツールで同期意図を再利用したいとき参照できます。\n"
         + _track_contract_section()
         + (missing_media_section or "")
     ).format(project_id=project_id)
@@ -177,6 +181,27 @@ def build_package(project_id, progress_cb=None):
         resolved = projects.resolve_bgm_path(bgm_rel)
         bgm_path = str(resolved) if resolved else None
 
+    # Phase B: plan v2 の sfx_plan / caption offset / hook-cta を Premiere タイムラインへ
+    # 忠実に反映するため、shot_display_durations と sfx_events / bgm_curve を先に解決する。
+    # ここでは xmeml と ffmpeg レンダで「同じ入力から同じ時刻」が出るように、既存の
+    # pipeline.render.compute_edit_enhancement_kwargs() をそのまま流用する
+    # （＝ffmpeg レンダ経路と時刻源が同じ→ ±1フレームでの同期一致を保証する）。
+    shot_display_durations = _resolve_shot_display_durations(plan)
+    sfx_events = _resolve_plan_sfx_events(plan)
+    enhancement_bgm_curve = None
+    try:
+        from pipeline import edit_profile as _ep_mod
+        from pipeline import render as _render_mod
+        _edit_prof = _ep_mod.load_edit_profile(cfg, project_seed=project_id)
+        _enh = _render_mod.compute_edit_enhancement_kwargs(
+            shot_display_durations, _edit_prof, project_seed=project_id, plan=plan,
+        )
+        sfx_events = sfx_events + (_enh.get("sfx_extra") or [])
+        enhancement_bgm_curve = _enh.get("bgm_curve")
+    except Exception:
+        # 編集プロファイルの読み込み失敗 → v1 経路（plan["sfx"] のみ・BGMカーブなし）へ縮退
+        _edit_prof = None
+
     # shots[].clip_path は "projects/<id>/clips/<file>" 形式（studio.server.projects.
     # media_relpath_for_clip契約）で、PROJECTS_ROOT.parent基点の相対パスとして解決される
     # （projects.resolve_media_relpathと同じ基点。pipeline.config.project_root()と本番では
@@ -185,12 +210,23 @@ def build_package(project_id, progress_cb=None):
     xmeml_result = export_xmeml.build_xmeml(
         plan, str(export_base_dir),
         narration_path=str(narration_path), bgm_path=bgm_path, profile=prof,
-        return_warnings=True,
+        shot_display_durations=shot_display_durations,
+        sfx_events=sfx_events,
+        bgm_curve=enhancement_bgm_curve,
+        emit_captions=True,
+        return_timeline=True,
     )
     xmeml_text = xmeml_result["xmeml"]
     xmeml_warnings = xmeml_result.get("warnings") or []
+    timeline_data = xmeml_result.get("timeline") or {}
     reel_xml_path = package_dir / "reel.xml"
     reel_xml_path.write_text(xmeml_text, encoding="utf-8")
+
+    # timeline.json サイドカー（機械可読な同期意図の要約。README にも一言案内する）
+    timeline_json_path = package_dir / "timeline.json"
+    timeline_json_path.write_text(
+        json.dumps(timeline_data, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
 
     # (c) captions.srt --------------------------------------------------------
     _progress(70, "字幕(captions.srt)を作成中…")
@@ -221,6 +257,7 @@ def build_package(project_id, progress_cb=None):
     files = [
         str(reel_xml_path),
         str(captions_path),
+        str(timeline_json_path),
         str(narration_path),
         str(style_spec_dest),
         str(readme_path),
@@ -231,4 +268,56 @@ def build_package(project_id, progress_cb=None):
         "tts": tts_meta,
         "profile_name": DEFAULT_PROFILE_NAME,
         "xmeml_warnings": xmeml_warnings,
+        "timeline": timeline_data,
     }
+
+
+# ---------------------------------------------------------------------------
+# 内部ヘルパ（Phase B）
+# ---------------------------------------------------------------------------
+
+def _resolve_shot_display_durations(plan):
+    """enabled ショットの表示尺(秒)を、V1 タイムラインと同じ規約で並べて返す。
+
+    xmeml._build_v1_clips が使う「order でソート → trim.end - trim.start」を再現する。
+    trim が無いショットは duration_sec を採用する（plan v2 の名目尺フォールバック）。
+    plan.shots と同順（enabled_shots 順）で返すため、pipeline.sfx_planner が期待する
+    「plan.shots と同順の durations」ではなく enabled_shots 相当。呼び出し側では
+    enabled_shots のみで sfx_plan.t_anchor.shot_id を解決する運用に揃える。
+    """
+    shots = (plan or {}).get("shots") or []
+    enabled = sorted(
+        [s for s in shots if isinstance(s, dict) and s.get("enabled", True)],
+        key=lambda s: s.get("order", 0),
+    )
+    durations = []
+    for s in enabled:
+        trim = s.get("trim") or {}
+        if "start" in trim and "end" in trim:
+            dur = max(0.0, float(trim["end"]) - float(trim["start"]))
+        else:
+            dur = float(s.get("duration_sec", 0.0) or 0.0)
+        durations.append(dur)
+    return durations
+
+
+def _resolve_plan_sfx_events(plan):
+    """plan["sfx"] の各エントリ({file, at_sec, gain_db}) を、export_xmeml が受ける
+    sfx_events 形式({path, at_sec, gain_db}) に変換する。file が解決不能なものはスキップ。
+    """
+    events = []
+    for s in (plan or {}).get("sfx") or []:
+        if not isinstance(s, dict):
+            continue
+        f = s.get("file")
+        if not f:
+            continue
+        resolved = projects.resolve_sfx_path(f)
+        if resolved is None:
+            continue
+        events.append({
+            "path": str(resolved),
+            "at_sec": float(s.get("at_sec", 0.0) or 0.0),
+            "gain_db": s.get("gain_db"),
+        })
+    return events

@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import subprocess
 import urllib.parse
 import warnings as _warnings
 from pathlib import Path
@@ -50,7 +51,8 @@ SEQUENCE_WIDTH = 1080
 SEQUENCE_HEIGHT = 1920
 
 # SFXは配置基準となるat_secのみplanが持ち、素材自体の尺情報が無いため、Premiere側で
-# ユーザーが伸縮させる前提のプレースホルダ尺として使う（短いSE想定の既定値）。
+# ユーザーが伸縮させる前提のプレースホルダ尺として使う（短いSE想定の既定値。実尺は
+# _probe_media_duration_sec で取得できたときのみ上書きされる）。
 SFX_PLACEHOLDER_DURATION_SEC = 1.0
 
 RED_CIRCLE_ASSET_DEFAULT = "assets/overlays/red_circle.png"
@@ -60,10 +62,25 @@ _INDENT_UNIT = "  "
 # Premiereカラーラベル（FCP7 XML の <labels><label2>...</label2></labels>）。
 # トラック役割ごとに色を固定して視認性を上げる。値はPremiereが認識する正式ラベル名。
 LABEL_V1 = "Iris"
+LABEL_V2 = "Iris"      # Phase B: V2 テロップ(generatoritem)にも色ラベルを付ける
 LABEL_V3 = "Rose"
 LABEL_A1 = "Forest"
 LABEL_A2 = "Lavender"
 LABEL_A3 = "Caribbean"
+
+# V2 テロップ(generatoritem) の見た目デフォルト値。Premiere が Text ジェネレータの
+# パラメータを完全に honorするとは限らない（FCP7 XML 経路のレガシー扱い）が、
+# 「取り込み時にとりあえずそれっぽく出る」ことを狙う。詳細は STYLE_SPEC.md 参照。
+CAPTION_FONT_DEFAULT = "Noto Sans JP Black"
+CAPTION_FONT_SIZE_DEFAULT = 60  # px 目安（Premiere側で微調整前提）
+CAPTION_ALIGN_DEFAULT = "center"
+CAPTION_POSITION_DEFAULT = "bottom_safe"   # 下部セーフエリア
+CAPTION_MAX_CHARS_DEFAULT = 13
+CAPTION_MAX_LINES_DEFAULT = 2
+
+# BGM(A2) の Audio Levels フィルタで出力するキーフレームの標準的な補間種別。
+# FCP7 XML の <interpolation> は "Linear"（線形）が Premiere/DaVinci 双方で通る。
+_KEYFRAME_INTERPOLATION = "Linear"
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +111,7 @@ _FPS_TABLE = (
 )
 
 
-def fps_to_timebase_ntsc(fps):
+def fps_to_timebase_ntsc(fps, warnings_out=None):
     """fpsを FCP7 XML の (timebase:int, ntsc:"TRUE"|"FALSE") へ正規化する。
 
     Premiere/FCP7 の `<rate>` は「整数timebase + NTSCフラグ」で分数フレームレート
@@ -104,6 +121,9 @@ def fps_to_timebase_ntsc(fps):
 
     Args:
         fps: 数値（整数/小数）または None。None は DEFAULT_FPS 扱い。
+        warnings_out: list | None。未知fps時に "unknown_fps" kind の警告を追記する
+                      （build_xmeml から橋渡しされる。None なら stderr の DeprecationWarning
+                      的な _warnings.warn だけを出す＝後方互換）。
 
     Returns:
         tuple[int, str]: (timebase, ntsc)。ntsc は "TRUE" / "FALSE" のいずれか。
@@ -122,6 +142,12 @@ def fps_to_timebase_ntsc(fps):
         "unknown fps {!r}; falling back to timebase={} ntsc=FALSE".format(fps, fallback_tb),
         stacklevel=2,
     )
+    if warnings_out is not None:
+        warnings_out.append({
+            "kind": "unknown_fps",
+            "fps": fps,
+            "fallback_timebase": fallback_tb,
+        })
     return (fallback_tb, "FALSE")
 
 
@@ -204,6 +230,58 @@ def _shot_display_name(shot_id, index_zero_based):
     return "S{:02d}".format(n)
 
 
+def _default_ffprobe_bin():
+    """`bin/ffprobe` の候補パスを返す（存在しなくても Path を返す。後段でexists()で判定）。"""
+    # 遅延importで循環回避（pipeline.config.project_root は本モジュールが遅く読まれても安全）。
+    try:
+        from pipeline.config import project_root as _pr
+        return Path(_pr()) / "bin" / "ffprobe"
+    except Exception:
+        return Path("bin/ffprobe")
+
+
+def _probe_media_duration_sec(abs_path, ffprobe_bin=None, timeout_sec=5):
+    """絶対パスのメディア尺を `bin/ffprobe` で秒(float)取得する。取れないときは None。
+
+    - ファイル自体が存在しない → None（呼び出し側でフォールバック尺を使う）。
+    - ffprobe バイナリが無い/失敗した → None + warning は呼び出し側で付ける。
+    決定論性のため、呼び出し側は失敗時のフォールバック尺(SFX_PLACEHOLDER_DURATION_SEC)へ
+    落とすことでXMLのビット再現性を担保する（実ファイルが同じなら同じ尺・無ければ既定尺）。
+
+    テストからは `ffprobe_bin` を差し替えるか、モジュール全体を monkeypatch する
+    （tests/test_premiere_export.py で行う）。
+    """
+    try:
+        p = Path(str(abs_path))
+        if not p.exists() or not p.is_file():
+            return None
+    except OSError:
+        return None
+    fp = Path(ffprobe_bin) if ffprobe_bin is not None else _default_ffprobe_bin()
+    if not fp.exists():
+        return None
+    try:
+        res = subprocess.run(
+            [str(fp), "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(p)],
+            capture_output=True, text=True, timeout=timeout_sec, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    stdout = (res.stdout or "").strip()
+    if not stdout:
+        return None
+    try:
+        dur = float(stdout)
+    except ValueError:
+        return None
+    if dur <= 0:
+        return None
+    return dur
+
+
 def _sfx_family(sfx_file):
     """SFXファイル名から family 名（先頭語）を抜き出す（`whoosh_gen_005.wav` -> `whoosh`）。"""
     if not sfx_file:
@@ -264,8 +342,14 @@ def _file_lines(file_id, name, pathurl, timebase, ntsc, duration_frames, depth, 
     return lines
 
 
-def _audio_level_filter_lines(level, depth):
-    return [
+def _audio_level_filter_lines(level, depth, keyframes=None):
+    """Audio Levels フィルタの行リスト。
+
+    keyframes: None または list[(when_frame:int, level:float)]。指定時は `<parameter>` に
+      `<keyframe>` を列挙して線形補間で音量カーブを表現する（Premiere は Audio Levels の
+      パラメータキーフレームを認識してタイムライン上に鉛筆線が引かれる）。
+    """
+    lines = [
         _ind(depth) + "<filter>",
         _ind(depth + 1) + "<effect>",
         _ind(depth + 2) + "<name>Audio Levels</name>",
@@ -277,14 +361,25 @@ def _audio_level_filter_lines(level, depth):
         _ind(depth + 3) + "<name>Level</name>",
         _ind(depth + 3) + "<parameterid>level</parameterid>",
         _ind(depth + 3) + "<value>{:.6f}</value>".format(level),
+    ]
+    if keyframes:
+        for when_frame, kf_level in keyframes:
+            lines.append(_ind(depth + 3) + "<keyframe>")
+            lines.append(_ind(depth + 4) + "<when>{}</when>".format(int(when_frame)))
+            lines.append(_ind(depth + 4) + "<value>{:.6f}</value>".format(float(kf_level)))
+            lines.append(_ind(depth + 4) + "<interpolation>{}</interpolation>".format(_KEYFRAME_INTERPOLATION))
+            lines.append(_ind(depth + 3) + "</keyframe>")
+    lines += [
         _ind(depth + 2) + "</parameter>",
         _ind(depth + 1) + "</effect>",
         _ind(depth) + "</filter>",
     ]
+    return lines
 
 
 def _clipitem_lines(clipitem_id, name, start_frames, end_frames, in_frame, out_frame,
-                     timebase, ntsc, file_lines, depth, enabled=True, level=None, label2=None):
+                     timebase, ntsc, file_lines, depth, enabled=True, level=None, label2=None,
+                     level_keyframes=None):
     lines = [_ind(depth) + '<clipitem id="{}">'.format(_esc(clipitem_id))]
     lines.append(_ind(depth + 1) + "<name>{}</name>".format(_esc(name)))
     lines.extend(_rate_lines(timebase, ntsc, depth + 1))
@@ -296,9 +391,73 @@ def _clipitem_lines(clipitem_id, name, start_frames, end_frames, in_frame, out_f
         lines.append(_ind(depth + 1) + "<enabled>FALSE</enabled>")
     lines.extend(_labels_lines(label2, depth + 1))
     lines.extend(file_lines)
-    if level is not None:
-        lines.extend(_audio_level_filter_lines(level, depth + 1))
+    if level is not None or level_keyframes:
+        base_level = level if level is not None else 1.0
+        lines.extend(_audio_level_filter_lines(base_level, depth + 1, keyframes=level_keyframes))
     lines.append(_ind(depth) + "</clipitem>")
+    return lines
+
+
+def _generatoritem_text_lines(gen_id, name, start_frames, end_frames, in_frame, out_frame,
+                                 timebase, ntsc, text, wrapped_lines, depth,
+                                 font=CAPTION_FONT_DEFAULT, size=CAPTION_FONT_SIZE_DEFAULT,
+                                 align=CAPTION_ALIGN_DEFAULT, position=CAPTION_POSITION_DEFAULT,
+                                 label2=LABEL_V2):
+    """V2 テロップ用 `<generatoritem>` の行リスト。
+
+    FCP7 XML の Text ジェネレータ表現。Premiere は取り込み時に汎用テキストクリップとして
+    扱う。詳細スタイル（縁取り・シャドウ・厳密位置）は Premiere 側の .prtextstyle が正、
+    ここでは「文字が入っている」「開始/終了フレームが plan の意図と一致する」ことを担保する。
+    """
+    display_text = "\n".join(wrapped_lines) if wrapped_lines else (text or "")
+    lines = [_ind(depth) + '<generatoritem id="{}">'.format(_esc(gen_id))]
+    lines.append(_ind(depth + 1) + "<name>{}</name>".format(_esc(name)))
+    lines.extend(_rate_lines(timebase, ntsc, depth + 1))
+    lines.append(_ind(depth + 1) + "<start>{}</start>".format(int(start_frames)))
+    lines.append(_ind(depth + 1) + "<end>{}</end>".format(int(end_frames)))
+    lines.append(_ind(depth + 1) + "<in>{}</in>".format(int(in_frame)))
+    lines.append(_ind(depth + 1) + "<out>{}</out>".format(int(out_frame)))
+    lines.append(_ind(depth + 1) + "<anamorphic>FALSE</anamorphic>")
+    lines.append(_ind(depth + 1) + "<alphatype>straight</alphatype>")
+    lines.extend(_labels_lines(label2, depth + 1))
+    lines.append(_ind(depth + 1) + "<effect>")
+    lines.append(_ind(depth + 2) + "<name>Text</name>")
+    lines.append(_ind(depth + 2) + "<effectid>Text</effectid>")
+    lines.append(_ind(depth + 2) + "<effectcategory>Text</effectcategory>")
+    lines.append(_ind(depth + 2) + "<effecttype>generator</effecttype>")
+    lines.append(_ind(depth + 2) + "<mediatype>video</mediatype>")
+    # parameter: text
+    lines.append(_ind(depth + 2) + "<parameter>")
+    lines.append(_ind(depth + 3) + "<parameterid>str</parameterid>")
+    lines.append(_ind(depth + 3) + "<name>Text</name>")
+    lines.append(_ind(depth + 3) + "<value>{}</value>".format(_esc(display_text)))
+    lines.append(_ind(depth + 2) + "</parameter>")
+    # parameter: font
+    lines.append(_ind(depth + 2) + "<parameter>")
+    lines.append(_ind(depth + 3) + "<parameterid>font</parameterid>")
+    lines.append(_ind(depth + 3) + "<name>Font</name>")
+    lines.append(_ind(depth + 3) + "<value>{}</value>".format(_esc(font)))
+    lines.append(_ind(depth + 2) + "</parameter>")
+    # parameter: size
+    lines.append(_ind(depth + 2) + "<parameter>")
+    lines.append(_ind(depth + 3) + "<parameterid>size</parameterid>")
+    lines.append(_ind(depth + 3) + "<name>Size</name>")
+    lines.append(_ind(depth + 3) + "<value>{}</value>".format(int(size)))
+    lines.append(_ind(depth + 2) + "</parameter>")
+    # parameter: alignment
+    lines.append(_ind(depth + 2) + "<parameter>")
+    lines.append(_ind(depth + 3) + "<parameterid>align</parameterid>")
+    lines.append(_ind(depth + 3) + "<name>Alignment</name>")
+    lines.append(_ind(depth + 3) + "<value>{}</value>".format(_esc(align)))
+    lines.append(_ind(depth + 2) + "</parameter>")
+    # parameter: position（下部セーフエリア等の意図。Premiere側の座標系と一致しない場合あり）
+    lines.append(_ind(depth + 2) + "<parameter>")
+    lines.append(_ind(depth + 3) + "<parameterid>position</parameterid>")
+    lines.append(_ind(depth + 3) + "<name>Position</name>")
+    lines.append(_ind(depth + 3) + "<value>{}</value>".format(_esc(position)))
+    lines.append(_ind(depth + 2) + "</parameter>")
+    lines.append(_ind(depth + 1) + "</effect>")
+    lines.append(_ind(depth) + "</generatoritem>")
     return lines
 
 
@@ -457,8 +616,87 @@ def _build_a1_narration(narration_path, project_dir, timebase, ntsc, total_durat
     return [clip_lines]
 
 
+def _bgm_curve_keyframes(bgm_curve, base_level, timebase, total_duration_frames):
+    """render.compute_edit_enhancement_kwargs() が返す bgm_curve dict を Audio Levels の
+    キーフレーム列 [(when_frame, linear_level), ...] へ変換する。
+
+    ffmpegレンダの `build_bgm_curve_volume_filter` と時刻/dB を一致させる:
+      - t < hook_end_sec  → hook_gain_db
+      - hook_end_sec <= t < cta_start_sec → body_gain_db
+      - t >= cta_start_sec → cta_gain_db
+      - 各 dip_event 時刻 ± sfx_dip_half_window_sec の窓は上記の値 * (dip_gain_db 相当)
+
+    実装: 各フレームで `_level_at()` を評価し、値が変わったフレーム境界にのみキーフレームを
+    書き出す（RLE 圧縮）。値が変わる各フレーム f では「(f-1, 直前セグメントの値), (f, 新値)」の
+    ペアを打ってステップ状に切替える（Linear 補間だと Premiere が滑らかに繋いでしまうため）。
+    フレーム毎評価にすることで:
+      - dip 窓の終端が離れた次キーフレームまで長い ramp になる問題を回避
+      - 境界の丸めが「値評価と食い違う」問題を回避
+    total_duration_frames はショット総尺のフレーム数（900F=30秒程度が上限想定）で
+    O(N) のコストは実用上問題ない。
+    Returns: (keyframes_list, initial_level_at_zero)
+    """
+    if not isinstance(bgm_curve, dict) or total_duration_frames <= 0:
+        return [], base_level
+
+    hook_end = float(bgm_curve.get("hook_end_sec", 0.0) or 0.0)
+    cta_start = float(bgm_curve.get("cta_start_sec", 0.0) or 0.0)
+    hook_lvl = _db_to_level(bgm_curve.get("hook_gain_db", -10))
+    body_lvl = _db_to_level(bgm_curve.get("body_gain_db", -14))
+    cta_lvl = _db_to_level(bgm_curve.get("cta_gain_db", -12))
+    dip_events = bgm_curve.get("dip_events") or []
+    dip_half_w = float(bgm_curve.get("sfx_dip_half_window_sec", 0.3))
+    dip_db = float(bgm_curve.get("sfx_dip_gain_db", -4.0))
+    dip_mult = _db_to_level(dip_db)  # 追加ダッキング倍率(<1.0)
+
+    # dip_events は float 一度パースしておく
+    _dips = []
+    for dt in dip_events:
+        try:
+            _dips.append(float(dt))
+        except (TypeError, ValueError):
+            continue
+
+    def _level_at(t_sec):
+        if t_sec < hook_end:
+            base = hook_lvl
+        elif t_sec >= cta_start:
+            base = cta_lvl
+        else:
+            base = body_lvl
+        for dtv in _dips:
+            if abs(t_sec - dtv) <= dip_half_w:
+                return base * dip_mult
+        return base
+
+    tb = float(timebase)
+    keyframes = []
+    prev_lv = None
+    initial = None
+    # 各フレームの中心付近で評価するため半フレームの epsilon を足す。
+    # これにより「t=0.0 が hook」「t=hook_end 直前は hook、直後は body」といった境界が
+    # フレーム単位で正しく分離される（frame f が担当する [f/fps, (f+1)/fps) 区間の内側を評価）。
+    eps = 0.5 / tb
+    for f in range(int(total_duration_frames) + 1):
+        t_at = f / tb + eps
+        lv = _level_at(t_at)
+        if prev_lv is None:
+            keyframes.append((f, lv))
+            initial = lv
+        elif abs(lv - prev_lv) > 1e-9:
+            # 前フレームに step-hold の keyframe を残し、当該フレームに新値を打つ
+            if not keyframes or keyframes[-1][0] != f - 1:
+                keyframes.append((f - 1, prev_lv))
+            keyframes.append((f, lv))
+        prev_lv = lv
+
+    if initial is None:
+        initial = base_level
+    return keyframes, initial
+
+
 def _build_a2_bgm(bgm_path, plan, profile, project_dir, timebase, ntsc, total_duration_frames, depth,
-                   warnings_out=None):
+                   warnings_out=None, bgm_curve=None):
     if not bgm_path or total_duration_frames <= 0:
         return []
     plan_bgm = (plan or {}).get("bgm") or {}
@@ -466,6 +704,15 @@ def _build_a2_bgm(bgm_path, plan, profile, project_dir, timebase, ntsc, total_du
     if gain_db is None:
         gain_db = ((profile or {}).get("audio") or {}).get("bgm_gain_db")
     level = _db_to_level(gain_db)
+    if level is None:
+        level = 1.0
+
+    keyframes = None
+    if bgm_curve is not None:
+        keyframes, initial_level = _bgm_curve_keyframes(bgm_curve, level, timebase, total_duration_frames)
+        if keyframes:
+            # 初期値は最初のキーフレームの値と揃える（Premiere取り込み時の t=0 の値と一致）
+            level = initial_level
 
     abs_path = _resolve_path(project_dir, bgm_path)
     pathurl = _to_pathurl(abs_path)
@@ -477,22 +724,87 @@ def _build_a2_bgm(bgm_path, plan, profile, project_dir, timebase, ntsc, total_du
     clip_lines = _clipitem_lines(
         clipitem_id, "BGM bgm", 0, total_duration_frames, 0, total_duration_frames,
         timebase, ntsc, file_lines, depth + 1, enabled=True, level=level, label2=LABEL_A2,
+        level_keyframes=keyframes,
     )
     return [clip_lines]
 
 
-def _build_a3_sfx(plan, profile, project_dir, timebase, ntsc, depth, warnings_out=None):
+def _build_a3_sfx(plan, profile, project_dir, timebase, ntsc, depth, warnings_out=None,
+                    sfx_events=None, ffprobe_bin=None):
     """(clipitem行リストのリスト, sfx_marker_info) を返す。
 
     sfx_marker_info: [(display_name, family, at_sec_frame, comment), ...] マーカー用。
+
+    - sfx_events (Phase B): resolve_sfx_events() の結果
+        [{"path":絶対path, "at_sec":float, "gain_db":float, ...}, ...]
+      を優先して使う。plan v2 の sfx_plan → 解決済みイベントをそのまま反映する経路。
+      パスから family を抽出し、clip 尺は `bin/ffprobe` で実尺を取得（失敗時は
+      SFX_PLACEHOLDER_DURATION_SEC + "sfx_duration_fallback" 警告）。
+    - sfx_events が None のときは従来どおり plan["sfx"] を読む（v1 後方互換）。
+    どちらの経路でも profile.audio.sfx=false は省略する（従来通り）。
     """
     audio_profile = (profile or {}).get("audio") or {}
     if not audio_profile.get("sfx"):
         return [], []  # profile.audio.sfx=false なら省略
-    sfx_list = (plan or {}).get("sfx") or []
     clip_lines_list = []
     marker_info = []
     seq_no = 0
+
+    if sfx_events is not None:
+        # Phase B: 解決済みイベントを使う
+        for i, ev in enumerate(sfx_events or []):
+            if not isinstance(ev, dict):
+                continue
+            abs_path_str = ev.get("path")
+            if not abs_path_str:
+                continue
+            seq_no += 1
+            at_sec = float(ev.get("at_sec", 0.0) or 0.0)
+            # ffmpeg 側は負の at_sec を 0 にクランプする（pipeline.render で amerge が
+            # 負秒を無視する契約）。xmeml 側もこれに合わせる。
+            if at_sec < 0.0:
+                at_sec = 0.0
+            start_frames = _seconds_to_frames(at_sec, timebase)
+
+            probed = _probe_media_duration_sec(abs_path_str, ffprobe_bin=ffprobe_bin)
+            if probed is None:
+                dur_frames = _seconds_to_frames(SFX_PLACEHOLDER_DURATION_SEC, timebase)
+                if warnings_out is not None:
+                    warnings_out.append({
+                        "kind": "sfx_duration_fallback",
+                        "role": "A3",
+                        "abs_path": str(abs_path_str),
+                        "fallback_sec": SFX_PLACEHOLDER_DURATION_SEC,
+                    })
+            else:
+                dur_frames = max(1, int(round(probed * float(timebase))))
+            end_frames = start_frames + dur_frames
+
+            gain_db = ev.get("gain_db")
+            level = _db_to_level(gain_db)
+
+            abs_path = Path(abs_path_str)
+            pathurl = _to_pathurl(abs_path)
+            name = abs_path.name
+            _check_missing("A3", abs_path, warnings_out)
+
+            family = _sfx_family(name)
+            display_name = "SE{:02d} {}".format(seq_no, family)
+
+            file_id = "file-a3-{}".format(_deterministic_id("a3-file", i, abs_path_str, at_sec))
+            clipitem_id = "clipitem-a3-{}".format(_deterministic_id("a3-clip", i, abs_path_str, at_sec))
+            file_lines = _file_lines(file_id, name, pathurl, timebase, ntsc, dur_frames, depth + 2, kind="audio")
+            clip_lines_list.append(
+                _clipitem_lines(
+                    clipitem_id, display_name, start_frames, end_frames, 0, dur_frames,
+                    timebase, ntsc, file_lines, depth + 1, enabled=True, level=level, label2=LABEL_A3,
+                )
+            )
+            marker_info.append((display_name, family, start_frames, name))
+        return clip_lines_list, marker_info
+
+    # v1 後方互換: plan["sfx"] から
+    sfx_list = (plan or {}).get("sfx") or []
     for i, sfx in enumerate(sfx_list):
         sfx_file = sfx.get("file")
         if not sfx_file:
@@ -527,18 +839,146 @@ def _build_a3_sfx(plan, profile, project_dir, timebase, ntsc, depth, warnings_ou
     return clip_lines_list, marker_info
 
 
+def _build_v2_captions(enabled_shots, shot_display_durations, timebase, ntsc,
+                          profile, depth):
+    """V2 テロップ用 generatoritem 行リストのリストと、副産物として timeline 用の
+    caption 情報 [{shot_id,in_sec,out_sec,text,lines}, ...] を返す。
+
+    - shot_display_durations: enabled_shots と同順の実測表示尺(秒)。テロップの表示区間は
+      「ショット表示開始 + caption_in_offset_sec」〜「ショット表示開始 + caption_out_offset_sec」
+      で解決する（v1: 未指定なら shot 全区間）。
+    - Premiere のフレーム量子化契約(frame_align_durations)と揃えるため、
+      各ショット表示開始は「フレーム丸め済みの累積フレーム」から算出する。
+    """
+    caption_pieces = []
+    if not enabled_shots:
+        return [], caption_pieces
+
+    # 遅延 import: 循環回避。禁則折り返しは pipeline 側のロジックをそのまま使う。
+    try:
+        from pipeline.subtitles import wrap_caption_kinsoku
+    except Exception:  # pragma: no cover - defensive; pipeline は常に import 可能な想定
+        wrap_caption_kinsoku = None  # type: ignore
+
+    telop_profile = (profile or {}).get("telop") or {}
+    font = telop_profile.get("font") or CAPTION_FONT_DEFAULT
+    align = telop_profile.get("align") or CAPTION_ALIGN_DEFAULT
+    position = telop_profile.get("position") or CAPTION_POSITION_DEFAULT
+    max_chars = int(telop_profile.get("max_chars", CAPTION_MAX_CHARS_DEFAULT))
+    max_lines = int(telop_profile.get("max_lines", CAPTION_MAX_LINES_DEFAULT))
+
+    # 各ショットの「表示尺(秒)」→ frame_align で表示区間を算出
+    durations = list(shot_display_durations or [])
+    if not durations:
+        # フォールバック: trim ベースで再計算（呼び出し側が渡し忘れた場合の安全弁）
+        durations = []
+        for s in enabled_shots:
+            trim = s.get("trim") or {}
+            durations.append(max(0.0, float(trim.get("end", 0.0)) - float(trim.get("start", 0.0))))
+    aligned = frame_align_durations(durations, timebase)
+
+    clip_lines_list = []
+    for i, shot in enumerate(enabled_shots):
+        if i >= len(aligned):
+            break
+        timing = aligned[i]
+        if timing["dur_frames"] <= 0:
+            continue
+        caption_text = (shot.get("caption") or shot.get("caption_jp") or "").strip()
+        if not caption_text:
+            continue
+
+        # caption_in/out offset (plan v2)。未指定なら全区間。
+        cap_in_off = shot.get("caption_in_offset_sec")
+        cap_out_off = shot.get("caption_out_offset_sec")
+        shot_start_sec = timing["start_sec"]
+        shot_end_sec = timing["end_sec"]
+        if cap_in_off is not None:
+            in_sec = shot_start_sec + float(cap_in_off)
+        else:
+            in_sec = shot_start_sec
+        if cap_out_off is not None:
+            out_sec = shot_start_sec + float(cap_out_off)
+        else:
+            out_sec = shot_end_sec
+        # ショット境界を越えないクランプ（subtitles.build_telop_pieces_from_shots と同じ契約）
+        if out_sec < in_sec:
+            out_sec = in_sec
+        if out_sec > shot_end_sec:
+            out_sec = shot_end_sec
+        if in_sec > shot_end_sec:
+            in_sec = shot_end_sec
+        if in_sec < shot_start_sec:
+            in_sec = shot_start_sec
+
+        start_frames = _seconds_to_frames(in_sec, timebase)
+        end_frames = _seconds_to_frames(out_sec, timebase)
+        if end_frames <= start_frames:
+            end_frames = start_frames + 1  # 最低1フレーム
+        dur_frames = end_frames - start_frames
+
+        wrapped = []
+        if wrap_caption_kinsoku is not None:
+            try:
+                wrapped = wrap_caption_kinsoku(caption_text, max_chars=max_chars, max_lines=max_lines) or []
+            except Exception:
+                wrapped = [caption_text]
+        else:
+            wrapped = [caption_text]
+
+        shot_id = shot.get("id") or "s{}".format(i + 1)
+        gen_id = "gen-v2-{}".format(_deterministic_id("v2-gen", shot_id, caption_text))
+        display_name = "TL{:02d}".format(i + 1)
+
+        clip_lines_list.append(
+            _generatoritem_text_lines(
+                gen_id, display_name, start_frames, end_frames, 0, dur_frames,
+                timebase, ntsc, caption_text, wrapped, depth + 1,
+                font=font, align=align, position=position,
+            )
+        )
+        caption_pieces.append({
+            "shot_id": shot_id,
+            "in_sec": start_frames / float(timebase),
+            "out_sec": end_frames / float(timebase),
+            "in_frame": start_frames,
+            "out_frame": end_frames,
+            "text": caption_text,
+            "lines": wrapped,
+        })
+
+    return clip_lines_list, caption_pieces
+
+
 # ---------------------------------------------------------------------------
 # シーケンスマーカー
 # ---------------------------------------------------------------------------
 
-def _resolve_beat_frames(plan, shot_start_frames, timebase):
+def _resolve_beat_frames(plan, shot_start_frames, timebase, shot_display_durations=None):
     """plan.hook_end_shot_id / cta_start_shot_id をシーケンスマーカー用フレームへ解決する。
 
-    shot_start_frames: _build_v1_clips が返した (shot_id, display_name, start_frame, dur_frames)。
+    Phase B: shot_display_durations が与えられていれば、pipeline.sfx_planner.
+    resolve_hook_cta_bounds() で「実測境界」から解決した秒 → フレームに換算する
+    （ffmpeg レンダ経路の bgm_curve と時刻源を一致させる）。
+    与えられていなければ従来どおり V1 の shot_start_frames から解決する（v1 後方互換）。
+
     Returns:
         (hook_end_frame:int|None, cta_start_frame:int|None)
     """
-    if not isinstance(plan, dict) or not shot_start_frames:
+    if not isinstance(plan, dict):
+        return (None, None)
+
+    if shot_display_durations is not None:
+        try:
+            from pipeline.sfx_planner import resolve_hook_cta_bounds as _rhcb
+            hook_end_sec, cta_start_sec = _rhcb(plan, shot_display_durations)
+        except Exception:
+            hook_end_sec, cta_start_sec = (None, None)
+        hook_frame = _seconds_to_frames(hook_end_sec, timebase) if hook_end_sec is not None else None
+        cta_frame = _seconds_to_frames(cta_start_sec, timebase) if cta_start_sec is not None else None
+        return (hook_frame, cta_frame)
+
+    if not shot_start_frames:
         return (None, None)
     idx_by_id = {sid: i for i, (sid, _dn, _sf, _df) in enumerate(shot_start_frames)}
     hook_id = plan.get("hook_end_shot_id")
@@ -559,7 +999,8 @@ def _resolve_beat_frames(plan, shot_start_frames, timebase):
     return (hook_frame, cta_frame)
 
 
-def _build_sequence_markers(shot_start_frames, sfx_marker_info, plan, timebase, depth):
+def _build_sequence_markers(shot_start_frames, sfx_marker_info, plan, timebase, depth,
+                              shot_display_durations=None):
     """シーケンス直下 `<marker>` 行リストを返す。
 
     - ショット境界（`S01開始` 名・shot_id をコメント）
@@ -570,7 +1011,9 @@ def _build_sequence_markers(shot_start_frames, sfx_marker_info, plan, timebase, 
     for sid, display_name, start_frame, _df in shot_start_frames:
         lines.extend(_marker_lines("{}開始".format(display_name), sid, start_frame, depth))
 
-    hook_frame, cta_frame = _resolve_beat_frames(plan, shot_start_frames, timebase)
+    hook_frame, cta_frame = _resolve_beat_frames(
+        plan, shot_start_frames, timebase, shot_display_durations=shot_display_durations,
+    )
     if hook_frame is not None:
         lines.extend(_marker_lines("hook_end", "フック終了", hook_frame, depth))
     if cta_frame is not None:
@@ -587,7 +1030,9 @@ def _build_sequence_markers(shot_start_frames, sfx_marker_info, plan, timebase, 
 # ---------------------------------------------------------------------------
 
 def build_xmeml(plan, project_dir, narration_path=None, bgm_path=None, profile=None, fps=DEFAULT_FPS,
-                 return_warnings=False):
+                 return_warnings=False,
+                 shot_display_durations=None, sfx_events=None, bgm_curve=None,
+                 emit_captions=False, ffprobe_bin=None, return_timeline=False):
     """Studio plan（編集結果）からFCP7 XML(xmeml)シーケンス全文を生成する。
 
     Args:
@@ -612,14 +1057,13 @@ def build_xmeml(plan, project_dir, narration_path=None, bgm_path=None, profile=N
         str: xmeml全文（UTF-8前提のテキスト。同じ引数からは常にバイト同一の文字列を返す）。
         return_warnings=True のときは {"xmeml": str, "warnings": list[dict]}。
     """
-    timebase, ntsc = fps_to_timebase_ntsc(fps)
+    warnings_out = [] if (return_warnings or return_timeline) else None
+    timebase, ntsc = fps_to_timebase_ntsc(fps, warnings_out=warnings_out)
     shots = (plan or {}).get("shots") or []
     enabled_shots = sorted(
         [s for s in shots if isinstance(s, dict) and s.get("enabled", True)],
         key=lambda s: s.get("order", 0),
     )
-
-    warnings_out = [] if return_warnings else None
 
     # 各トラック(<track>)は depth=4（<video>/<audio> depth3 の子）に配置するため、
     # ここで渡す depth=4 を基点に、各builder内部で clipitem=depth+1(5) / file=depth+2(6) を作る
@@ -627,19 +1071,32 @@ def build_xmeml(plan, project_dir, narration_path=None, bgm_path=None, profile=N
     v1_clips, total_duration_frames, first_shot_end_frames, shot_start_frames = _build_v1_clips(
         enabled_shots, project_dir, timebase, ntsc, depth=4, warnings_out=warnings_out,
     )
-    v2_clips = []  # 予約(空トラック)
+    # V2 テロップ（Phase B）: emit_captions=True のときのみ generatoritem を書き出す。
+    # 既存呼び出し（テスト・雑多な import）は emit_captions=False（既定）で従来通り空。
+    caption_pieces = []
+    if emit_captions:
+        v2_clips, caption_pieces = _build_v2_captions(
+            enabled_shots, shot_display_durations, timebase, ntsc, profile, depth=4,
+        )
+    else:
+        v2_clips = []
     v3_clips = _build_v3_red_circle(profile, project_dir, timebase, ntsc, first_shot_end_frames,
                                      depth=4, warnings_out=warnings_out)
 
     a1_clips = _build_a1_narration(narration_path, project_dir, timebase, ntsc,
                                     total_duration_frames, depth=4, warnings_out=warnings_out)
     a2_clips = _build_a2_bgm(bgm_path, plan, profile, project_dir, timebase, ntsc,
-                              total_duration_frames, depth=4, warnings_out=warnings_out)
+                              total_duration_frames, depth=4, warnings_out=warnings_out,
+                              bgm_curve=bgm_curve)
     a3_clips, sfx_marker_info = _build_a3_sfx(
         plan, profile, project_dir, timebase, ntsc, depth=4, warnings_out=warnings_out,
+        sfx_events=sfx_events, ffprobe_bin=ffprobe_bin,
     )
 
-    marker_lines = _build_sequence_markers(shot_start_frames, sfx_marker_info, plan, timebase, depth=2)
+    marker_lines = _build_sequence_markers(
+        shot_start_frames, sfx_marker_info, plan, timebase, depth=2,
+        shot_display_durations=shot_display_durations,
+    )
 
     shot_ids = tuple(s.get("id") for s in enabled_shots)
     sequence_uuid = _deterministic_id(
@@ -681,6 +1138,54 @@ def build_xmeml(plan, project_dir, narration_path=None, bgm_path=None, profile=N
     lines.append("</xmeml>")
 
     xmeml_text = "\n".join(lines) + "\n"
+
+    if return_timeline:
+        # timeline.json サイドカー用データ（機械可読・後段の verification / debug 用）
+        timeline = {
+            "version": 2,
+            "fps": fps,
+            "timebase": timebase,
+            "ntsc": ntsc,
+            "total_frames": int(total_duration_frames),
+            "total_sec": (int(total_duration_frames) / float(timebase)) if timebase else 0.0,
+            "shots": [
+                {
+                    "id": sid, "name": dn,
+                    "start_frame": int(sf), "dur_frames": int(df),
+                    "start_sec": int(sf) / float(timebase),
+                    "end_sec": (int(sf) + int(df)) / float(timebase),
+                }
+                for (sid, dn, sf, df) in shot_start_frames
+            ],
+            "captions": caption_pieces,
+            "sfx": [
+                {
+                    "at_frame": int(af), "at_sec": int(af) / float(timebase),
+                    "family": fam, "name": name, "display_name": dn,
+                }
+                for (dn, fam, af, name) in sfx_marker_info
+            ],
+            "bgm_curve": bgm_curve if isinstance(bgm_curve, dict) else None,
+            "markers": {
+                "shot_starts": [
+                    {"name": "{}開始".format(dn), "shot_id": sid, "at_frame": int(sf),
+                     "at_sec": int(sf) / float(timebase)}
+                    for (sid, dn, sf, _df) in shot_start_frames
+                ],
+            },
+        }
+        # hook_end / cta_start 実測秒（あれば）
+        try:
+            from pipeline.sfx_planner import resolve_hook_cta_bounds as _rhcb
+            if shot_display_durations is not None:
+                _hook, _cta = _rhcb(plan, shot_display_durations)
+                if _hook is not None:
+                    timeline["markers"]["hook_end_sec"] = float(_hook)
+                if _cta is not None:
+                    timeline["markers"]["cta_start_sec"] = float(_cta)
+        except Exception:
+            pass
+        return {"xmeml": xmeml_text, "warnings": warnings_out or [], "timeline": timeline}
     if return_warnings:
         return {"xmeml": xmeml_text, "warnings": warnings_out or []}
     return xmeml_text

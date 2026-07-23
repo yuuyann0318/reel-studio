@@ -95,7 +95,22 @@ def build_srt(plan, fps=None):
         lines = wrap_caption_kinsoku(caption, max_chars=SRT_MAX_CHARS, max_lines=SRT_MAX_LINES)
         if not lines:
             continue
-        entries.append((timing["start_sec"], timing["end_sec"], lines))
+        # Phase B: plan v2 の caption_in/out_offset_sec を反映（未指定なら shot 全区間）。
+        # ショット表示開始を基準に相対秒を足し、ショット境界でクランプする（xmemlのV2
+        # generatoritem と同じ契約）。
+        shot_start = timing["start_sec"]
+        shot_end = timing["end_sec"]
+        cap_in_off = shot.get("caption_in_offset_sec")
+        cap_out_off = shot.get("caption_out_offset_sec")
+        out_start = shot_start + float(cap_in_off) if cap_in_off is not None else shot_start
+        out_end = shot_start + float(cap_out_off) if cap_out_off is not None else shot_end
+        if out_end < out_start:
+            out_end = out_start
+        if out_start < shot_start:
+            out_start = shot_start
+        if out_end > shot_end:
+            out_end = shot_end
+        entries.append((out_start, out_end, lines))
 
     if not entries:
         return ""

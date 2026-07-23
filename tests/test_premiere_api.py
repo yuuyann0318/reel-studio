@@ -94,7 +94,8 @@ def test_build_package_creates_all_expected_files():
     assert (package_dir / "narration.wav").exists()
     assert (package_dir / "style" / "STYLE_SPEC.md").exists()
     assert (package_dir / "README_import.md").exists()
-    assert len(result["files"]) == 5
+    assert (package_dir / "timeline.json").exists()
+    assert len(result["files"]) == 6
     for f in result["files"]:
         assert Path(f).exists()
 
@@ -103,7 +104,7 @@ def test_build_package_return_value_has_expected_keys():
     project = _make_ready_project()
     result = package_mod.build_package(project["id"])
 
-    assert set(result.keys()) == {"package_dir", "files", "tts", "profile_name", "xmeml_warnings"}
+    assert set(result.keys()) == {"package_dir", "files", "tts", "profile_name", "xmeml_warnings", "timeline"}
     assert result["profile_name"] == "ttp_reference"
     assert result["tts"]["backend"] == "fake"
     assert result["tts"]["duration_sec"] == 1.23
@@ -137,11 +138,25 @@ def test_build_package_style_spec_copied_verbatim():
 
 
 def test_build_package_bgm_gain_reflected_in_reel_xml_when_plan_has_bgm():
+    """Phase B: build_package が edit_profile 由来の bgm_curve を A2 の Audio Levels
+    キーフレームに埋め込む。plan.bgm.gain_db は bgm_curve が有効なとき ffmpeg 側と同様に
+    上書きされる（section-specific gain: hook/body/cta）。ここでは A2 に少なくとも
+    hook_gain_db(-10dB) 相当の level が現れることを確認する。
+    """
     project = _make_ready_project(with_bgm=True)
     result = package_mod.build_package(project["id"])
     xml_text = (Path(result["package_dir"]) / "reel.xml").read_text(encoding="utf-8")
-    expected_level = 10.0 ** (-14.0 / 20.0)
-    assert "<value>{:.6f}</value>".format(expected_level) in xml_text
+    # Audio Levels フィルタが Phase B の keyframe を持つ（線形補間）
+    assert "<keyframe>" in xml_text and "<interpolation>Linear</interpolation>" in xml_text
+    # BGM トラックがある
+    assert "<name>BGM bgm</name>" in xml_text
+    # keyframe の value は 0.0 より大かつ 2.0 未満のリニアレベル（プロファイル依存）である
+    import re as _re
+    kf_values = _re.findall(r"<keyframe>\s*<when>\d+</when>\s*<value>([0-9.]+)</value>", xml_text)
+    assert kf_values, "少なくとも1つのkeyframe valueが必要"
+    for v in kf_values:
+        fv = float(v)
+        assert 0.0 < fv < 2.0, "keyframe level が想定範囲外: {}".format(fv)
 
 
 def test_build_package_missing_project_raises():

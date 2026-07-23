@@ -297,8 +297,83 @@ def _timed_stage(report, name):
     return _Ctx()
 
 
+def _emit_premiere_package_from_cli(run_dir, plan, shot_display_durations, edit_sfx, bgm_curve,
+                                       clip_paths, bgm_path, narration_wav_path, run_id):
+    """CLI 経路 (--premiere-export) 用の Premiere パッケージ書き出し。
+
+    Studio の projects/ 経路を使わず、run_dir 直下に premiere_package/ を作って
+    reel.xml / timeline.json / captions.srt を書き出す。V1 の clip_path は run_dir/clips/
+    配下の正規化済み mp4 を絶対パスで参照する（Premiere取り込み時に再リンク不要）。
+
+    ここでは build_package() は使わず、export_xmeml.build_xmeml() を直接叩く
+    （Studio project システムに依存させないため）。
+    """
+    from premiere import export_xmeml as _xe
+    from premiere import srt as _srt
+    from premiere import profile as _pmod
+
+    pkg_dir = Path(run_dir) / "premiere_package"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+
+    # Studio 形式の shots を作る（enabled=True・order は plan.shots 順・clip_path は絶対パス）。
+    enabled_shots = []
+    for i, s in enumerate(plan.get("shots") or []):
+        clip_abs = None
+        if i < len(clip_paths):
+            clip_abs = str(Path(clip_paths[i]).resolve())
+        dur = float(shot_display_durations.get(s["id"], s.get("duration_sec", 0.0)) or 0.0)
+        enabled_shots.append({
+            "id": s["id"], "order": i, "enabled": True,
+            "caption": s.get("caption") or s.get("caption_jp") or "",
+            "caption_in_offset_sec": s.get("caption_in_offset_sec"),
+            "caption_out_offset_sec": s.get("caption_out_offset_sec"),
+            "clip_path": clip_abs or "",
+            "source_duration": dur,
+            "trim": {"start": 0.0, "end": dur},
+        })
+    studio_plan = {
+        "shots": enabled_shots,
+        "hook_end_shot_id": plan.get("hook_end_shot_id"),
+        "cta_start_shot_id": plan.get("cta_start_shot_id"),
+        "bgm": {"file": bgm_path, "gain_db": None} if bgm_path else None,
+        "sfx": [],
+    }
+    durations = [float(shot_display_durations.get(s["id"], s.get("duration_sec", 0.0)) or 0.0)
+                 for s in plan.get("shots") or []]
+
+    try:
+        prof = _pmod.load_profile(name="ttp_reference")
+    except Exception:
+        prof = {"version": 1, "structure": {}, "telop": {}, "emphasis": {"red_circle": False},
+                "audio": {"sfx": True, "bgm_gain_db": -14}}
+
+    xmeml_result = _xe.build_xmeml(
+        studio_plan, str(Path(run_dir).parent), profile=prof,
+        narration_path=str(narration_wav_path), bgm_path=bgm_path,
+        shot_display_durations=durations,
+        sfx_events=edit_sfx, bgm_curve=bgm_curve,
+        emit_captions=True, return_timeline=True,
+    )
+    (pkg_dir / "reel.xml").write_text(xmeml_result["xmeml"], encoding="utf-8")
+    (pkg_dir / "timeline.json").write_text(
+        json.dumps(xmeml_result.get("timeline") or {}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (pkg_dir / "captions.srt").write_text(_srt.build_srt(studio_plan, fps=30), encoding="utf-8")
+    # 手順の1行README（Studio 経路と同じ格納名でユーザが同じ操作を思い出せるように）
+    (pkg_dir / "README_import.md").write_text(
+        "# Premiereでの読み込み方\n\n"
+        "1. Premiere Pro で「ファイル > 読み込み」→ `reel.xml` を選択\n"
+        "2. プロジェクトパネルに現れた `reel_sequence` をダブルクリックで開く\n"
+        "3. `captions.srt` をタイムラインへドラッグ（テキスト直挿し版がV2に既に入っています）\n"
+        "\n※ 同期意図の機械可読サマリは `timeline.json` を参照。\n",
+        encoding="utf-8",
+    )
+    return {"package_dir": str(pkg_dir), "warnings": xmeml_result.get("warnings") or []}
+
+
 def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default",
-                  reference_url=None, reference_file=None):
+                  reference_url=None, reference_file=None, premiere_export=False):
     report = {
         "theme": theme,
         "target_duration_sec": target_duration_sec,
@@ -675,6 +750,20 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
         _write_report(report)
         return report
 
+    # --- Stage 7.5: Premiere パッケージ書き出し（--premiere-export） ---
+    if premiere_export:
+        try:
+            with _timed_stage(report, "premiere_export"):
+                pkg = _emit_premiere_package_from_cli(
+                    run_dir, plan, shot_display_durations, edit_sfx, bgm_curve,
+                    clip_paths, bgm_path, narration_wav_path, run_id,
+                )
+                report["stages"]["premiere_export"]["package_dir"] = pkg["package_dir"]
+                report["stages"]["premiere_export"]["warnings"] = pkg["warnings"]
+        except Exception:
+            # ここが失敗してもレンダ本体は既に成功しているため、report を書いて先へ進む
+            pass
+
     # --- Stage 8: QA ---
     try:
         with _timed_stage(report, "qa"):
@@ -733,6 +822,11 @@ def main(argv=None) -> int:
         "--reference-file", default=None,
         help="参考動画のローカルmp4パス。DL不能な環境で --reference-url の代わりに使う",
     )
+    parser.add_argument(
+        "--premiere-export", action="store_true",
+        help="レンダ完了後、Premiere Pro読み込み用パッケージ(reel.xml/timeline.json/captions.srt)を "
+             "output/<run_id>/premiere_package/ に書き出す（Phase B）",
+    )
     args = parser.parse_args(argv)
 
     # Fish Audio API キー: ~/.claude/secrets/fish_audio_key があれば環境変数へ載せる
@@ -754,6 +848,7 @@ def main(argv=None) -> int:
         report = run_pipeline(
             args.theme, target_duration_sec, backend_name, args.no_llm, cfg, quality=quality, style=args.style,
             reference_url=args.reference_url, reference_file=args.reference_file,
+            premiere_export=args.premiere_export,
         )
     except director.TTPReferenceRequiredError:
         _emit_reference_required_error(args.theme)
