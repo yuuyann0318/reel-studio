@@ -20,6 +20,13 @@ segments(ASR): {SEGMENTS_JSON}
 # 入力: SE/BGMオンセット候補
 {ONSETS_JSON}
 
+# 入力: 音楽ビート抽出（R2a F5: librosa等による BPM / beat_times / downbeats）
+# confidence が 0.0 の場合は BGM 未検出 or 抽出不能と判断してよい。存在する場合は
+# bgm.present=true, bgm.mood_guess の判断材料として使うこと（beat_times は下流の
+# beat_snap 用に音響解析側が正として保持するため、LLM 出力に music フィールドを
+# 含める必要は無い）。
+{MUSIC_JSON}
+
 # タスク
 以下のスキーマ v2 に沿って統合してください。
 - cuts: 入力のカット表をそのまま採用（時系列・重複なし）。信頼度 confidence は 0〜1。

@@ -6,3 +6,10 @@ httpx
 pymiere
 yt-dlp
 curl_cffi
+# R2a F5: BPM/beat 抽出（インストール不可時は music.py が engine="unavailable" で
+# 縮退し、beat_snap / beat_alignment は不作動になる。パイプラインは壊れない）。
+librosa
+soundfile
+# R2a F1: マルチ手法カット検出（ContentDetector）。cv2 は headless で十分。
+scenedetect
+opencv-python-headless

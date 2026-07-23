@@ -27,6 +27,7 @@ import copy
 import json
 import math
 import os
+from typing import Any, Dict, List, Optional  # noqa: F401  R2a F5 type hints
 
 try:
     from pipeline.claude_runner import call_claude_json
@@ -39,6 +40,11 @@ try:
     from pipeline.reference import find_verbatim_overlap
 except Exception:  # pragma: no cover - reference.py周りが未整備でもimportを壊さない
     find_verbatim_overlap = None
+
+try:
+    from pipeline.music import snap_boundaries_to_beats
+except Exception:  # pragma: no cover
+    snap_boundaries_to_beats = None  # type: ignore
 
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 
@@ -547,7 +553,8 @@ def _remap_sfx_by_split(sfx_plan, shot_ids, new_shot_ids, split_map, new_duratio
     return remapped
 
 
-def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, min_shot_sec=None):
+def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, min_shot_sec=None,
+                        beat_snap=False, beat_snap_tolerance_sec=0.25):
     """reference_spec v2 から shot スケルトンを機械的に組み立てる純関数。
 
     Args:
@@ -561,6 +568,10 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
             尊重した shot 分割になる。分割時は caption/sfx を写像維持する。
         min_shot_sec: 任意。最小ショット尺（秒）。None なら既定 _SKELETON_MIN_SHOT_SEC=1.2。
             F12: supreme_plus プリセットで 0.5 に落とすと参考の高速カットを保持できる。
+        beat_snap: R2a F5。True かつ reference_spec.music.beat_times が非空のとき、
+            スケール後の shot 境界を最寄り拍時刻に吸着させる（±beat_snap_tolerance_sec）。
+            吸着幅の上限は 0.25s 相当・min_shot_sec 保証と両立する。
+        beat_snap_tolerance_sec: R2a F5。吸着幅上限。既定 0.25s。
 
     Returns:
         skeleton dict:
@@ -597,6 +608,36 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         raw_durations, float(target_duration_sec), min_shot_sec=effective_min_shot_sec,
     )
     shot_ids = ["s{}".format(i + 1) for i in range(n)]
+
+    # R2a F5: ビートスナップ。target 空間のショット境界を、target 空間へスケールした
+    # beat_times の最寄り拍へ吸着させる（±beat_snap_tolerance_sec、min_shot_sec保証）。
+    # snap_boundaries_to_beats は端点(0/target)を保持するため、合計尺は不変。
+    beat_snap_stats: Optional[Dict[str, int]] = None
+    if beat_snap and snap_boundaries_to_beats is not None:
+        music = reference_spec.get("music") or {}
+        beat_times_ref = music.get("beat_times") or []
+        if beat_times_ref:
+            if ref_duration > 0:
+                ratio = float(target_duration_sec) / float(ref_duration)
+                beat_times_tgt = [float(t) * ratio for t in beat_times_ref]
+            else:
+                beat_times_tgt = [float(t) for t in beat_times_ref]
+            tgt_boundaries = [0.0]
+            for d in scaled:
+                tgt_boundaries.append(round(tgt_boundaries[-1] + float(d), 4))
+            # 末端は target_duration_sec に固定（浮動小数誤差を潰す）。
+            tgt_boundaries[-1] = float(target_duration_sec)
+            snapped, beat_snap_stats = snap_boundaries_to_beats(
+                tgt_boundaries, beat_times_tgt,
+                tolerance_sec=float(beat_snap_tolerance_sec),
+                min_shot_sec=float(effective_min_shot_sec),
+            )
+            new_scaled = [round(snapped[i + 1] - snapped[i], 3) for i in range(len(snapped) - 1)]
+            # 合計尺の微小誤差を最終ショットで吸収して target_duration_sec に一致させる。
+            drift = float(target_duration_sec) - sum(new_scaled)
+            if abs(drift) > 1e-6 and new_scaled:
+                new_scaled[-1] = round(new_scaled[-1] + drift, 3)
+            scaled = new_scaled
 
     # telop 写像
     telop_map = _map_telops_to_shots(
@@ -1054,9 +1095,19 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     # （supreme_plus プリセットで 0.5 に落として参考の高速カットを保持する）。
     director_cfg = (config or {}).get("director") or {}
     min_shot_sec_cfg = director_cfg.get("min_shot_sec")
+    # R2a F5: config.director.beat_snap_enabled=True かつ reference.music.beat_times が
+    # 非空のとき、shot 境界を最寄り拍にスナップする。
+    beat_snap_enabled = bool(director_cfg.get("beat_snap_enabled", False))
+    beat_snap_tol_ms = director_cfg.get("beat_snap_tolerance_ms", 250)
+    try:
+        beat_snap_tol_sec = float(beat_snap_tol_ms) / 1000.0
+    except (TypeError, ValueError):
+        beat_snap_tol_sec = 0.25
     skeleton = build_shot_skeleton(
         reference, target_duration_sec, max_shot_sec=max_shot_sec,
         min_shot_sec=min_shot_sec_cfg if isinstance(min_shot_sec_cfg, (int, float)) and min_shot_sec_cfg > 0 else None,
+        beat_snap=beat_snap_enabled,
+        beat_snap_tolerance_sec=beat_snap_tol_sec,
     )
     # F12: 品質最優先の指示文（config.director.quality_directive）をプロンプトに注入する。
     # 未指定なら空文字。ここでは reference_block の末尾に挟むだけで、director_prompt.txt の

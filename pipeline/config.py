@@ -34,6 +34,9 @@ _DEFAULTS = {
         "min_shot_sec": None,        # None なら director 内既定 (_SKELETON_MIN_SHOT_SEC=1.2)
         "stages": None,              # None なら quality に従う（supreme=write+polish）
         "quality_directive": None,   # 追加のプロンプト指示文（品質最優先など）
+        # R2a F5: ビートスナップ（reference_spec.music.beat_times に shot 境界を吸着させる）
+        "beat_snap_enabled": False,
+        "beat_snap_tolerance_ms": 250,
     },
     "higgsfield": {
         "cli_bin": "higgsfield",
@@ -67,12 +70,19 @@ _DEFAULTS = {
         "asr_timeout_sec": 120,
         "max_video_sec": 180,
         "scene_threshold": 0.30,
+        # R2a F1: 複数閾値アンサンブル。空/未指定なら scene_threshold の単一手法。
+        "scene_thresholds": None,
+        "scene_use_pyscenedetect": False,
+        "pyscenedetect_threshold": 27.0,
+        "scene_merge_window_sec": 0.15,
         "max_vision_calls": 4,
         "max_frames": 40,
         "vision_batch_size": 10,
         "vision_timeout_sec": 600,
         "onset_jump_db": 6.0,
         "onset_window_samples": 2048,
+        # R2a F5: BPM/beat 抽出（librosa）。False で無効化。
+        "music_extract_enabled": True,
     },
 }
 

@@ -45,6 +45,7 @@ except Exception:  # pragma: no cover - CLI周りが未整備でもimportを壊�
 
 from pipeline.config import load_config, project_root
 from pipeline import reference as ref_v1  # v1 のフェッチ・ASR実装を再利用
+from pipeline import music as music_mod  # R2a F5: BPM/beat 抽出
 
 
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
@@ -238,6 +239,147 @@ def detect_cuts_via_ffmpeg(ffmpeg_bin: str, video_path: str, threshold: float, t
     ]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_sec)
     return parse_showinfo_stderr((proc.stderr or b"").decode("utf-8", "replace"))
+
+
+def detect_cuts_via_pyscenedetect(video_path: str, threshold: float = 27.0) -> Optional[List[float]]:
+    """PySceneDetect(ContentDetector) でカット秒列を返す（ディゾルブ耐性）。
+
+    PySceneDetect の ContentDetector は HSV差分の重み付き平均を使いカット判定するため、
+    ffmpeg の scdet(輝度差主体) が拾えない徐々に切り替わるディゾルブ・薄いフラッシュを
+    拾いやすい。threshold は 0..255 の内部単位（ContentDetector 既定は 27）。
+
+    Returns:
+        list[float]: 検出成功時の内部境界秒列（0.0 は含めない・時系列昇順）。
+        None: PySceneDetect が未インストール、または video を開けなかった（＝検出器
+              として不作動）ことを表す。**空リストとは意味が違う**（空リストは
+              「検出器が動いたがカット0件」）。合議 confidence 計算で不作動検出器を
+              分母から除外するため、この区別を保持する（→ merge_cut_lists）。
+    """
+    try:
+        from scenedetect import SceneManager, open_video  # type: ignore
+        from scenedetect.detectors import ContentDetector  # type: ignore
+    except Exception:
+        return None
+    try:
+        video = open_video(str(video_path))
+        sm = SceneManager()
+        sm.add_detector(ContentDetector(threshold=float(threshold)))
+        sm.detect_scenes(video, show_progress=False)
+        scenes = sm.get_scene_list()
+    except Exception:
+        return None
+    # get_scene_list は [(start, end), ...] を返す。カット時刻＝各シーンの start（先頭を除く）。
+    out = []
+    for i, (start, _end) in enumerate(scenes or []):
+        if i == 0:
+            continue
+        try:
+            t = float(start.get_seconds())
+        except Exception:
+            continue
+        if t > 0.0:
+            out.append(round(t, 3))
+    return sorted(out)
+
+
+def merge_cut_lists(
+    cut_lists: List[Optional[List[float]]],
+    merge_window_sec: float = 0.15,
+) -> List[Dict[str, Any]]:
+    """複数手法のカット秒列をアンサンブル統合する。
+
+    Args:
+        cut_lists: 各検出器の出力。**不作動の検出器は None** を渡す（未インストール・
+            例外発生など）。**動いたが 0 件検出**は空リスト `[]` を渡す。この区別を
+            尊重して分母（合意可能な検出器数）から不作動を除外する。
+        merge_window_sec: 秒差がこれ以内なら 1グループにマージ。
+
+    Confidence 計算:
+        - 分母 = 「不作動でない」検出器の数（None を除いたリスト数）。
+        - 分子 = そのグループで少なくとも1件を寄稿した検出器のユニーク数。
+        （P2 修正: 不作動検出器を分母に入れると unanimous でも 0.75 にしかならず
+        high 判定に届かない問題を修正。）
+
+    Returns: [{"t": float, "confidence": float, "sources": int}]（t 昇順）
+    """
+    if not cut_lists:
+        return []
+    # None（不作動）は分母から除外し、以降のインデックス操作にも参加させない。
+    active_indexed: List[Tuple[int, List[float]]] = []
+    for i, lst in enumerate(cut_lists):
+        if lst is None:
+            continue
+        active_indexed.append((i, lst))
+    total_detectors = len(active_indexed)
+    if total_detectors == 0:
+        return []
+    # 各カットに「どの検出器由来か」を付ける（不作動を除外した active リスト経由）。
+    tagged: List[Tuple[float, int]] = []
+    for det_idx, lst in active_indexed:
+        if not lst:
+            continue
+        for t in lst:
+            try:
+                tf = float(t)
+            except Exception:
+                continue
+            if tf <= 0.0:
+                continue
+            tagged.append((tf, det_idx))
+    if not tagged:
+        return []
+    tagged.sort(key=lambda x: x[0])
+    groups: List[List[Tuple[float, int]]] = []
+    for entry in tagged:
+        if not groups or (entry[0] - groups[-1][-1][0]) > merge_window_sec:
+            groups.append([entry])
+        else:
+            groups[-1].append(entry)
+    out: List[Dict[str, Any]] = []
+    for g in groups:
+        avg_t = sum(e[0] for e in g) / float(len(g))
+        detectors = len(set(e[1] for e in g))
+        confidence = round(detectors / float(total_detectors), 3)
+        out.append({"t": round(avg_t, 3), "confidence": confidence, "sources": detectors})
+    return out
+
+
+def detect_cuts_ensemble(
+    ffmpeg_bin: str,
+    video_path: str,
+    scene_thresholds: Optional[List[float]] = None,
+    use_pyscenedetect: bool = True,
+    pyscenedetect_threshold: float = 27.0,
+    merge_window_sec: float = 0.15,
+    timeout_sec: int = 120,
+) -> List[Dict[str, Any]]:
+    """マルチ手法カット検出のアンサンブル。
+
+    - scene_thresholds: ffmpeg scdet を回す閾値の並び（既定 [0.20, 0.30, 0.40]）。
+    - use_pyscenedetect: PySceneDetect ContentDetector も並行実行して統合するか。
+      True かつ PySceneDetect が import できるとき有効。
+    - merge_window_sec: 秒差がこれ以内のカットを1つに統合し confidence を上げる。
+
+    Returns: [{"t": float, "confidence": float, "sources": int}]
+    """
+    thresholds = list(scene_thresholds) if scene_thresholds else [0.20, 0.30, 0.40]
+    cut_lists: List[Optional[List[float]]] = []
+    for thr in thresholds:
+        try:
+            cuts = detect_cuts_via_ffmpeg(ffmpeg_bin, video_path, float(thr), timeout_sec=timeout_sec)
+        except Exception:
+            # ffmpeg 検出器そのものが失敗（video 破損など）→ 不作動として None を積む
+            # ことで confidence の分母から除外する（P2 修正）。
+            cuts = None
+        cut_lists.append(cuts)
+    if use_pyscenedetect:
+        try:
+            pcs = detect_cuts_via_pyscenedetect(video_path, threshold=pyscenedetect_threshold)
+        except Exception:
+            pcs = None
+        # detect_cuts_via_pyscenedetect は不作動時 None を返す（未インストール・openエラー）
+        cut_lists.append(pcs)
+    return merge_cut_lists(cut_lists, merge_window_sec=merge_window_sec)
 
 
 def synth_cuts_uniform(duration_sec: float, interval: float = 5.0) -> List[float]:
@@ -583,9 +725,21 @@ def build_fusion_prompt(
     cuts: List[float],
     vision_results: List[Dict[str, Any]],
     onsets: List[Dict[str, Any]],
+    music: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """R2a F5: music={bpm,beat_times,confidence,downbeats} を任意で受け取り
+    fusion prompt に注入する。テンプレに {MUSIC_JSON} が無ければ何もしない
+    （後方互換: 既存のfusion prompt テンプレートが古くても壊れない）。
+    """
     template = _load_prompt(_FUSION_PROMPT_FILE)
-    return (
+    music_payload = music or {"bpm": 0.0, "beat_times": [], "downbeats": [], "confidence": 0.0}
+    # beat_times は長いので上限で切り詰めて渡す（LLMは平均値だけ理解できれば十分）。
+    trimmed_music = dict(music_payload)
+    bt = trimmed_music.get("beat_times") or []
+    if len(bt) > 200:
+        trimmed_music["beat_times"] = bt[:200]
+        trimmed_music["beat_times_truncated"] = True
+    filled = (
         template
         .replace("{URL}", url or "")
         .replace("{DURATION}", "{:.2f}".format(float(duration_sec or 0.0)))
@@ -596,6 +750,10 @@ def build_fusion_prompt(
         .replace("{VISION_RESULTS_JSON}", json.dumps(vision_results or [], ensure_ascii=False))
         .replace("{ONSETS_JSON}", json.dumps(onsets or [], ensure_ascii=False))
     )
+    # {MUSIC_JSON} プレースホルダがテンプレに無い場合は置換なしでそのまま返す（後方互換）。
+    if "{MUSIC_JSON}" in filled:
+        filled = filled.replace("{MUSIC_JSON}", json.dumps(trimmed_music, ensure_ascii=False))
+    return filled
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +845,22 @@ def validate_reference_spec_v2(spec: Any) -> Tuple[bool, List[str], Optional[Dic
         kind = ev.get("kind")
         if kind not in ("transition", "impact", "riser", "pop", "shimmer", "other"):
             errors.append("sfx_events[{}].kind が不正です(got: {!r})".format(i, kind))
+
+    # R2a F5: music は任意フィールド。dictならBPM/beat_timesの型のみゆるく確認する。
+    music = spec.get("music")
+    if music is not None:
+        if not isinstance(music, dict):
+            errors.append("music はオブジェクトである必要があります")
+        else:
+            bpm = music.get("bpm")
+            if bpm is not None and not _is_number(bpm):
+                errors.append("music.bpm は数値である必要があります(got: {!r})".format(bpm))
+            bt = music.get("beat_times")
+            if bt is not None and not isinstance(bt, list):
+                errors.append("music.beat_times はリストである必要があります")
+            conf = music.get("confidence")
+            if conf is not None and not _is_number(conf):
+                errors.append("music.confidence は数値である必要があります(got: {!r})".format(conf))
 
     if errors:
         return False, errors, None
@@ -832,20 +1006,55 @@ def analyze_reference_v2(
             raise RuntimeError("fetch_video が video_path / audio_path を返しませんでした")
 
         # -----------------------------------------------------------------
-        # カット検出
+        # カット検出（R2a F1: マルチ手法アンサンブル）
         # -----------------------------------------------------------------
         _progress("detect_cuts")
         ref_cfg = cfg.get("reference") or {}
         threshold = float(ref_cfg.get("scene_threshold", 0.30))
+        # cut_confidence_map: t -> confidence（アンサンブル時のみ非空。単一手法時は空dictで
+        # _normalize_v2_from_llm 側の既定 0.8 が使われる）。
+        cut_confidence_map: Dict[float, float] = {}
+        cut_meta: Dict[str, Any] = {}
         if detect_cuts_fn is None:
-            cuts = detect_cuts_via_ffmpeg(ffmpeg_bin, video_path, threshold)
+            scene_thresholds = ref_cfg.get("scene_thresholds")
+            use_pcs = bool(ref_cfg.get("scene_use_pyscenedetect", True))
+            if scene_thresholds or use_pcs:
+                # アンサンブル: 複数閾値の ffmpeg scdet + PySceneDetect ContentDetector を統合。
+                try:
+                    cut_events = detect_cuts_ensemble(
+                        ffmpeg_bin, video_path,
+                        scene_thresholds=list(scene_thresholds) if scene_thresholds else None,
+                        use_pyscenedetect=use_pcs,
+                        pyscenedetect_threshold=float(ref_cfg.get("pyscenedetect_threshold", 27.0)),
+                        merge_window_sec=float(ref_cfg.get("scene_merge_window_sec", 0.15)),
+                    )
+                except Exception as exc:
+                    warnings.append("カット検出(アンサンブル)失敗、単一閾値へフォールバック: {}".format(str(exc)[:200]))
+                    cut_events = []
+                if cut_events:
+                    cuts = [e["t"] for e in cut_events]
+                    cut_confidence_map = {e["t"]: e["confidence"] for e in cut_events}
+                    cut_meta["detector"] = "ensemble"
+                    cut_meta["by_confidence"] = {
+                        "high": sum(1 for e in cut_events if e["confidence"] >= 0.99),
+                        "mid": sum(1 for e in cut_events if 0.3 < e["confidence"] < 0.99),
+                    }
+                else:
+                    cuts = detect_cuts_via_ffmpeg(ffmpeg_bin, video_path, threshold)
+                    cut_meta["detector"] = "ffmpeg_single_fallback"
+            else:
+                cuts = detect_cuts_via_ffmpeg(ffmpeg_bin, video_path, threshold)
+                cut_meta["detector"] = "ffmpeg_single"
         else:
             cuts = detect_cuts_fn(video_path, threshold)
+            cut_meta["detector"] = "injected"
         if not cuts:
             cuts = synth_cuts_uniform(duration_sec, interval=5.0)
             if cuts:
                 warnings.append("カット検出0件のため 5秒等分の擬似カットを生成しました")
+                cut_meta["detector"] = (cut_meta.get("detector") or "") + "+uniform_synth"
         meta["cuts_count"] = len(cuts)
+        meta["cut_detector"] = cut_meta
 
         # -----------------------------------------------------------------
         # フレーム抽出 + Vision
@@ -921,6 +1130,28 @@ def analyze_reference_v2(
         meta["onsets_count"] = len(onsets)
 
         # -----------------------------------------------------------------
+        # 音楽ビート抽出 (R2a F5): BPM と拍時刻列を取り、beat_snap の元とする
+        # -----------------------------------------------------------------
+        _progress("music")
+        music_enabled = bool((ref_cfg.get("music_extract_enabled")
+                              if "music_extract_enabled" in ref_cfg else True))
+        if music_enabled:
+            try:
+                music_features = music_mod.extract_music_features(audio_path, cfg=cfg)
+            except Exception as exc:
+                music_features = {"bpm": 0.0, "beat_times": [], "downbeats": [],
+                                  "confidence": 0.0, "engine": "error",
+                                  "error": str(exc)[:200]}
+            if music_features.get("error"):
+                warnings.append("music抽出: {}".format(music_features["error"]))
+        else:
+            music_features = {"bpm": 0.0, "beat_times": [], "downbeats": [],
+                              "confidence": 0.0, "engine": "disabled"}
+        meta["music_bpm"] = music_features.get("bpm")
+        meta["music_beats_count"] = len(music_features.get("beat_times") or [])
+        meta["music_confidence"] = music_features.get("confidence")
+
+        # -----------------------------------------------------------------
         # 融合 (fusion prompt)
         # -----------------------------------------------------------------
         _progress("fusion")
@@ -933,6 +1164,7 @@ def analyze_reference_v2(
             cuts,
             vision_results,
             onsets,
+            music=music_features,
         )
         try:
             fusion_result = fusion_call_fn(fusion_prompt, timeout_sec=cfg.get("claude_timeout_sec", 600))
@@ -949,12 +1181,14 @@ def analyze_reference_v2(
             }
 
         spec = _normalize_v2_from_llm(
-            fusion_result["data"], normalized, duration_sec, asr_and_analysis, cuts, onsets, warnings
+            fusion_result["data"], normalized, duration_sec, asr_and_analysis, cuts, onsets, warnings,
+            cut_confidence_map=cut_confidence_map, music=music_features,
         )
         ok, errors, normalized_spec = validate_reference_spec_v2(spec)
         if not ok:
             # 矯正1回: 決定的に補完してから再検査
-            corrected = _correct_v2_spec(spec, duration_sec, cuts, onsets)
+            corrected = _correct_v2_spec(spec, duration_sec, cuts, onsets,
+                                         cut_confidence_map=cut_confidence_map, music=music_features)
             ok2, errors2, normalized_spec = validate_reference_spec_v2(corrected)
             if not ok2:
                 return {
@@ -978,6 +1212,20 @@ def analyze_reference_v2(
         _cleanup(tmp_dir)
 
 
+def _build_cuts_field(cuts: List[float], cut_confidence_map: Optional[Dict[float, float]]) -> List[Dict[str, Any]]:
+    """cuts 秒列 + アンサンブル confidence マップ から cuts フィールドを組み立てる。
+
+    マップに無いキーは既定 0.8 を採用（旧単一手法時の互換値）。
+    """
+    cm = cut_confidence_map or {}
+    out = []
+    for c in cuts:
+        t_r = round(float(c), 3)
+        conf = cm.get(c, cm.get(t_r, 0.8))
+        out.append({"t": t_r, "confidence": float(conf)})
+    return out
+
+
 def _normalize_v2_from_llm(
     data: Dict[str, Any],
     url: str,
@@ -986,6 +1234,8 @@ def _normalize_v2_from_llm(
     cuts: List[float],
     onsets: List[Dict[str, Any]],
     warnings: List[str],
+    cut_confidence_map: Optional[Dict[float, float]] = None,
+    music: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """LLM出力に対して欠落キーを埋め、スキーマ形へ整える。"""
     spec = dict(data) if isinstance(data, dict) else {}
@@ -996,8 +1246,13 @@ def _normalize_v2_from_llm(
     spec.setdefault("segments", asr_and_analysis.get("segments") or [])
     spec.setdefault("beats", asr_and_analysis.get("beats") or [])
     spec.setdefault("rhythm", asr_and_analysis.get("rhythm"))
-    if not isinstance(spec.get("cuts"), list) or not spec["cuts"]:
-        spec["cuts"] = [{"t": round(float(c), 3), "confidence": 0.8} for c in cuts]
+    # P1 修正: 検出器由来の cuts + confidence を常に採用する（LLM は cuts の秒/信頼度を
+    # 正しく再現できず、fusion prompt からのコピペ精度に依存するため）。LLM が cuts を
+    # 生成しても、決定的検出結果で上書きする方が下流の QA・beat_snap の一貫性が保たれる。
+    if cuts:
+        spec["cuts"] = _build_cuts_field(cuts, cut_confidence_map)
+    elif not isinstance(spec.get("cuts"), list):
+        spec["cuts"] = []
     if not isinstance(spec.get("shots_ref"), list):
         spec["shots_ref"] = []
     if not isinstance(spec.get("telops"), list):
@@ -1008,18 +1263,30 @@ def _normalize_v2_from_llm(
         spec["bgm"] = {"present": False, "mood_guess": ""}
     if not isinstance(spec.get("warnings"), list):
         spec["warnings"] = []
+    # R2a F5: music を常時付与（LLMがmusic を返しても上書きせず、検出値を優先する。
+    # BPM/beat_times は音響解析側が真実源。LLM 応答の music は無視して確実性を担保）。
+    if music is not None:
+        spec["music"] = {
+            "bpm": float(music.get("bpm") or 0.0),
+            "beat_times": list(music.get("beat_times") or []),
+            "downbeats": list(music.get("downbeats") or []),
+            "confidence": float(music.get("confidence") or 0.0),
+            "engine": music.get("engine") or "",
+        }
     spec["warnings"] = list(spec.get("warnings") or []) + list(warnings or [])
     return spec
 
 
 def _correct_v2_spec(
-    spec: Dict[str, Any], duration_sec: float, cuts: List[float], onsets: List[Dict[str, Any]]
+    spec: Dict[str, Any], duration_sec: float, cuts: List[float], onsets: List[Dict[str, Any]],
+    cut_confidence_map: Optional[Dict[float, float]] = None,
+    music: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """検証失敗時の決定的矯正: cutsは検出結果で上書き、範囲外時刻はクランプ。"""
     corrected = dict(spec)
     corrected["version"] = 2
     corrected["duration_sec"] = float(duration_sec or 0.0)
-    corrected["cuts"] = [{"t": round(float(c), 3), "confidence": 0.8} for c in cuts]
+    corrected["cuts"] = _build_cuts_field(cuts, cut_confidence_map)
     # sfx_events を検出結果で上書き
     corrected["sfx_events"] = onsets
     # telops のクランプ
@@ -1041,4 +1308,12 @@ def _correct_v2_spec(
     corrected.setdefault("shots_ref", [])
     corrected.setdefault("bgm", {"present": False, "mood_guess": ""})
     corrected.setdefault("warnings", [])
+    if music is not None:
+        corrected["music"] = {
+            "bpm": float(music.get("bpm") or 0.0),
+            "beat_times": list(music.get("beat_times") or []),
+            "downbeats": list(music.get("downbeats") or []),
+            "confidence": float(music.get("confidence") or 0.0),
+            "engine": music.get("engine") or "",
+        }
     return corrected

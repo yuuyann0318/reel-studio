@@ -140,27 +140,103 @@ def _iou(a: Tuple[float, float], b: Tuple[float, float]) -> float:
     return inter / union
 
 
+def _iou_matrix(refs: List[Tuple[float, float]], gens: List[Tuple[float, float]]) -> List[List[float]]:
+    return [[_iou(r, g) for g in gens] for r in refs]
+
+
+def _max_weight_matching_bruteforce(weights: List[List[float]]) -> List[Tuple[int, int]]:
+    """総当たりで重み和最大の完全（片方消費）マッチングを返す。n<=8 想定。
+
+    weights[i][j] = i(ref) と j(gen) のペアの重み。片方消費のため
+    min(len(refs), len(gens)) 個のペアを選ぶ。O((max)!) なので小さいnのみ。
+    """
+    m = len(weights)
+    if m == 0:
+        return []
+    n = len(weights[0]) if weights else 0
+    if n == 0:
+        return []
+    # ref を順に、gen 側のどの列を消費するかを permutation で探る。
+    # 選ばない ref もあり得るため、gen 側から m 個を選ぶ順列（P(n, m) 通り）を列挙。
+    # m <= n を保証するため、必要なら refs と gens を swap して呼び出す（呼び出し側で対応）。
+    from itertools import permutations
+    best_sum = -1.0
+    best_pairs: List[Tuple[int, int]] = []
+    if m > n:
+        # gens が足りない: gens は全部使い、ref 側の一部だけ選ぶ。
+        # ref 側 n 個の組合せ × それらへの gens の順列。
+        from itertools import combinations
+        for ref_sel in combinations(range(m), n):
+            for perm in permutations(range(n)):
+                s = 0.0
+                pairs = []
+                for k, i in enumerate(ref_sel):
+                    j = perm[k]
+                    w = weights[i][j]
+                    if w <= 0:
+                        continue
+                    s += w
+                    pairs.append((i, j))
+                if s > best_sum:
+                    best_sum = s
+                    best_pairs = pairs
+    else:
+        for perm in permutations(range(n), m):
+            s = 0.0
+            pairs = []
+            for i in range(m):
+                j = perm[i]
+                w = weights[i][j]
+                if w <= 0:
+                    continue
+                s += w
+                pairs.append((i, j))
+            if s > best_sum:
+                best_sum = s
+                best_pairs = pairs
+    return best_pairs
+
+
+def _max_weight_matching_greedy(weights: List[List[float]]) -> List[Tuple[int, int]]:
+    """weights 最大順に貪欲にペアを取る。行/列を1回のみ消費。大きな n 用。"""
+    if not weights or not weights[0]:
+        return []
+    entries: List[Tuple[float, int, int]] = []
+    for i, row in enumerate(weights):
+        for j, w in enumerate(row):
+            if w > 0:
+                entries.append((w, i, j))
+    entries.sort(key=lambda x: -x[0])
+    used_i: set = set()
+    used_j: set = set()
+    pairs: List[Tuple[int, int]] = []
+    for w, i, j in entries:
+        if i in used_i or j in used_j:
+            continue
+        pairs.append((i, j))
+        used_i.add(i)
+        used_j.add(j)
+    return pairs
+
+
 def _telop_iou_avg(ref_intervals: List[Tuple[float, float]], gen_intervals: List[Tuple[float, float]]) -> Dict[str, float]:
+    """R2a: telop_iou マッチングを「貪欲(先頭ref優先)」から「最大重みマッチング」へ改善。
+
+    n=len(refs)+len(gens) が 10 以下なら総当たりで最適マッチング、
+    それ以上なら重み降順の貪欲でO(n^2 log n)で近似する。
+    """
     if not ref_intervals and not gen_intervals:
         return {"iou_avg": 1.0, "matched": 0, "ref_count": 0, "gen_count": 0}
     if not ref_intervals or not gen_intervals:
         return {"iou_avg": 0.0, "matched": 0, "ref_count": len(ref_intervals), "gen_count": len(gen_intervals)}
-    # ref を順に貪欲マッチ
-    remaining = list(range(len(gen_intervals)))
-    total = 0.0
-    matched = 0
-    for r in ref_intervals:
-        best_j = None
-        best_iou = -1.0
-        for j in remaining:
-            iou = _iou(r, gen_intervals[j])
-            if iou > best_iou:
-                best_iou = iou
-                best_j = j
-        if best_j is not None and best_iou > 0:
-            total += best_iou
-            matched += 1
-            remaining.remove(best_j)
+    weights = _iou_matrix(ref_intervals, gen_intervals)
+    total_n = len(ref_intervals) + len(gen_intervals)
+    if total_n <= 10:
+        pairs = _max_weight_matching_bruteforce(weights)
+    else:
+        pairs = _max_weight_matching_greedy(weights)
+    total = sum(weights[i][j] for i, j in pairs)
+    matched = len(pairs)
     denom = max(len(ref_intervals), len(gen_intervals))
     return {"iou_avg": total / denom if denom else 0.0, "matched": matched,
             "ref_count": len(ref_intervals), "gen_count": len(gen_intervals)}
@@ -423,6 +499,66 @@ def _camera_move_match(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, 
 
 
 # ---------------------------------------------------------------------------
+# 6. beat_alignment（R2a F5・shot境界の拍一致率）
+# ---------------------------------------------------------------------------
+
+def _beat_alignment(reference_spec: Dict[str, Any], plan: Dict[str, Any], tol_sec: float = 0.08) -> Dict[str, Any]:
+    """生成 plan の shot 境界のうち、参考ビートグリッド (music.beat_times) の
+    最寄り拍 ±tol_sec 以内に収まっているものの割合を返す。
+
+    参考尺 -> 生成尺 に beat_times をスケールしてから比較する（座標系を揃える）。
+    music が無い/beat_times が空/confidence が 0 の場合は unmeasured 扱い（score=None）
+    を返し、summary 側では 0.0 ではなく None として扱う（後方互換）。
+    """
+    music = (reference_spec or {}).get("music") or {}
+    beats = music.get("beat_times") or []
+    conf = music.get("confidence")
+    if not beats or (isinstance(conf, (int, float)) and float(conf) <= 0):
+        return {"score": None, "matched": 0, "boundaries": 0, "beat_count": len(beats),
+                "unmeasured_reason": "no_beats"}
+    # 座標系揃え
+    ref_total = float((reference_spec or {}).get("duration_sec") or 0.0)
+    shots = (plan or {}).get("shots") or []
+    gen_total = sum(float(s.get("duration_sec") or 0.0) for s in shots)
+    if ref_total > 0 and gen_total > 0:
+        ratio = gen_total / ref_total
+        beats_scaled = sorted([float(t) * ratio for t in beats])
+    else:
+        beats_scaled = sorted(float(t) for t in beats)
+    # 内部境界（先頭 0 と末尾は除外＝スナップ検証は「編集で選ばれた切り替え点」のみが対象）
+    boundaries: List[float] = []
+    cursor = 0.0
+    for i, s in enumerate(shots):
+        cursor += float(s.get("duration_sec") or 0.0)
+        if i < len(shots) - 1:
+            boundaries.append(cursor)
+    if not boundaries:
+        return {"score": None, "matched": 0, "boundaries": 0, "beat_count": len(beats),
+                "unmeasured_reason": "no_boundaries"}
+    matched = 0
+    for b in boundaries:
+        # 二分探索的に最寄り拍を求める
+        lo, hi = 0, len(beats_scaled) - 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if beats_scaled[mid] < b:
+                lo = mid + 1
+            else:
+                hi = mid
+        cands = []
+        if lo > 0:
+            cands.append(abs(b - beats_scaled[lo - 1]))
+        if lo < len(beats_scaled):
+            cands.append(abs(b - beats_scaled[lo]))
+        if cands and min(cands) <= tol_sec:
+            matched += 1
+    return {"score": matched / len(boundaries), "matched": matched,
+            "boundaries": len(boundaries), "beat_count": len(beats),
+            "tol_sec": tol_sec, "bpm": music.get("bpm"),
+            "music_confidence": conf}
+
+
+# ---------------------------------------------------------------------------
 # 総合スコア
 # ---------------------------------------------------------------------------
 
@@ -446,6 +582,7 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
     telop_style = _telop_style_match(reference_spec, plan)
     sfx = _sfx_placement(reference_spec, plan)
     cam = _camera_move_match(reference_spec, plan)
+    beat = _beat_alignment(reference_spec, plan)
 
     summary = {
         "cut_match": cut_res["f1"],
@@ -453,6 +590,7 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
         "telop_style": telop_style["score"],
         "sfx_placement": sfx["score"],
         "camera_move": cam["score"],
+        "beat_alignment": beat.get("score"),  # None なら未測定
     }
     return {
         "summary": summary,
@@ -462,6 +600,7 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
             "telop_style": telop_style,
             "sfx_placement": sfx,
             "camera_move": cam,
+            "beat_alignment": beat,
         },
         "meta": {
             "reference_duration_sec": ref_total,

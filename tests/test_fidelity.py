@@ -57,8 +57,11 @@ def test_fidelity_returns_all_5_metrics(real_spec):
     plan = _plan_from_skeleton(real_spec)
     result = fidelity.compute_fidelity(real_spec, plan)
     keys = set(result["summary"].keys())
-    assert keys == {"cut_match", "telop_iou", "telop_style", "sfx_placement", "camera_move"}
+    # R2a: beat_alignment を追加。music が無い spec では None（未測定）で返る。
+    assert keys == {"cut_match", "telop_iou", "telop_style", "sfx_placement", "camera_move", "beat_alignment"}
     for k, v in result["summary"].items():
+        if v is None:
+            continue  # beat_alignment は music 未検出時 None
         assert 0.0 <= v <= 1.0, "{}={} が [0,1] 範囲外".format(k, v)
 
 

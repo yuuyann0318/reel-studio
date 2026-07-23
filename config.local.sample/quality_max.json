@@ -7,12 +7,19 @@
     "max_frames": 240,
     "vision_batch_size": 6,
     "scene_threshold": 0.25,
+    "scene_thresholds": [0.20, 0.30, 0.40],
+    "scene_use_pyscenedetect": true,
+    "pyscenedetect_threshold": 27.0,
+    "scene_merge_window_sec": 0.15,
     "onset_jump_db": 3.0,
-    "onset_window_samples": 512
+    "onset_window_samples": 512,
+    "music_extract_enabled": true
   },
   "director": {
     "min_shot_sec": 0.5,
     "stages": ["write", "critique", "rewrite"],
+    "beat_snap_enabled": true,
+    "beat_snap_tolerance_ms": 250,
     "quality_directive": "この案件は『品質最優先・時間は気にしない』方針で進めること。参考動画の映像・音声・テロップの再現度を最大化することが最優先事項であり、急ぐ必要は一切ない。visual_prompt を書く際に参考動画の映像情報（reference_visual.location / framing / camera_move / color_mood / lighting）が空/曖昧/不確かに感じたら、テーマに合う自然な語彙で必ず埋め、決して省略しないこと。caption_jp/narration_jp も参考動画のテンポ・語尾の使い方・句読点の間を最大限尊重して書くこと。"
   },
   "higgsfield": {
