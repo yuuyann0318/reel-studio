@@ -557,6 +557,11 @@ def analyze_frames_with_vision(
                     "motion": item.get("motion") or "static",
                     "has_person": bool(item.get("has_person")),
                     "has_product_logo": bool(item.get("has_product_logo")),
+                    # F3: 構造化拡張フィールド。旧プロンプトに合わせて欠落は既定値で埋める。
+                    "shot_size": item.get("shot_size") or "",
+                    "subject_count": int(item.get("subject_count")) if isinstance(item.get("subject_count"), (int, float)) else 0,
+                    "camera_move": item.get("camera_move") or "",
+                    "color_mood": item.get("color_mood") or "",
                 }
                 results.append(merged)
         else:

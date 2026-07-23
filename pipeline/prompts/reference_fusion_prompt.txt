@@ -25,6 +25,9 @@ segments(ASR): {SEGMENTS_JSON}
 - cuts: 入力のカット表をそのまま採用（時系列・重複なし）。信頼度 confidence は 0〜1。
 - shots_ref: 各カット区間を1ショットとみなし、visionのvisual_desc_en/motionをその区間で最頻の内容にまとめる。
   各ショットの start は当該カット時刻、end は次のカット時刻（最後は duration_sec）。
+  さらに vision の F3 拡張フィールド（shot_size / subject_count / camera_move /
+  color_mood）が該当区間で得られていれば、その区間内の最頻値を **各ショットにコピー**すること。
+  vision 側で値が無いフィールドは空文字列 / 0 のまま返してよい。
 - telops: visionで検出されたテロップを、時間順にまとめる。同一テロップが複数フレームで連続する場合は
   start/end を統合。position/color/stroke/emphasis_words を保持。
 - sfx_events: 入力オンセット表をそのまま採用し、anchor と kind と confidence を保持。
@@ -44,7 +47,7 @@ segments(ASR): {SEGMENTS_JSON}
   "beats": [{"role": "hook", "start": 0.0, "end": 2.0, "text": "…", "summary": "…"}],
   "rhythm": {"sentence_count": 0, "avg_sentence_len": 0, "max_sentence_len": 0, "tone": "", "endings": []},
   "cuts": [{"t": 0.0, "confidence": 0.9}],
-  "shots_ref": [{"index": 0, "start": 0.0, "end": 2.0, "visual_desc_en": "…", "motion": "static"}],
+  "shots_ref": [{"index": 0, "start": 0.0, "end": 2.0, "visual_desc_en": "…", "motion": "static", "shot_size": "medium", "subject_count": 1, "camera_move": "none", "color_mood": "warm"}],
   "telops": [{"start": 0.0, "end": 2.0, "text": "…", "position": "top", "style": {"color": "white", "stroke": "black stroke", "size_class": "large"}, "emphasis_words": []}],
   "sfx_events": [{"t": 0.5, "kind": "transition", "anchor": "cut", "confidence": 0.8}],
   "bgm": {"present": true, "mood_guess": ""},

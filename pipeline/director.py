@@ -46,7 +46,9 @@ MAX_RETRIES = 2
 POLISH_MAX_RETRIES = 1
 DEFAULT_TARGET_TOLERANCE_SEC = 8.0
 DEFAULT_QUALITY = "supreme"
-QUALITY_LEVELS = ("supreme", "single")
+# F12: supreme_plus = 品質最優先プリセット。write→critique→rewrite の3段（既存 supreme は
+# write→polish の2段）。config.local/quality_max.json で有効化する想定。
+QUALITY_LEVELS = ("supreme", "single", "supreme_plus")
 
 # ---------------------------------------------------------------------------
 # TTP スケルトン組み立てパラメータ
@@ -233,6 +235,89 @@ def _resolve_shot_id_at_time(boundaries, shot_ids, t, prefer="right"):
             return shot_ids[i]
     # 末尾または末端超過は最後の shot に寄せる
     return shot_ids[-1]
+
+
+def _map_reference_visual_to_shots(shots_ref, boundaries, shot_ids):
+    """spec.shots_ref を境界 (参考尺座標) 上で shot_id に写像する（F10）。
+
+    shots_ref は参考動画の実カット区間ごとに visual_desc_en / motion / (F3拡張で)
+    shot_size / subject_count / camera_move / color_mood / framing / location /
+    lighting / color_palette_hex 等を持つ dict。boundaries が境界マージで縮んで
+    いる場合は「その shot 帯に完全に含まれる/重なる shots_ref を統合」して、
+    先頭の visual_desc_en を採用しつつ motion/camera_move は多数決を取る。
+
+    Returns: dict shot_id -> reference_visual dict
+    """
+    if not shots_ref or not shot_ids:
+        return {}
+    out = {}
+    for i, sid in enumerate(shot_ids):
+        lo = boundaries[i]
+        hi = boundaries[i + 1]
+        # 重なる shots_ref を全部拾う（半開区間: [lo, hi) と [ss, se) が真に重なるとき）。
+        # 境界がぴったり一致（前 shot の終端 = 次 shot の開始）はどちらにも属さないため
+        # 厳密不等号でリークを防ぐ（BUG-R1: 境界一致による reference_visual の隣接shotへの
+        # 漏れを検出して修正）。
+        overlaps = []
+        for s in shots_ref:
+            if not isinstance(s, dict):
+                continue
+            ss = s.get("start")
+            se = s.get("end")
+            if not isinstance(ss, (int, float)) or not isinstance(se, (int, float)):
+                continue
+            if float(ss) < hi - 1e-6 and float(se) > lo + 1e-6:
+                overlaps.append(s)
+        if not overlaps:
+            continue
+        # motion / camera_move / shot_size / color_mood は最頻値、それ以外は先頭の値
+        def _mode(key, default=""):
+            counts = {}
+            for s in overlaps:
+                v = s.get(key)
+                if isinstance(v, str) and v:
+                    counts[v] = counts.get(v, 0) + 1
+            if not counts:
+                return default
+            return max(counts.items(), key=lambda kv: kv[1])[0]
+        head = overlaps[0]
+        rv = {
+            "desc_en": (head.get("visual_desc_en") or "").strip(),
+            "motion": _mode("motion", head.get("motion") or "static"),
+            "shot_size": _mode("shot_size", ""),
+            "subject_count": head.get("subject_count") if isinstance(head.get("subject_count"), int) else None,
+            "camera_move": _mode("camera_move", head.get("motion") or ""),
+            "color_mood": _mode("color_mood", ""),
+            "framing": _mode("framing", ""),
+            "location": _mode("location", ""),
+            "lighting": _mode("lighting", ""),
+            "color_palette_hex": head.get("color_palette_hex") or [],
+        }
+        # 空/None の値は落として skeleton_json を小さく保つ
+        rv = {k: v for k, v in rv.items() if v not in (None, "", [], {})}
+        if rv:
+            out[sid] = rv
+    return out
+
+
+def _remap_reference_visual_by_split(rv_map, shot_ids, split_map, new_shot_ids):
+    """reference_visual 写像を、旧 shot -> 分割群の**全メンバー**にコピーする（F10）。
+
+    分割時、テロップは先頭のみに載せるが reference_visual は全断片が同じ絵から
+    切り出したものなので分割群全員が同じ reference_visual を保持する。
+    """
+    if not rv_map:
+        return {}
+    remapped = {}
+    for old_idx, old_sid in enumerate(shot_ids):
+        rv = rv_map.get(old_sid)
+        if not rv:
+            continue
+        new_group = split_map[old_idx] if old_idx < len(split_map) else [old_idx]
+        for j in new_group:
+            if 0 <= j < len(new_shot_ids):
+                remapped[new_shot_ids[j]] = dict(rv)
+    return remapped
 
 
 def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_duration):
@@ -462,7 +547,7 @@ def _remap_sfx_by_split(sfx_plan, shot_ids, new_shot_ids, split_map, new_duratio
     return remapped
 
 
-def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None):
+def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, min_shot_sec=None):
     """reference_spec v2 から shot スケルトンを機械的に組み立てる純関数。
 
     Args:
@@ -474,13 +559,15 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None):
             Higgsfield 480p は 1shot=1秒あたり約1クレジット消費のため、
             config.higgsfield.max_credits_per_shot 相当を渡すとクレジット上限を
             尊重した shot 分割になる。分割時は caption/sfx を写像維持する。
+        min_shot_sec: 任意。最小ショット尺（秒）。None なら既定 _SKELETON_MIN_SHOT_SEC=1.2。
+            F12: supreme_plus プリセットで 0.5 に落とすと参考の高速カットを保持できる。
 
     Returns:
         skeleton dict:
         {
           "shots": [
             {"id", "duration_sec", "caption_in_offset_sec", "caption_out_offset_sec",
-             "telop_style_hint"}, ...
+             "telop_style_hint", "reference_visual"}, ...
           ],
           "sfx_plan": [...],
           "hook_end_shot_id": str|None,
@@ -492,17 +579,23 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None):
     if not isinstance(target_duration_sec, (int, float)) or target_duration_sec <= 0:
         raise ValueError("target_duration_sec は正の数値である必要があります")
 
+    effective_min_shot_sec = float(min_shot_sec) if isinstance(min_shot_sec, (int, float)) and min_shot_sec > 0 else _SKELETON_MIN_SHOT_SEC
+
     ref_duration = float(reference_spec.get("duration_sec") or 0.0)
     boundaries = _iter_boundaries_from_spec(reference_spec)  # 参考尺座標
-    # 高速カット参考動画（cuts数 > target/1.2）で min shot 尺と target 合計が両立せず
+    # 高速カット参考動画（cuts数 > target/min_shot）で min shot 尺と target 合計が両立せず
     # validate_plan で全滅する問題への対処: 境界を貪欲マージして shot 数を減らす。
-    boundaries = _merge_boundaries_to_fit_min_shot(boundaries, float(target_duration_sec))
+    boundaries = _merge_boundaries_to_fit_min_shot(
+        boundaries, float(target_duration_sec), min_shot_sec=effective_min_shot_sec,
+    )
     n = len(boundaries) - 1
     if n < 1:
         raise ValueError("reference_spec からショット区間が抽出できませんでした")
 
     raw_durations = [max(1e-3, boundaries[i + 1] - boundaries[i]) for i in range(n)]
-    scaled = _scale_durations_to_target(raw_durations, float(target_duration_sec))
+    scaled = _scale_durations_to_target(
+        raw_durations, float(target_duration_sec), min_shot_sec=effective_min_shot_sec,
+    )
     shot_ids = ["s{}".format(i + 1) for i in range(n)]
 
     # telop 写像
@@ -512,6 +605,14 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None):
         shot_ids,
         scaled,
         ref_duration,
+    )
+
+    # F10: 参考映像情報の写像（shots_ref -> shot_id）。境界がマージされているため
+    # 統合先の shot に「その帯に重なる」shots_ref を集約する。
+    rv_map = _map_reference_visual_to_shots(
+        reference_spec.get("shots_ref") or [],
+        boundaries,
+        shot_ids,
     )
 
     # sfx 間引き（写像は分割前の shot_ids でまず行う）
@@ -541,10 +642,12 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None):
 
     # クレジット意識分割（max_shot_sec が指定されたとき）
     if max_shot_sec is not None and max_shot_sec > 0:
-        new_durations, split_map = _split_long_shots(scaled, float(max_shot_sec))
+        new_durations, split_map = _split_long_shots(scaled, float(max_shot_sec), min_shot_sec=effective_min_shot_sec)
         new_shot_ids = ["s{}".format(i + 1) for i in range(len(new_durations))]
         # telop 写像を分割群の先頭 shot に載せ替え
         telop_map = _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids)
+        # reference_visual 写像を分割群の全員にコピー（同じ絵の一部を切り出したもの）
+        rv_map = _remap_reference_visual_by_split(rv_map, shot_ids, split_map, new_shot_ids)
         # sfx 写像を分割断片に載せ替え
         sfx_plan = _remap_sfx_by_split(sfx_plan, shot_ids, new_shot_ids, split_map, new_durations)
         # hook/cta shot_id の載せ替え（旧 -> 分割群の先頭）
@@ -574,6 +677,9 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None):
             shot["caption_in_offset_sec"] = round(cin, 3)
             shot["caption_out_offset_sec"] = round(cout, 3)
             shot["telop_style_hint"] = info.get("telop_style_hint")
+        # F10: 参考映像情報を skeleton の各 shot に載せる
+        if sid in rv_map:
+            shot["reference_visual"] = rv_map[sid]
         shots.append(shot)
 
     return {
@@ -944,14 +1050,25 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     max_credits = hf_cfg.get("max_credits_per_shot")
     if isinstance(max_credits, (int, float)) and max_credits > 0:
         max_shot_sec = float(max_credits)
+    # F12: config.director.min_shot_sec があれば skeleton の最小ショット尺として渡す
+    # （supreme_plus プリセットで 0.5 に落として参考の高速カットを保持する）。
+    director_cfg = (config or {}).get("director") or {}
+    min_shot_sec_cfg = director_cfg.get("min_shot_sec")
     skeleton = build_shot_skeleton(
-        reference, target_duration_sec, max_shot_sec=max_shot_sec
+        reference, target_duration_sec, max_shot_sec=max_shot_sec,
+        min_shot_sec=min_shot_sec_cfg if isinstance(min_shot_sec_cfg, (int, float)) and min_shot_sec_cfg > 0 else None,
     )
+    # F12: 品質最優先の指示文（config.director.quality_directive）をプロンプトに注入する。
+    # 未指定なら空文字。ここでは reference_block の末尾に挟むだけで、director_prompt.txt の
+    # ロジックは触らない（後方互換）。
+    quality_directive = director_cfg.get("quality_directive") if isinstance(director_cfg.get("quality_directive"), str) else ""
     reference_block = _build_reference_block(skeleton, target_duration_sec)
+    if quality_directive:
+        reference_block = reference_block + "\n\n# 品質最優先の追加指示（F12: supreme_plus）\n" + quality_directive + "\n"
 
     stages = {}
     # TTP モードでは angles(切り口3案生成)はスキップ（切り口=参考動画の構成に固定）。
-    if quality == "supreme":
+    if quality in ("supreme", "supreme_plus"):
         stages["angles"] = {"ok": False, "skipped": "reference"}
 
     write_trace = {}
@@ -973,7 +1090,7 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
             "調整してください。"
         )
 
-    if quality == "supreme":
+    if quality in ("supreme", "supreme_plus"):
         polish_trace = {}
         critique_prompt = build_critique_prompt(
             theme, target_duration_sec, target_tolerance_sec, style, plan, reference_block=reference_block
@@ -987,11 +1104,32 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
             plan = polished
         # polish 不合格: write のドラフトをそのまま採用。
 
+    if quality == "supreme_plus":
+        # F12: 3段目 rewrite ステージ。critique 出力をもう一度 director プロンプトに戻し、
+        # スケルトン厳守+参考映像情報の忠実反映を再確認させる。矯正リトライを1回だけ許す。
+        rewrite_trace = {}
+        rewrite_prompt = build_director_prompt(
+            theme, target_duration_sec, target_tolerance_sec, style=style, angle_block="", product=product,
+            reference_block=reference_block,
+        )
+        rewrite_prompt = (
+            "以下のドラフトplanを『骨（構造）はそのまま保持し、visual_prompt/caption_jp/"
+            "narration_jp の表現と参考映像情報の反映度だけをさらに向上させて再出力』してください。\n\n"
+            "ドラフト:\n" + json.dumps(plan, ensure_ascii=False, indent=2) + "\n\n---\n\n" + rewrite_prompt
+        )
+        rewritten = _attempt_plan(
+            rewrite_prompt, config, POLISH_MAX_RETRIES, target_duration_sec, target_tolerance_sec,
+            trace=rewrite_trace, skeleton=skeleton, reference=reference,
+        )
+        stages["rewrite"] = {"ok": rewritten is not None, "model_used": rewrite_trace.get("last_model_used")}
+        if rewritten is not None:
+            plan = rewritten
+
     plan.setdefault("meta", {})
     plan["meta"]["style"] = style
     plan["meta"]["quality"] = quality
     plan["meta"]["product"] = (product or {}).get("name") if product else None
-    if quality == "supreme":
+    if quality in ("supreme", "supreme_plus"):
         plan["meta"]["stages"] = stages
     # 参考spec の要点を meta に記録（下流の render/検証で使える）
     plan["meta"]["reference_skeleton_shot_count"] = len(skeleton["shots"])

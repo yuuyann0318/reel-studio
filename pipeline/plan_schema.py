@@ -136,6 +136,11 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
             caption_in_off = shot.get("caption_in_offset_sec")
             caption_out_off = shot.get("caption_out_offset_sec")
             telop_style_hint = shot.get("telop_style_hint")
+            # v2 拡張: reference_visual（参考動画の映像情報。F10）。任意・後方互換。
+            #  {"desc_en": str, "framing": str, "location": str, "camera_move": str,
+            #   "color_palette_hex": [str], "lighting": str, "shot_size": str,
+            #   "subject_count": int, "color_mood": str} 等の辞書。
+            reference_visual = shot.get("reference_visual")
 
             ok_item = True
 
@@ -222,6 +227,9 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
             if telop_style_hint is not None and not isinstance(telop_style_hint, dict):
                 errors.append("shots[{}(id={})].telop_style_hint はオブジェクトである必要があります".format(i, sid))
                 ok_item = False
+            if reference_visual is not None and not isinstance(reference_visual, dict):
+                errors.append("shots[{}(id={})].reference_visual はオブジェクトである必要があります".format(i, sid))
+                ok_item = False
 
             if ok_item:
                 seen_ids.add(sid)
@@ -244,6 +252,8 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                     normalized_shot["caption_out_offset_sec"] = float(caption_out_off)
                 if telop_style_hint is not None:
                     normalized_shot["telop_style_hint"] = dict(telop_style_hint)
+                if reference_visual is not None:
+                    normalized_shot["reference_visual"] = dict(reference_visual)
                 normalized_shots.append(normalized_shot)
 
     bgm_mood = plan.get("bgm_mood")

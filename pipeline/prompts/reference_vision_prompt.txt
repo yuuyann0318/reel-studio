@@ -13,10 +13,17 @@
 4. telop_stroke: 縁取り・シャドウ・帯背景の有無を短い英語で（例: "black stroke" / "yellow highlight" / "no stroke" / ""）。
 5. emphasis_words: 強調表示（大きさ・色・下線）されている単語の配列（無ければ [])。
 6. size_class: テロップの相対サイズ "small" / "medium" / "large" / "" のいずれか。
-7. visual_desc_en: 画面全体の映像内容を英語1文で。被写体・カメラワーク・動きが分かる短文（30語以内）。
+7. visual_desc_en: 画面全体の映像内容を英語1〜2文で。被写体・カメラワーク・動きが分かる短文（60語以内）。
 8. motion: 検出される動きの短い英語ラベル（例: "static" / "pan_left" / "zoom_in" / "cut_transition" / "person_talking"）。
 9. has_person: 画面に人物が写っているか true/false。
 10. has_product_logo: 商品ロゴ・ブランドロゴが写っているか true/false。
+11. shot_size: 被写体距離の構図ラベル。"closeup" / "medium" / "wide" / "" のいずれか。
+    （F3: 参考動画の構図を再現するための情報）
+12. subject_count: 画面内の主要な被写体（人物・製品・大きな物体）の数（整数）。無ければ 0。
+13. camera_move: カメラワークの詳細ラベル。次のいずれか:
+    "none" / "pan_l" / "pan_r" / "tilt_up" / "tilt_down" / "zoom_in" / "zoom_out" / "handheld" / "dolly"。
+    静的なら "none"。motion と重複してよい（camera_move の方が下流の motion_preset に近い粒度）。
+14. color_mood: 色調を1語の英語ラベルで。例: "warm" / "cool" / "neutral" / "vivid" / "muted" / "monochrome" / "pastel"。
 
 # 出力スキーマ（必ずこのJSON配列のみを返す。最初の文字は [ 最後の文字は ] ）
 [
@@ -32,7 +39,11 @@
     "visual_desc_en": "A young woman looks into the camera in a bright bedroom, medium close-up, static.",
     "motion": "static",
     "has_person": true,
-    "has_product_logo": false
+    "has_product_logo": false,
+    "shot_size": "medium",
+    "subject_count": 1,
+    "camera_move": "none",
+    "color_mood": "warm"
   }
 ]
 

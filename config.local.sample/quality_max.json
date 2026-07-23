@@ -1,0 +1,32 @@
+{
+  "_comment": "F12 品質最優先プリセット。config.local/quality_max.json にコピーすると有効化される（config.local/ は .gitignore 済み）。director_quality=supreme_plus + 参考尺一致 + 最小ショット尺 0.5s + Higgsfield 720p + 参考動画分析の呼び出し・フレーム上限を大幅緩和。",
+  "director_quality": "supreme_plus",
+  "target_duration_match_reference": true,
+  "reference": {
+    "max_vision_calls": 999,
+    "max_frames": 240,
+    "vision_batch_size": 6,
+    "scene_threshold": 0.25,
+    "onset_jump_db": 3.0,
+    "onset_window_samples": 512
+  },
+  "director": {
+    "min_shot_sec": 0.5,
+    "stages": ["write", "critique", "rewrite"],
+    "quality_directive": "この案件は『品質最優先・時間は気にしない』方針で進めること。参考動画の映像・音声・テロップの再現度を最大化することが最優先事項であり、急ぐ必要は一切ない。visual_prompt を書く際に参考動画の映像情報（reference_visual.location / framing / camera_move / color_mood / lighting）が空/曖昧/不確かに感じたら、テーマに合う自然な語彙で必ず埋め、決して省略しないこと。caption_jp/narration_jp も参考動画のテンポ・語尾の使い方・句読点の間を最大限尊重して書くこと。"
+  },
+  "higgsfield": {
+    "resolution": "720p",
+    "max_credits_per_shot": 20
+  },
+  "fidelity": {
+    "auto_evaluate": true,
+    "targets": {
+      "cut_match": 0.85,
+      "telop_iou": 0.80,
+      "telop_style": 0.80,
+      "sfx_placement": 0.70,
+      "camera_move": 0.75
+    }
+  }
+}

@@ -83,9 +83,10 @@ def test_run_director_passes_max_shot_sec_from_config(real_spec, monkeypatch):
 
     real_build = director.build_shot_skeleton
 
-    def _spy(spec, target, max_shot_sec=None):
+    def _spy(spec, target, max_shot_sec=None, min_shot_sec=None):
         captured["max_shot_sec"] = max_shot_sec
-        return real_build(spec, target, max_shot_sec=max_shot_sec)
+        captured["min_shot_sec"] = min_shot_sec
+        return real_build(spec, target, max_shot_sec=max_shot_sec, min_shot_sec=min_shot_sec)
 
     monkeypatch.setattr(director, "build_shot_skeleton", _spy)
 

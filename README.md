@@ -65,6 +65,23 @@ python run.py --theme "AIで副業を始める最初の一歩" --duration 20 --b
 | `--backend` | `mock` / `higgsfield` / `cloudapi`（未指定は`config.json`の`backend`） |
 | `--aspect` | 現状 `9:16` のみ対応 |
 | `--no-llm` | claude CLIを使わず決定論的テンプレートで企画生成する |
+| `--quality` | `supreme`(既定・write+polish) / `single`(一発) / `supreme_plus`(write+polish+rewrite・品質最優先) |
+| `--match-reference-duration` | 目標尺を参考動画の実尺に強制一致させる(参考のリズムをそのまま保つ) |
+| `--reference-url` | 参考動画URL(TikTok等)。LLM経路では必須 |
+
+### 品質最優先モード（時間かけていい派）
+
+`config.local/quality_max.json` を置くと自動的に `--quality supreme_plus` プリセットが
+有効化される（`config.local/` は `.gitignore` 済み・コミット対象外）。テンプレは
+`config.local.sample/quality_max.json` に同梱：
+
+```bash
+cp config.local.sample/quality_max.json config.local/quality_max.json
+python run.py --theme "..." --reference-url "https://..." --quality supreme_plus --match-reference-duration
+```
+
+生成後は `output/<run_id>/fidelity.json` に参考動画TTP再現度の5指標
+(cut/telop_iou/telop_style/sfx/camera_move) が保存される。
 
 ## パイプライン構成（8段）
 

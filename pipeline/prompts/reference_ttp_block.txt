@@ -2,15 +2,15 @@
 
 以下のスケルトンは参考動画 (reference_spec v2) から機械的に抽出して目標尺
 （{TARGET_DURATION}秒）へスケールしたものです。**shots の数・各 duration_sec・
-caption_in_offset_sec / caption_out_offset_sec / telop_style_hint・sfx_plan・
-hook_end_shot_id / cta_start_shot_id は絶対に変更しないこと。**
+caption_in_offset_sec / caption_out_offset_sec / telop_style_hint・reference_visual・
+sfx_plan・hook_end_shot_id / cta_start_shot_id は絶対に変更しないこと。**
 LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（英語）の3フィールドを
 埋めることだけです。骨（構成）は既に決まっています。
 
 ## 絶対厳守のルール
 1. **shots の要素数を増減しない**。各 shot の id 名も変更しない。
 2. 各 shot の `duration_sec` / `caption_in_offset_sec` / `caption_out_offset_sec` /
-   `telop_style_hint` / `scene_id` はスケルトンの値をそのまま返すこと。
+   `telop_style_hint` / `reference_visual` / `scene_id` はスケルトンの値をそのまま返すこと。
 3. `sfx_plan` / `hook_end_shot_id` / `cta_start_shot_id` もスケルトンの値をそのまま返すこと。
 4. **文言の丸写し禁止**: 参考動画のテロップ・字幕の語句を **15字以上連続して一致させないこと**
    （著作権侵害）。表現は必ず自分の言葉に言い換える。参考テロップは telop_style_hint
@@ -24,6 +24,22 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
 7. `caption_jp` は 30字以内(25字以内推奨)。`narration_jp` は音読で対応 shot の duration_sec 秒前後に
    なる長さにする（目安: 1秒≒6文字）。全 shots の narration_jp を出現順に連結した
    文字列が `narration_script` と完全一致すること。
+
+## visual_prompt を書くときの最重要ルール（F10: 参考映像の忠実再現）
+- 各 shot に含まれる `reference_visual`（`desc_en` / `framing` / `location` /
+  `camera_move` / `shot_size` / `color_mood` / `lighting` / `color_palette_hex`）は
+  **参考動画の実映像から抽出した根拠**です。visual_prompt は必ずこの値を第一の
+  根拠として構成すること。
+- 具体的には visual_prompt の英文に、`reference_visual.location`（撮影場所・
+  ロケーション）・`framing` または `shot_size`（構図・被写体距離）・`camera_move`
+  （カメラワーク）・`color_mood`（色調）を必ず語彙として含めること。
+- テーマに合わせて内容（人物/物体/題材）だけを置換し、ロケーション・構図・
+  カメラワーク・色調は参考動画に一致させること。参考が料理シーンなら kitchen /
+  食材、旅行シーンなら outdoor / 景色、Minecraft の俯瞰なら aerial high-angle と
+  いった具合に、参考の実映像に忠実な語彙を使うこと。
+- `reference_visual` が空・欠落している shot に限り、director_prompt.txt の
+  「UGC 生活感」フォールバックに従う。それ以外の shot で美容UGC 固定テンプレ
+  （bathroom / drugstore shelf 等）を強制しないこと。
 
 ## スケルトンJSON（この shots / sfx_plan / hook_end_shot_id / cta_start_shot_id を保持したまま、各 shot の narration_jp / caption_jp / visual_prompt のみを埋めて返すこと）
 {SKELETON_JSON}

@@ -647,7 +647,12 @@ class JobManager:
                 if spec_duration:
                     # spec["duration_sec"] を 15〜60秒にclampしてtarget_duration_secを上書きする
                     # （参考動画の尺を優先しつつ、あまりに極端な値でパイプライン全体が壊れないようにする）。
-                    target_duration_sec = max(15.0, min(60.0, float(spec_duration)))
+                    # F11: config.local で target_duration_match_reference=true が設定されているときは
+                    # クランプせず参考尺そのまま採用する（品質最優先モードで参考のリズムを保つ）。
+                    if bool((cfg or {}).get("target_duration_match_reference")):
+                        target_duration_sec = float(spec_duration)
+                    else:
+                        target_duration_sec = max(15.0, min(60.0, float(spec_duration)))
                     # project.json側の表示値も上書き後の実効値に揃える（directorへは18秒で渡るのに
                     # projectのtarget_duration_secが作成時の値のまま、という不整合の防止。実機E2Eで発見）。
                     _proj = projects.get_project(project_id)

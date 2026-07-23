@@ -45,7 +45,8 @@ hook / narration_scriptの書き出しは、次の心理トリガーのうち **
 - 語りは粗くてよい。『〜なんで』『〜だったんだけど』『正直』等の砕けた口語を積極的に使う(下品な語は不可)
 - 1文=1ショット。1文は8〜20字目安に短く割る(長い文は文ごと分割してショットを増やす)
 - caption_jpは要約・見出し化せず、そのショットのnarration_jpとほぼ同文にする(TikTokの全文テロップ文化。30字以内(25字以内推奨)は維持)
-- visual_promptは『スマホで撮ったリアルな生活感』に限定: smartphone footage, handheld, everyday Japanese bathroom/bedroom/drugstore shelf, natural imperfect lighting, extreme close-up of skin/hands/product texture
+- visual_promptは**参考動画の映像を最優先の根拠にする**。参考動画TTPスケルトンが注入されている場合、各shotのreference_visualに書かれた location / framing(または shot_size) / camera_move / color_mood / lighting を必ず英文に取り込むこと（テーマに合わせて内容の題材だけを置換し、ロケーション・構図・カメラワーク・色調は参考に一致させる）
+- 参考映像情報が無いshotに限り、UGC生活感にフォールバック: smartphone footage, handheld, natural imperfect lighting, extreme close-up of hands/product texture（美容UGC固定テンプレ = bathroom/bedroom/drugstore shelf は「参考が生活UGCのとき」だけ使い、料理・旅行・インテリア・ゲーム映像など別ジャンルの参考には絶対に強制しないこと）
 - visual_promptで禁止: cinematic, professional, studio lighting, elegant, luxurious, perfect, model, advertisement
 
 # CTA・ループ構成

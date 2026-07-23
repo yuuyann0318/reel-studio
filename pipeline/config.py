@@ -24,8 +24,17 @@ _DEFAULTS = {
     "target_duration_sec": 30,
     "voice": "Kyoko",
     "default_subtitle_style": "default",  # "default" | "vertical_hook"（Studio新規作成時の既定スタイル）
-    "director_quality": "supreme",  # "supreme"（3段多段生成） | "single"（従来の一発出し）
+    "director_quality": "supreme",  # "supreme"（3段多段生成） | "single"（従来の一発出し） | "supreme_plus"（品質最優先）
     "brand_rules": {"ng_words": []},
+    # F12: director 側の細部プリセット（supreme_plus で上書きされる）。既存挙動と互換の
+    # ため空 dict を既定にし、build_shot_skeleton は config.director.min_shot_sec が
+    # 与えられているときのみそれを使う。プロンプト末尾に注入する「品質最優先」文言も
+    # config.director.quality_directive として持つ（未指定なら注入しない）。
+    "director": {
+        "min_shot_sec": None,        # None なら director 内既定 (_SKELETON_MIN_SHOT_SEC=1.2)
+        "stages": None,              # None なら quality に従う（supreme=write+polish）
+        "quality_directive": None,   # 追加のプロンプト指示文（品質最優先など）
+    },
     "higgsfield": {
         "cli_bin": "higgsfield",
         "model": "seedance_2_0_mini",
@@ -68,9 +77,49 @@ _DEFAULTS = {
 }
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """dict を再帰的にマージする（overlay 優先。overlay の値が dict なら再帰、それ以外は上書き）。"""
+    out = dict(base)
+    if not isinstance(overlay, dict):
+        return out
+    for k, v in overlay.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _load_local_overlays() -> dict:
+    """`config.local/*.json` をキーの辞書順で読み、順に deep_merge して1つの overlay を返す。
+
+    F12: `config.local/quality_max.json` を新設して `director_quality: "supreme_plus"` 等を
+    宣言的に流し込むための機構。config.local/ は .gitignore 済みでコミット対象外。
+    ファイルが存在しない/壊れている場合は空 dict（＝上書きなし）を返し、静かに続行する。
+    """
+    local_dir = _PROJECT_ROOT / "config.local"
+    if not local_dir.is_dir():
+        return {}
+    overlay: dict = {}
+    try:
+        json_files = sorted([p for p in local_dir.iterdir() if p.is_file() and p.suffix == ".json"])
+    except Exception:
+        return {}
+    for p in json_files:
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            overlay = _deep_merge(overlay, data)
+    return overlay
+
+
 def load_config() -> dict:
     """config.json を読み込み、欠けているキーはデフォルトで補完して返す。
 
+    さらに `config.local/*.json` があれば辞書順に deep_merge で上書きする（F12: 品質最優先
+    プリセット `quality_max.json` 等をここで拾う）。config.local は .gitignore 済み。
     config.json が存在しない/壊れている場合もデフォルトのみで動作継続する。
     """
     data = {}
@@ -79,9 +128,10 @@ def load_config() -> dict:
             data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
             data = {}
-    merged = dict(_DEFAULTS)
-    if isinstance(data, dict):
-        merged.update(data)
+    merged = _deep_merge(_DEFAULTS, data if isinstance(data, dict) else {})
+    overlay = _load_local_overlays()
+    if overlay:
+        merged = _deep_merge(merged, overlay)
     return merged
 
 

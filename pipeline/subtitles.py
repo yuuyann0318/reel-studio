@@ -141,9 +141,10 @@ def _compute_color_map(text, emphasis):
     return color_at
 
 
-def _render_with_color_map(text, color_at):
+def _render_with_color_map(text, color_at, reset_color=None):
     parts = []
     i, n = 0, len(text)
+    reset = reset_color or _WHITE_RESET
     while i < n:
         c = color_at[i]
         j = i
@@ -153,17 +154,22 @@ def _render_with_color_map(text, color_at):
         if c is None:
             parts.append(chunk)
         else:
-            parts.append("{{\\c{}}}{}{{\\c{}}}".format(c, chunk, _WHITE_RESET))
+            # F9 fix: reset を hint 由来のベース色にできるようにする（None なら従来どおり白）。
+            # 例: hint.color=yellow のとき accent span の後 \c は yellow に戻す
+            #     （旧実装は常に白へ戻すため hint 由来のベース色を破壊していた）。
+            parts.append("{{\\c{}}}{}{{\\c{}}}".format(c, chunk, reset))
         i = j
     return "".join(parts)
 
 
-def build_dialogue_text(lines, emphasis=None, color_map=None):
+def build_dialogue_text(lines, emphasis=None, color_map=None, reset_color=None):
     """lines(行配列)からDialogue Textを組み立てる。
 
     color_map（joined文字列と同じ長さのリスト。各要素はBGRカラー文字列 or None）を
     明示指定した場合はそれを使う（自動アクセント抽出用）。未指定時は従来どおり
     emphasis（手動指定の強調区間）から _compute_color_map で算出する。
+    reset_color（&HBBGGRR&）を渡すと、色付き span の直後に戻す `\\c` の値を上書きする
+    （F9: hint.color がセットされているときは白ではなく hint 色に戻す）。
     """
     joined = "".join(lines)
     color_at = color_map if color_map is not None else _compute_color_map(joined, emphasis)
@@ -171,7 +177,7 @@ def build_dialogue_text(lines, emphasis=None, color_map=None):
     cursor = 0
     for line in lines:
         segment_colors = color_at[cursor:cursor + len(line)]
-        rendered_lines.append(_render_with_color_map(line, segment_colors))
+        rendered_lines.append(_render_with_color_map(line, segment_colors, reset_color=reset_color))
         cursor += len(line)
     return "\\N".join(rendered_lines)
 
@@ -761,6 +767,7 @@ def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None
                 piece["out_start"], piece["out_end"], lines, emphasis, piece_style, color_map=color_map,
                 animation_enabled=animation_enabled,
                 font_px_override=piece.get("font_px_override"),
+                telop_style_hint=piece.get("telop_style_hint"),
             )
         )
     return "\n".join(lines_out) + "\n"
@@ -1019,7 +1026,7 @@ def _pop_override_block(duration_sec):
 
 
 def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base", color_map=None,
-                        animation_enabled=True, font_px_override=None):
+                        animation_enabled=True, font_px_override=None, telop_style_hint=None):
     style_name = "Big" if style == "big" else "Base"
     start = seconds_to_ass_time(out_start)
     end = seconds_to_ass_time(out_end)
@@ -1033,7 +1040,15 @@ def build_dialogue_line(out_start, out_end, lines, emphasis=None, style="base", 
     # そのcaptionだけフォントを縮小する(Style行は既定サイズ据え置き)。
     if font_px_override is not None:
         override = "{{\\fs{}}}".format(int(font_px_override)) + override
-    text = override + build_dialogue_text(lines, emphasis, color_map=color_map)
+    # F9: telop_style_hint（参考動画の position/color）を Dialogue の inline override へ焼き込む。
+    # 既存の pop override より前に置いて、\an/\c で位置と色を上書きする。
+    hint_prefix = build_hint_override_prefix(telop_style_hint) if telop_style_hint else None
+    if hint_prefix:
+        override = "{{{}}}".format(hint_prefix) + override
+    # F9 fix (codex-review P1): hint.color が指定されているときは、accent span の
+    # 直後の \c 戻し先を hint 色にする（デフォルト白リセットでは hint 色が破壊される）。
+    reset_color = _resolve_hint_color_bgr(telop_style_hint) if telop_style_hint else None
+    text = override + build_dialogue_text(lines, emphasis, color_map=color_map, reset_color=reset_color)
     return "Dialogue: 0,{},{},{},,0,0,0,,{}".format(start, end, style_name, text)
 
 
@@ -1052,6 +1067,7 @@ def generate_ass(telop_pieces, animation_enabled=True, telop_style=None):
                 piece["out_start"], piece["out_end"], piece["lines"], piece.get("emphasis"), piece.get("style", "base"),
                 animation_enabled=animation_enabled,
                 font_px_override=piece.get("font_px_override"),
+                telop_style_hint=piece.get("telop_style_hint"),
             )
         )
     return "\n".join(lines_out) + "\n"
@@ -1212,6 +1228,117 @@ def wrap_caption_kinsoku(text, max_chars=13, max_lines=2):
     return lines
 
 
+# ---------------------------------------------------------------------------
+# F9: telop_style_hint を ASS の描画属性へ写像する
+#
+# skeleton から plan.shots に載っている telop_style_hint（参考動画の
+# position/color/size_class/stroke/emphasis_words）を、Dialogue 行の inline
+# オーバライド（\pos/\c/\fs/\bord/\fscx-\fscy）に反映するためのヘルパー群。
+#
+# 監査 F9 の要点: 現行実装は telop_style_hint を validate では保持するが
+# subtitles では一切参照されていなかった。ここで
+# build_telop_pieces_from_shots に伝播→ generate_ass_with_style / generate_ass
+# で Dialogue 行に focused override として焼き込む。
+# ---------------------------------------------------------------------------
+
+# 参考spec の position 語 → ASS Alignment/MarginV の写像。
+# Alignment: 8=top-center, 5=middle-center(注: \an5 は 5番, ASSは 7=upperleft等),
+# 実装は \an8/\an5/\an2 を使う（\pos と併用時は Alignment 上書きになる）。
+_HINT_POSITION_ALIGNMENT = {
+    "top": 8,     # 上寄せ
+    "upper": 8,
+    "mid": 5,     # 中央
+    "middle": 5,
+    "center": 5,
+    "bottom": 2,  # 下寄せ（既定）
+    "lower": 2,
+}
+
+# 参考spec の color 語彙 → HEX（PrimaryColour）
+_HINT_COLOR_HEX = {
+    "white": "#FFFFFF",
+    "yellow": "#FFF04D",
+    "pink": "#FF6EA7",
+    "red": "#FF5555",
+    "black": "#111111",
+    "orange": "#FFA33A",
+    "green": "#7EE07E",
+    "blue": "#5EB0FF",
+    "cyan": "#54E7F2",
+}
+
+# size_class → font_px 倍率（基準 STYLE_BASE_FONTSIZE=76 に対する倍率）。
+_HINT_SIZE_SCALE = {
+    "small": 0.80,
+    "medium": 1.0,
+    "med": 1.0,
+    "large": 1.30,
+    "xl": 1.55,
+}
+
+
+def _resolve_hint_position(hint):
+    """telop_style_hint.position → (alignment_code:int, use_top_margin:bool)。
+
+    Alignment 2/5/8 で bottom/middle/top を指定。既定は None（=Base のまま）。
+    """
+    if not isinstance(hint, dict):
+        return None
+    pos = (hint.get("position") or "").strip().lower()
+    return _HINT_POSITION_ALIGNMENT.get(pos)
+
+
+def _resolve_hint_color_bgr(hint):
+    """telop_style_hint.color → &HBBGGRR& の PrimaryColour override。"""
+    if not isinstance(hint, dict):
+        return None
+    color = (hint.get("color") or "").strip().lower()
+    hex_c = _HINT_COLOR_HEX.get(color)
+    if not hex_c:
+        return None
+    try:
+        return hex_to_ass_bgr(hex_c)
+    except Exception:
+        return None
+
+
+def _resolve_hint_size_scale(hint):
+    """telop_style_hint.size_class → font_px 倍率 or None。"""
+    if not isinstance(hint, dict):
+        return None
+    sc = (hint.get("size_class") or "").strip().lower()
+    return _HINT_SIZE_SCALE.get(sc)
+
+
+def build_hint_override_prefix(hint, alignment_default=ALIGNMENT):
+    """telop_style_hint から Dialogue 行に前置する ASS override（`{\\anN\\cX\\fsN}`）を組み立てる。
+
+    None を返す場合は「hint 由来の上書きなし」（既定 Style がそのまま使われる）。
+    生成 override は Dialogue の `{}` オーバライドブロックの先頭に置き、続く既存
+    `{\\fad(...)\\fscxN\\fscyN\\t(...)}` などと連結して1つの override に統合する。
+
+    Returns: str（例 "\\an8\\c&H4DF0FF&\\fs99"）or None
+    """
+    if not isinstance(hint, dict):
+        return None
+    parts = []
+    align = _resolve_hint_position(hint)
+    if align is not None and align != alignment_default:
+        parts.append("\\an{}".format(int(align)))
+    color = _resolve_hint_color_bgr(hint)
+    if color is not None:
+        parts.append("\\c{}".format(color))
+    return "".join(parts) if parts else None
+
+
+def hint_font_px(hint, base_font_px):
+    """size_class を反映した font_px を返す（該当なしは base_font_px をそのまま）。"""
+    scale = _resolve_hint_size_scale(hint)
+    if not scale or scale <= 0:
+        return int(base_font_px)
+    return max(48, int(round(float(base_font_px) * float(scale))))
+
+
 def build_telop_pieces_from_shots(shots, hook_shot_id=None):
     """shots（各ショットにduration_sec/caption_jpを持つ）から、ショット表示区間に
     同期したtelop断片列を組み立てる。
@@ -1267,7 +1394,11 @@ def build_telop_pieces_from_shots(shots, hook_shot_id=None):
         # 載せ、build_dialogue_line で \fs<n> を Dialogue に前置する(Style行はいじらない)。
         is_big = shot.get("id") == (hook_shot_id or first_id)
         default_font_px = STYLE_BIG_FONTSIZE if is_big else STYLE_BASE_FONTSIZE
-        lines, effective_font_px = wrap_caption_by_width(caption, default_font_px)
+        # F9: telop_style_hint（参考動画の size_class）で基準フォントを先に補正してから
+        # 幅ベース折り返しをする（折り返しは実効フォントで決まるため hint 適用は必ず先）。
+        style_hint = shot.get("telop_style_hint") if isinstance(shot.get("telop_style_hint"), dict) else None
+        hinted_font_px = hint_font_px(style_hint, default_font_px)
+        lines, effective_font_px = wrap_caption_by_width(caption, hinted_font_px)
         if not lines:
             continue
         style = "big" if is_big else "base"
@@ -1277,6 +1408,10 @@ def build_telop_pieces_from_shots(shots, hook_shot_id=None):
         }
         if int(effective_font_px) != int(default_font_px):
             piece["font_px_override"] = int(effective_font_px)
+        # F9: piece に telop_style_hint をそのまま持たせる（generate_ass 系が Dialogue の
+        # override prefix に写像する。skeleton の努力を「描画に到達させる」ための配線）。
+        if style_hint:
+            piece["telop_style_hint"] = dict(style_hint)
         # "caption"は生のキャプション文字列（vertical_hookスタイルの縦書き組版で使う。
         # "lines"は横書き禁則改行済みの行配列で、既定スタイルはこちらを使い続ける）。
         pieces.append(piece)

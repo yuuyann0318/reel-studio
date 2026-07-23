@@ -398,11 +398,58 @@ def _clipitem_lines(clipitem_id, name, start_frames, end_frames, in_frame, out_f
     return lines
 
 
+_HINT_POSITION_TO_PREMIERE = {
+    "top": "top_safe",
+    "upper": "top_safe",
+    "mid": "center",
+    "middle": "center",
+    "center": "center",
+    "bottom": "bottom_safe",
+    "lower": "bottom_safe",
+}
+
+_HINT_COLOR_TO_HEX = {
+    "white": "#FFFFFF",
+    "yellow": "#FFF04D",
+    "pink": "#FF6EA7",
+    "red": "#FF5555",
+    "black": "#111111",
+    "orange": "#FFA33A",
+    "green": "#7EE07E",
+    "blue": "#5EB0FF",
+    "cyan": "#54E7F2",
+}
+
+_HINT_SIZE_TO_PX = {
+    "small": 48,
+    "medium": 60,
+    "med": 60,
+    "large": 78,
+    "xl": 92,
+}
+
+
+def _resolve_hint_for_xmeml(telop_style_hint, base_size, base_position):
+    """F9: telop_style_hint (参考動画由来 position/color/size_class) を xmeml パラメータへ写像する。
+
+    Returns: (size:int, position:str, color_hex:str|None)
+    """
+    if not isinstance(telop_style_hint, dict):
+        return (int(base_size), base_position, None)
+    pos = (telop_style_hint.get("position") or "").strip().lower()
+    color = (telop_style_hint.get("color") or "").strip().lower()
+    sc = (telop_style_hint.get("size_class") or "").strip().lower()
+    size = _HINT_SIZE_TO_PX.get(sc, int(base_size))
+    position = _HINT_POSITION_TO_PREMIERE.get(pos, base_position)
+    color_hex = _HINT_COLOR_TO_HEX.get(color)
+    return (int(size), position, color_hex)
+
+
 def _generatoritem_text_lines(gen_id, name, start_frames, end_frames, in_frame, out_frame,
                                  timebase, ntsc, text, wrapped_lines, depth,
                                  font=CAPTION_FONT_DEFAULT, size=CAPTION_FONT_SIZE_DEFAULT,
                                  align=CAPTION_ALIGN_DEFAULT, position=CAPTION_POSITION_DEFAULT,
-                                 label2=LABEL_V2):
+                                 label2=LABEL_V2, color_hex=None):
     """V2 テロップ用 `<generatoritem>` の行リスト。
 
     FCP7 XML の Text ジェネレータ表現。Premiere は取り込み時に汎用テキストクリップとして
@@ -456,6 +503,15 @@ def _generatoritem_text_lines(gen_id, name, start_frames, end_frames, in_frame, 
     lines.append(_ind(depth + 3) + "<name>Position</name>")
     lines.append(_ind(depth + 3) + "<value>{}</value>".format(_esc(position)))
     lines.append(_ind(depth + 2) + "</parameter>")
+    # F9: parameter: fontcolor（telop_style_hint.color → HEX で焼き込む。Premiere は
+    # 汎用 Text ジェネレータで <color> パラメータを厳密には解釈しないが、xmeml 上に
+    # 意図を残しておくことで .prtextstyle 側で色をあわせるヒントになる）。
+    if color_hex:
+        lines.append(_ind(depth + 2) + "<parameter>")
+        lines.append(_ind(depth + 3) + "<parameterid>fontcolor</parameterid>")
+        lines.append(_ind(depth + 3) + "<name>Font Color</name>")
+        lines.append(_ind(depth + 3) + "<value>{}</value>".format(_esc(color_hex)))
+        lines.append(_ind(depth + 2) + "</parameter>")
     lines.append(_ind(depth + 1) + "</effect>")
     lines.append(_ind(depth) + "</generatoritem>")
     return lines
@@ -930,11 +986,19 @@ def _build_v2_captions(enabled_shots, shot_display_durations, timebase, ntsc,
         gen_id = "gen-v2-{}".format(_deterministic_id("v2-gen", shot_id, caption_text))
         display_name = "TL{:02d}".format(i + 1)
 
+        # F9: telop_style_hint（参考動画の position/color/size_class）を xmeml の
+        # size/position/fontcolor パラメータへ写像する。hint が無いショットは既定値。
+        style_hint = shot.get("telop_style_hint") if isinstance(shot.get("telop_style_hint"), dict) else None
+        effective_size, effective_position, color_hex = _resolve_hint_for_xmeml(
+            style_hint, CAPTION_FONT_SIZE_DEFAULT, position,
+        )
+
         clip_lines_list.append(
             _generatoritem_text_lines(
                 gen_id, display_name, start_frames, end_frames, 0, dur_frames,
                 timebase, ntsc, caption_text, wrapped, depth + 1,
-                font=font, align=align, position=position,
+                font=font, size=effective_size, align=align, position=effective_position,
+                color_hex=color_hex,
             )
         )
         caption_pieces.append({

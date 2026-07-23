@@ -373,7 +373,8 @@ def _emit_premiere_package_from_cli(run_dir, plan, shot_display_durations, edit_
 
 
 def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default",
-                  reference_url=None, reference_file=None, premiere_export=False):
+                  reference_url=None, reference_file=None, premiere_export=False,
+                  match_reference_duration=False):
     report = {
         "theme": theme,
         "target_duration_sec": target_duration_sec,
@@ -433,6 +434,15 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 report["stages"]["reference"]["duration_sec"] = (
                     reference_spec or {}
                 ).get("duration_sec")
+                # F11: --match-reference-duration が指定されていれば target を参考尺に強制一致。
+                # config.target_duration_match_reference (config.local からの上書き) でも同じ扱い。
+                match_flag = bool(match_reference_duration) or bool((cfg or {}).get("target_duration_match_reference"))
+                if match_flag:
+                    spec_duration = (reference_spec or {}).get("duration_sec")
+                    if isinstance(spec_duration, (int, float)) and spec_duration > 0:
+                        target_duration_sec = float(spec_duration)
+                        report["target_duration_sec"] = target_duration_sec
+                        report["stages"]["reference"]["match_reference_duration"] = True
         except Exception:
             _write_report(report)
             return report
@@ -778,6 +788,25 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
         _write_report(report)
         return report
 
+    # --- Stage 9: fidelity (F13: 参考動画TTPの再現度指標) ---
+    # reference_spec があるときのみ実行。生成 plan と参考spec を突き合わせて 5指標を
+    # 出し、output/<run_id>/fidelity.json に保存する（機械可読・以降の改善が
+    # 定量的に測れる状態を作る）。
+    if reference_spec is not None:
+        try:
+            with _timed_stage(report, "fidelity"):
+                from qa.fidelity import compute_fidelity
+                fid = compute_fidelity(reference_spec, plan)
+                (run_dir / "fidelity.json").write_text(
+                    json.dumps(fid, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                report["fidelity"] = fid["summary"]
+                report["stages"]["fidelity"]["ok"] = True
+        except Exception as exc:
+            # fidelity は補助指標。失敗しても本体成功を潰さない。
+            report["stages"].setdefault("fidelity", {})["ok"] = False
+            report["stages"]["fidelity"]["error"] = str(exc)[:300]
+
     report["ok"] = all(v.get("ok", False) for v in report["stages"].values())
     _write_report(report)
     return report
@@ -806,8 +835,14 @@ def main(argv=None) -> int:
     parser.add_argument("--aspect", default="9:16", choices=["9:16"], help="現状9:16のみ対応")
     parser.add_argument("--no-llm", action="store_true", help="claude CLIを使わず決定論的テンプレートで企画生成する")
     parser.add_argument(
-        "--quality", default=None, choices=["supreme", "single"],
-        help="AIディレクターの生成品質。supreme=3段多段生成(既定) / single=従来の一発出し。未指定はconfig.jsonのdirector_quality",
+        "--quality", default=None, choices=["supreme", "single", "supreme_plus"],
+        help="AIディレクターの生成品質。supreme=write+polish(既定) / single=一発出し / "
+             "supreme_plus=write+polish+rewrite の3段(F12: 品質最優先。config.local/quality_max.json と併用)",
+    )
+    parser.add_argument(
+        "--match-reference-duration", action="store_true",
+        help="F11: target_duration_sec を参考動画の実尺(reference.duration_sec)に強制一致させる。"
+             "指定時は --duration より優先。参考のリズム(高速カット/長回し)をそのまま保つのに使う",
     )
     parser.add_argument(
         "--style", default="default", choices=["default", "vertical_hook"],
@@ -849,6 +884,7 @@ def main(argv=None) -> int:
             args.theme, target_duration_sec, backend_name, args.no_llm, cfg, quality=quality, style=args.style,
             reference_url=args.reference_url, reference_file=args.reference_file,
             premiere_export=args.premiere_export,
+            match_reference_duration=args.match_reference_duration,
         )
     except director.TTPReferenceRequiredError:
         _emit_reference_required_error(args.theme)
