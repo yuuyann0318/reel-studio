@@ -187,7 +187,12 @@ def test_run_director_rejects_verbatim_overlap_in_caption_jp(monkeypatch):
             shot = dict(s)
             shot["visual_prompt"] = "abstract test bg"
             shot["motion_preset"] = "static"
-            shot["caption_jp"] = text[:40]
+            # R3: caption_jp はスケルトンで caption_in_offset_sec が付いている shot だけに
+            # 入れる（それ以外は空文字）。telop 数の骨検査を通過させるための整合。
+            if "caption_in_offset_sec" in s:
+                shot["caption_jp"] = text[:40]
+            else:
+                shot["caption_jp"] = ""
             shot["narration_jp"] = text
             shots.append(shot)
         return {

@@ -27,7 +27,12 @@ def _plan_from_skeleton(skeleton, narration_text="オリジナルテスト用ナ
         shot = dict(s)
         shot["visual_prompt"] = "abstract test bg for {}".format(s["id"])
         shot["motion_preset"] = "static"
-        shot["caption_jp"] = "テスト{}".format(s["id"])
+        # R3: caption_jp はスケルトンで caption_in_offset_sec が付いている shot のみ
+        # （telop 数の骨検査を通過させる）。
+        if "caption_in_offset_sec" in s:
+            shot["caption_jp"] = "テスト{}".format(s["id"])
+        else:
+            shot["caption_jp"] = ""
         shot["narration_jp"] = narration_text
         shots.append(shot)
     return {

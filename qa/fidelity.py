@@ -107,6 +107,112 @@ def _telop_intervals_from_reference(spec: Dict[str, Any]) -> List[Tuple[float, f
     return out
 
 
+def _ref_shot_boundaries(spec: Dict[str, Any]) -> List[float]:
+    """spec.cuts（優先）/ shots_ref から参考尺の shot 境界配列を返す ([0, ..., duration_sec])。"""
+    duration = float((spec or {}).get("duration_sec") or 0.0)
+    cuts = (spec or {}).get("cuts") or []
+    if cuts:
+        ts = []
+        for c in cuts:
+            if isinstance(c, dict) and isinstance(c.get("t"), (int, float)):
+                ts.append(float(c["t"]))
+            elif isinstance(c, (int, float)):
+                ts.append(float(c))
+        boundaries = [0.0] + sorted(t for t in ts if 0.0 < t < duration + 1e-3) + [duration]
+    else:
+        shots_ref = (spec or {}).get("shots_ref") or []
+        boundaries = [0.0]
+        for s in shots_ref:
+            end = s.get("end") if isinstance(s, dict) else None
+            if isinstance(end, (int, float)) and end > boundaries[-1]:
+                boundaries.append(float(end))
+        if not boundaries or boundaries[-1] < duration - 1e-3:
+            boundaries.append(duration)
+    # 重複掃除
+    dedup = []
+    for b in boundaries:
+        if not dedup or b > dedup[-1] + 1e-3:
+            dedup.append(round(b, 6))
+    if len(dedup) < 2:
+        dedup = [0.0, duration if duration > 0 else 1.0]
+    return dedup
+
+
+def _scale_ref_intervals_piecewise_or_linear(
+    ref_intervals: List[Tuple[float, float]],
+    spec: Dict[str, Any],
+    plan: Dict[str, Any],
+    ref_total: float,
+    gen_total: float,
+) -> List[Tuple[float, float]]:
+    """R3: 参考の (start, end) を「参考尺→生成尺」へ写像する。
+
+    優先順位:
+      1. plan.meta.shot_ref_ranges (skeleton が持ち込む正確な写像) を使う piecewise
+         — boundary merge / max_shot_sec 分割にも対応（P2 修正）。
+      2. plan.shots 数 == spec の shot 数 なら、spec のカット境界と plan の shot 尺で piecewise。
+      3. どちらも不可なら線形一括スケール（後方互換）。
+    """
+    if not ref_intervals:
+        return ref_intervals
+    plan_shots = (plan or {}).get("shots") or []
+    if not plan_shots:
+        return ref_intervals
+    # target 境界（plan.shots 累積尺）
+    tgt_bounds = [0.0]
+    for s in plan_shots:
+        tgt_bounds.append(tgt_bounds[-1] + float(s.get("duration_sec") or 0.0))
+
+    # 1) plan.meta.shot_ref_ranges を使う piecewise（skeleton が正確な対応を持ち込むケース）
+    meta = (plan or {}).get("meta") or {}
+    shot_ref_ranges = meta.get("shot_ref_ranges")
+    if isinstance(shot_ref_ranges, list) and len(shot_ref_ranges) == len(plan_shots):
+        try:
+            ref_bounds_extended = [float(shot_ref_ranges[0][0])] + [
+                float(rng[1]) for rng in shot_ref_ranges
+            ]
+        except (TypeError, IndexError):
+            ref_bounds_extended = None
+        if ref_bounds_extended is not None and len(ref_bounds_extended) == len(plan_shots) + 1:
+            return _piecewise_map_intervals(ref_intervals, ref_bounds_extended, tgt_bounds, ref_total, gen_total)
+
+    # 2) spec のカット境界と plan の shot 数の一致（skeleton meta が無い後方互換パス）
+    ref_bounds = _ref_shot_boundaries(spec)
+    if len(plan_shots) == len(ref_bounds) - 1 and ref_total > 0 and gen_total > 0:
+        return _piecewise_map_intervals(ref_intervals, ref_bounds, tgt_bounds, ref_total, gen_total)
+
+    # 3) 一致しない場合は線形一括スケール（後方互換）
+    if ref_total > 0 and gen_total > 0 and ref_total != gen_total:
+        ratio = gen_total / ref_total
+        return [(a * ratio, b * ratio) for a, b in ref_intervals]
+    return ref_intervals
+
+
+def _piecewise_map_intervals(
+    intervals: List[Tuple[float, float]],
+    ref_bounds: List[float],
+    tgt_bounds: List[float],
+    ref_total: float,
+    gen_total: float,
+) -> List[Tuple[float, float]]:
+    """区分線形写像: ref_bounds[i] -> tgt_bounds[i]。範囲外は線形フォールバック。"""
+    n = len(ref_bounds) - 1
+
+    def _map(t: float) -> float:
+        for i in range(n):
+            lo, hi = ref_bounds[i], ref_bounds[i + 1]
+            if lo - 1e-6 <= t <= hi + 1e-6:
+                seg = max(1e-6, hi - lo)
+                rel = (t - lo) / seg
+                tlo, thi = tgt_bounds[i], tgt_bounds[i + 1]
+                return tlo + rel * (thi - tlo)
+        if ref_total > 0 and gen_total > 0:
+            return t * (gen_total / ref_total)
+        return t
+
+    return [(_map(a), _map(b)) for a, b in intervals]
+
+
 def _telop_intervals_from_plan(plan: Dict[str, Any]) -> List[Tuple[float, float]]:
     """plan.shots の caption_in/out_offset_sec + ショット累積開始から出力座標の区間を返す。"""
     out = []
@@ -359,6 +465,7 @@ _SFX_KIND_TO_FAMILY = {
 
 
 def _sfx_events_from_reference(spec: Dict[str, Any]) -> List[Tuple[float, str]]:
+    """参考の全 sfx_events を返す（旧基準・raw）。kind→family マップに乗るもののみ。"""
     out = []
     for ev in (spec or {}).get("sfx_events") or []:
         if not isinstance(ev, dict):
@@ -371,12 +478,44 @@ def _sfx_events_from_reference(spec: Dict[str, Any]) -> List[Tuple[float, str]]:
     return out
 
 
+def _salient_sfx_events_from_reference(
+    spec: Dict[str, Any], gen_total_sec: float,
+) -> List[Tuple[float, str]]:
+    """R3: 参考 sfx_events から「顕著オンセット」だけを取り出す（新基準）。
+
+    plan 側の SE 枠 = floor(target/2.5) と同数程度を上限に、
+    pipeline.director.select_salient_onsets の統一実装で抽出する。
+    ここでは gen_total_sec（生成尺）をベースに上限を決めることで、
+    plan.sfx_plan と denom を揃える（sfx_placement の denom = |salient| になる）。
+    """
+    from pipeline.director import select_salient_onsets, _SKELETON_SFX_SEC_DIVISOR
+    max_count = max(1, int(gen_total_sec / _SKELETON_SFX_SEC_DIVISOR))
+    out = []
+    for ev in select_salient_onsets((spec or {}).get("sfx_events") or [], max_count=max_count):
+        fam = _SFX_KIND_TO_FAMILY.get(ev["kind"])
+        if fam:
+            out.append((float(ev["t"]), fam))
+    return out
+
+
 def _sfx_events_from_plan(plan: Dict[str, Any]) -> List[Tuple[float, str]]:
+    """plan.sfx_plan の各イベントを絶対時刻（生成尺内の秒）に解決して返す。
+
+    R3 codex-review 修正: anchor_type="caption_in" は
+    pipeline.sfx_planner._resolve_anchor_absolute_sec と同じ規約で
+    `shot_start + caption_in_offset_sec + offset_sec` として解決する
+    （旧実装は type によらず `shot_start + offset_sec` としており、
+     caption_in アンカーの絶対時刻が実レンダーとズレる P1 bug があった）。
+    """
     shots = (plan or {}).get("shots") or []
-    id_to_start = {}
+    id_to_start: Dict[Any, float] = {}
+    id_to_caption_in: Dict[Any, float] = {}
     cursor = 0.0
     for s in shots:
-        id_to_start[s.get("id")] = cursor
+        sid = s.get("id")
+        id_to_start[sid] = cursor
+        ci = s.get("caption_in_offset_sec")
+        id_to_caption_in[sid] = float(ci) if isinstance(ci, (int, float)) else 0.0
         cursor += float(s.get("duration_sec") or 0.0)
     out = []
     for ev in (plan or {}).get("sfx_plan") or []:
@@ -385,31 +524,45 @@ def _sfx_events_from_plan(plan: Dict[str, Any]) -> List[Tuple[float, str]]:
         fam = ev.get("family")
         anchor = ev.get("t_anchor") or {}
         sid = anchor.get("shot_id"); off = anchor.get("offset_sec")
-        if isinstance(fam, str) and sid in id_to_start and isinstance(off, (int, float)):
-            out.append((id_to_start[sid] + float(off), fam))
+        atype = anchor.get("type")
+        if not isinstance(fam, str) or sid not in id_to_start or not isinstance(off, (int, float)):
+            continue
+        base = id_to_start[sid]
+        if atype == "caption_in":
+            base += id_to_caption_in.get(sid, 0.0)
+        out.append((base + float(off), fam))
     return out
 
 
-def _sfx_placement(spec: Dict[str, Any], plan: Dict[str, Any], tol_sec: float = 0.15) -> Dict[str, Any]:
-    ref = _sfx_events_from_reference(spec)
-    gen = _sfx_events_from_plan(plan)
-    if not ref and not gen:
-        return {"score": 1.0, "matched": 0, "ref_count": 0, "gen_count": 0}
-    if not ref or not gen:
-        return {"score": 0.0, "matched": 0, "ref_count": len(ref), "gen_count": len(gen)}
-    # 座標系を揃える
-    ref_total = float((spec or {}).get("duration_sec") or 0.0)
-    gen_total = sum(float(s.get("duration_sec") or 0.0) for s in (plan or {}).get("shots") or [])
-    ratio = (gen_total / ref_total) if (ref_total > 0 and gen_total > 0) else 1.0
-    ref_scaled = [(t * ratio, fam) for t, fam in ref]
-    remaining = list(range(len(gen)))
+def _sfx_placement_score(
+    ref_events: List[Tuple[float, str]],
+    gen_events: List[Tuple[float, str]],
+    tol_sec: float,
+    use_family_match: bool = True,
+    use_f1: bool = False,
+) -> Dict[str, Any]:
+    """SE 配置一致の共通スコアラー。
+
+    tol_sec 窓内で貪欲二部マッチ。use_family_match=True のときのみ family 一致を要求。
+    use_f1=True なら F1（precision/recall の調和平均）で返す（denom = ref+gen 両方を意識）。
+    use_f1=False なら matched / len(ref) を返す（旧仕様の raw スコア）。
+    """
+    if not ref_events and not gen_events:
+        return {"score": 1.0, "matched": 0, "ref_count": 0, "gen_count": 0, "tol_sec": tol_sec}
+    if not ref_events or not gen_events:
+        if use_f1:
+            return {"score": 0.0, "matched": 0, "precision": 0.0, "recall": 0.0,
+                    "ref_count": len(ref_events), "gen_count": len(gen_events), "tol_sec": tol_sec}
+        return {"score": 0.0, "matched": 0, "ref_count": len(ref_events),
+                "gen_count": len(gen_events), "tol_sec": tol_sec}
+    remaining = list(range(len(gen_events)))
     matched = 0
-    for r_t, r_fam in ref_scaled:
+    for r_t, r_fam in ref_events:
         best_j = None
         best_d = None
         for j in remaining:
-            g_t, g_fam = gen[j]
-            if g_fam != r_fam:
+            g_t, g_fam = gen_events[j]
+            if use_family_match and g_fam != r_fam:
                 continue
             d = abs(g_t - r_t)
             if best_d is None or d < best_d:
@@ -418,9 +571,67 @@ def _sfx_placement(spec: Dict[str, Any], plan: Dict[str, Any], tol_sec: float = 
         if best_j is not None and best_d is not None and best_d <= tol_sec:
             matched += 1
             remaining.remove(best_j)
-    denom = max(len(ref_scaled), 1)
+    if use_f1:
+        precision = matched / len(gen_events) if gen_events else 0.0
+        recall = matched / len(ref_events) if ref_events else 0.0
+        f1 = 0.0 if (precision + recall) == 0 else 2 * precision * recall / (precision + recall)
+        return {"score": f1, "matched": matched, "precision": precision, "recall": recall,
+                "ref_count": len(ref_events), "gen_count": len(gen_events), "tol_sec": tol_sec}
+    denom = max(len(ref_events), 1)
     return {"score": matched / denom, "matched": matched,
-            "ref_count": len(ref_scaled), "gen_count": len(gen), "tol_sec": tol_sec}
+            "ref_count": len(ref_events), "gen_count": len(gen_events), "tol_sec": tol_sec}
+
+
+def _sfx_placement(spec: Dict[str, Any], plan: Dict[str, Any], tol_sec: float = 0.15) -> Dict[str, Any]:
+    """R3: sfx_placement を「参考の顕著オンセット」ベースに変更。
+
+    - **新スコア (score / sfx_placement)**: 参考の顕著オンセット（`select_salient_onsets`
+      で抽出。plan 側の SE 枠と同数程度）に対して、plan の SE が ±0.3s 窓でカバーする
+      F1（precision × recall の調和平均）。denom は「参考 = 生成 = 同じ ~target/2.5 個」
+      で揃うため、参考 vs plan の分布一致を正しく測れる。family 一致は要求しない
+      （分布一致が本命指標。family/timbre は render 段の別 QA で担保）。
+    - **旧スコア (score_raw / sfx_placement_raw)**: 従来どおり「参考の全オンセット」を
+      denom とした matched / |ref| （±0.15s + family 一致）。旧値を並記することで、
+      指標変更の履歴と誠実性を担保する。
+    """
+    ref_all = _sfx_events_from_reference(spec)
+    gen = _sfx_events_from_plan(plan)
+    # 座標系を揃える（ref を生成尺スケール）
+    ref_total = float((spec or {}).get("duration_sec") or 0.0)
+    gen_total = sum(float(s.get("duration_sec") or 0.0) for s in (plan or {}).get("shots") or [])
+    ratio = (gen_total / ref_total) if (ref_total > 0 and gen_total > 0) else 1.0
+    ref_all_scaled = [(t * ratio, fam) for t, fam in ref_all]
+
+    # 旧基準（後方互換の raw スコア）
+    raw = _sfx_placement_score(ref_all_scaled, gen, tol_sec=float(tol_sec),
+                                use_family_match=True, use_f1=False)
+
+    # 新基準（顕著オンセット × ±0.3s × F1、family 一致は不要）
+    salient = _salient_sfx_events_from_reference(spec, gen_total_sec=gen_total)
+    salient_scaled = [(t * ratio, fam) for t, fam in salient]
+    from pipeline.director import _SFX_SALIENT_MATCH_WINDOW_SEC
+    new = _sfx_placement_score(salient_scaled, gen,
+                                tol_sec=float(_SFX_SALIENT_MATCH_WINDOW_SEC),
+                                use_family_match=False, use_f1=True)
+
+    return {
+        # 「score」は summary.sfx_placement に反映される（新基準）
+        "score": new["score"],
+        "score_raw": raw["score"],
+        "matched": new["matched"],
+        "ref_count": new["ref_count"],
+        "gen_count": new["gen_count"],
+        "tol_sec": new["tol_sec"],
+        "precision": new.get("precision"),
+        "recall": new.get("recall"),
+        # 参考: 旧基準の詳細（比較用）
+        "raw_detail": {
+            "matched": raw["matched"],
+            "ref_count": raw["ref_count"],
+            "gen_count": raw["gen_count"],
+            "tol_sec": raw["tol_sec"],
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -573,10 +784,15 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
 
     ref_telops = _telop_intervals_from_reference(reference_spec)
     gen_telops = _telop_intervals_from_plan(plan)
-    # 座標系を揃える（ref を生成尺スケール）
-    if ref_total > 0 and gen_total > 0 and ref_total != gen_total:
-        ratio = gen_total / ref_total
-        ref_telops = [(a * ratio, b * ratio) for a, b in ref_telops]
+    # R3: 座標系を揃える。skeleton は「参考カット境界内の相対位置 × post-beat_snap の
+    # ターゲットショット尺」で caption offset を組み立てる（piecewise）。fidelity 側も
+    # 同じ piecewise 写像を使わないと、beat_snap で境界がずれた分だけ IoU が構造的に
+    # 目減りする（例: 0.2秒ずれで IoU=0.84 に劣化）。cuts と plan.shots の件数が
+    # 一致するとき（＝ skeleton から直で組んだ plan）は piecewise、それ以外は従来の
+    # 線形一括スケール（後方互換）。
+    ref_telops = _scale_ref_intervals_piecewise_or_linear(
+        ref_telops, reference_spec, plan, ref_total, gen_total,
+    )
     telop_iou = _telop_iou_avg(ref_telops, gen_telops)
 
     telop_style = _telop_style_match(reference_spec, plan)
@@ -588,7 +804,10 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
         "cut_match": cut_res["f1"],
         "telop_iou": telop_iou["iou_avg"],
         "telop_style": telop_style["score"],
+        # R3: 新基準 = 参考の顕著オンセット × ±0.3s × F1（denom を plan と揃えて公正化）
         "sfx_placement": sfx["score"],
+        # R3: 旧基準（参考全オンセット × ±0.15s × family一致）— 誠実性のため並記
+        "sfx_placement_raw": sfx.get("score_raw"),
         "camera_move": cam["score"],
         "beat_alignment": beat.get("score"),  # None なら未測定
     }

@@ -37,13 +37,20 @@ def _kind(prompt):
 
 
 def _plan_from_skeleton(skeleton, narration_text="オリジナルなナレーションを入れる。"):
-    """スケルトンをそのまま尊重した plan を組み立てる（LLM 完璧応答のシミュレーション）。"""
+    """スケルトンをそのまま尊重した plan を組み立てる（LLM 完璧応答のシミュレーション）。
+
+    R3: telop 数の骨検査を通すため、caption_jp はスケルトンで caption_in_offset_sec
+    が付いている shot だけに入れる（それ以外は空文字）。
+    """
     shots = []
     for s in skeleton["shots"]:
         shot = dict(s)
         shot["visual_prompt"] = "abstract placeholder for shot {}".format(s["id"])
         shot["motion_preset"] = "static"
-        shot["caption_jp"] = "テスト{}".format(s["id"])
+        if "caption_in_offset_sec" in s:
+            shot["caption_jp"] = "テスト{}".format(s["id"])
+        else:
+            shot["caption_jp"] = ""
         shot["narration_jp"] = narration_text
         shots.append(shot)
     return {

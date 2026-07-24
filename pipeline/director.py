@@ -87,6 +87,27 @@ _SFX_KIND_TO_FAMILY = {
     # "other" は除外
 }
 
+# R3: 顕著オンセット抽出用の kind 重み（transition/impact/riser を pop/shimmer より優先）。
+# 参考動画の「重要な音」だけを選ぶ基準として、confidence * SALIENT_KIND_WEIGHT を用いる。
+_SALIENT_KIND_WEIGHT = {
+    "transition": 1.4,
+    "impact": 1.2,
+    "riser": 1.1,
+    "pop": 0.7,
+    "shimmer": 0.5,
+}
+
+# R3: 近接オンセットのクラスタ統合ギャップ（秒）。この間隔内に連続するオンセットは
+# 1クラスタとみなし、代表1個（最大重み）に統合する。
+_SALIENT_CLUSTER_GAP_SEC = 0.4
+
+# R3: sfx_plan と参考オンセットの分布一致判定に使う目標時刻の許容差（秒）。
+# アンカー（cut/caption_in）候補との差がこれ以下なら該当アンカーを採用する。
+_SFX_ANCHOR_SNAP_SEC = 0.15
+
+# R3: 参考顕著オンセット±ANCHOR_MATCH_WINDOW_SEC を「一致」とみなす窓（qa/fidelity 側）
+_SFX_SALIENT_MATCH_WINDOW_SEC = 0.3
+
 # 15字以上の連続一致検出(丸写し検査)の閾値
 _VERBATIM_OVERLAP_MIN_LEN = 15
 
@@ -390,70 +411,193 @@ def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_dur
     return out
 
 
-def _thin_sfx_events_for_shots(sfx_events, boundaries, shot_ids, scaled_durations, ref_duration, target_duration_sec, telops):
-    """spec.sfx_events を confidence 降順で間引いて sfx_plan へ写像する。
+def select_salient_onsets(sfx_events, max_count,
+                           cluster_gap_sec=_SALIENT_CLUSTER_GAP_SEC,
+                           kind_weight=None):
+    """R3: 参考の sfx_events から「顕著オンセット」だけを選ぶ純関数。
 
-    - 1 shot あたり最大 _SKELETON_MAX_SFX_PER_SHOT 発
-    - 全体で target_duration_sec / _SKELETON_SFX_SEC_DIVISOR 発を上限
-    - kind→family マッピング（"other" は除外）
-    - anchor: 元の anchor が "cut" なら "cut"、
-             telop の start ±0.3s に近い場合は "caption_in"、
-             それ以外は "shot_start"
+    「顕著」の3基準:
+      1. kind 優先度（transition/impact/riser > pop > shimmer。_SALIENT_KIND_WEIGHT）
+      2. confidence（強いほど採用されやすい。weight = confidence * kind_weight[kind]）
+      3. 時間的分離（`cluster_gap_sec` 内の連続オンセットは1クラスタに統合し、
+         クラスタ内で weight が最大のものだけを代表として残す）
+
+    抽出は「クラスタ代表→ weight 降順→上位 `max_count` を取る」の順で行い、
+    最終的に t 昇順で返す（kind 未マップ / kind=other は除外）。
+
+    Args:
+        sfx_events: reference_spec v2 の sfx_events（各要素 dict）
+        max_count: 抽出上限（>=1）。1未満は 1 に丸める。
+        cluster_gap_sec: クラスタ判定の隣接オンセットギャップ（秒）。
+        kind_weight: kind ごとの重み dict。省略時は _SALIENT_KIND_WEIGHT。
+
+    Returns:
+        List[dict]。各要素 {"t": float, "kind": str, "confidence": float, "weight": float}。
+        t 昇順。sfx_events が空 / 全て無効なら空リスト。
+
+    サブ意図: この関数は qa/fidelity.py と director.build_shot_skeleton の両方から
+    呼ばれる（メトリクスの denom と plan の SE 選定を同じ集合で揃えるため）。
+    """
+    if not sfx_events:
+        return []
+    if not isinstance(max_count, int) or max_count < 1:
+        max_count = max(1, int(max_count or 1))
+    weight_map = dict(_SALIENT_KIND_WEIGHT if kind_weight is None else kind_weight)
+
+    # 1. 有効なイベント（kind マップあり・t 数値）だけ拾い、weight を計算
+    filtered = []
+    for ev in sfx_events:
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("kind")
+        if kind not in _SFX_KIND_TO_FAMILY:
+            continue  # "other" 等はここで除外
+        t = ev.get("t")
+        if not isinstance(t, (int, float)):
+            continue
+        conf = float(ev.get("confidence") or 0.0)
+        w = float(weight_map.get(kind, 0.6)) * max(0.0, conf)
+        if w <= 0:
+            continue
+        filtered.append({"t": float(t), "kind": kind, "confidence": conf, "weight": w})
+    if not filtered:
+        return []
+
+    # 2. t 昇順で走査して「隣接ギャップ < cluster_gap_sec」ならクラスタに追加、
+    #    そうでなければ新クラスタを開始。各クラスタから weight 最大の代表 1 個を選ぶ。
+    filtered.sort(key=lambda e: e["t"])
+    clusters = []
+    current = [filtered[0]]
+    for ev in filtered[1:]:
+        if ev["t"] - current[-1]["t"] < float(cluster_gap_sec):
+            current.append(ev)
+        else:
+            clusters.append(current)
+            current = [ev]
+    clusters.append(current)
+
+    representatives = []
+    for cl in clusters:
+        # weight 最大。同点は kind 優先度で決着（transition > impact > riser > pop > shimmer）
+        pri = {"transition": 0, "impact": 1, "riser": 2, "pop": 3, "shimmer": 4}
+        cl_sorted = sorted(cl, key=lambda e: (-e["weight"], pri.get(e["kind"], 9), e["t"]))
+        representatives.append(cl_sorted[0])
+
+    # 3. representatives を weight 降順で上位 max_count 個
+    representatives.sort(key=lambda e: (-e["weight"], e["t"]))
+    picked = representatives[: int(max_count)]
+
+    # 4. t 昇順で返す
+    picked.sort(key=lambda e: e["t"])
+    return picked
+
+
+def _sfx_plan_from_salient_onsets(
+    sfx_events, boundaries, shot_ids, scaled_durations,
+    ref_duration, target_duration_sec, telops,
+    telop_map=None,
+):
+    """R3: 顕著オンセットの実時刻をアンカーにして sfx_plan を組み立てる。
+
+    旧 `_thin_sfx_events_for_shots` の「カット同期・confidence 降順で per-shot 制約」
+    から、「顕著オンセット（参考の重要な音のみ）を参考時刻に忠実配置」へ差し替え。
+
+    手順:
+      1. `select_salient_onsets` で参考時間座標の顕著オンセットを最大 floor(target/2.5) 個抽出。
+      2. 各オンセット t_ref を参考区間→ターゲット区間（scaled_durations）へ piecewise 線形写像。
+         → post-beat_snap の target_shot_start を基準に t_target を算出（beat_snap との整合）。
+      3. アンカー選定は「t_target に最も近いアンカー候補」で:
+         - shot 境界（cut）: |t_target - target_shot_start[i]| <= _SFX_ANCHOR_SNAP_SEC
+         - caption_in: shot に caption_in_offset_sec があり |t_target - caption_in_time| が
+           shot_start より近く 0.3s 以内
+         - それ以外: shot_start
+      4. 1 shot あたり最大 _SKELETON_MAX_SFX_PER_SHOT 発の per-shot 上限を維持。
+
+    family は各オンセットの kind から `_SFX_KIND_TO_FAMILY` で決定（旧実装と同じ）。
     """
     if not sfx_events or not shot_ids:
         return []
     global_limit = max(1, int(math.floor(target_duration_sec / _SKELETON_SFX_SEC_DIVISOR)))
-    # confidence 降順に整列（同 confidence なら kind の優先順で: transition/impact/riser/pop/shimmer）
-    kind_pri = {"transition": 0, "impact": 1, "riser": 2, "pop": 3, "shimmer": 4}
-    events_sorted = sorted(
-        [e for e in sfx_events if isinstance(e, dict)],
-        key=lambda e: (-float(e.get("confidence") or 0.0), kind_pri.get(e.get("kind"), 9), float(e.get("t") or 0.0)),
-    )
 
-    # telop start ±0.3s の窓（参考尺座標）
-    telop_starts = []
-    for tel in telops or []:
-        if isinstance(tel, dict) and isinstance(tel.get("start"), (int, float)):
-            telop_starts.append(float(tel["start"]))
+    # target 空間の shot_start（beat_snap 済みの scaled_durations を積算）
+    target_starts = [0.0]
+    for d in scaled_durations:
+        target_starts.append(target_starts[-1] + float(d))
+
+    # 参考尺→target 尺の piecewise 写像（後で telop も同関数で写像する）
+    def _ref_to_target(t_ref):
+        tf = max(0.0, float(t_ref))
+        n = len(shot_ids)
+        for i in range(n):
+            lo = boundaries[i]
+            hi = boundaries[i + 1]
+            if lo - 1e-6 <= tf < hi - 1e-6 or i == n - 1:
+                seg_len = max(1e-3, hi - lo)
+                rel = max(0.0, min(1.0, (tf - lo) / seg_len))
+                return i, target_starts[i] + rel * float(scaled_durations[i])
+        # 末尾超過（実質到達しないはず）
+        return n - 1, target_starts[-1]
+
+    # R3 codex-review 修正: caption_in アンカー候補は「実際に skeleton の shot に採用された
+    # caption_in_offset_sec のある shot」のみに限定する。参考 telop は複数あっても
+    # `_map_telops_to_shots` が同一shotの2枚目以降を捨てるため、捨てられた telop の start を
+    # アンカーに使うと render 段の caption_in 実座標（採用された1枚目基準）とズレる。
+    # (shot_index -> caption_in_time_target)
+    caption_in_by_shot: Dict[int, float] = {}
+    if telop_map:
+        for sid, info in telop_map.items():
+            if sid in shot_ids and isinstance(info, dict):
+                ci_off = info.get("caption_in_offset_sec")
+                if isinstance(ci_off, (int, float)):
+                    idx = shot_ids.index(sid)
+                    caption_in_by_shot[idx] = target_starts[idx] + float(ci_off)
+    else:
+        # 後方互換: telop_map が渡されない場合は参考 telop の start を全て候補にする（旧挙動）。
+        for tel in telops or []:
+            if isinstance(tel, dict) and isinstance(tel.get("start"), (int, float)):
+                idx, t_tg = _ref_to_target(tel["start"])
+                # 同じ shot に複数 telop があった場合、先頭を残す（skeleton 側の挙動と揃える）
+                caption_in_by_shot.setdefault(idx, t_tg)
+
+    salient = select_salient_onsets(sfx_events, max_count=global_limit)
 
     per_shot_count = {sid: 0 for sid in shot_ids}
     result = []
-    for ev in events_sorted:
-        if len(result) >= global_limit:
-            break
-        kind = ev.get("kind")
+    for ev in salient:
+        kind = ev["kind"]
         family = _SFX_KIND_TO_FAMILY.get(kind)
         if not family:
             continue
-        t = ev.get("t")
-        if not isinstance(t, (int, float)):
-            continue
-        tf = float(t)
-        shot_id = _resolve_shot_id_at_time(boundaries, shot_ids, tf)
-        if shot_id is None:
-            continue
+        i, t_target = _ref_to_target(ev["t"])
+        shot_id = shot_ids[i]
         if per_shot_count[shot_id] >= _SKELETON_MAX_SFX_PER_SHOT:
             continue
-        idx = shot_ids.index(shot_id)
-        seg_start = boundaries[idx]
-        seg_end = boundaries[idx + 1]
-        seg_len = max(1e-3, seg_end - seg_start)
-        rel = max(0.0, min(1.0, (tf - seg_start) / seg_len))
-        target_dur = scaled_durations[idx]
-        offset_sec = round(rel * target_dur, 3)
 
-        # anchor type 決定
+        shot_start = target_starts[i]
+        shot_dur = float(scaled_durations[i])
+        # アンカー候補: shot_start / caption_in / cut(=shot境界).
+        # cut は本質的に shot_start と同時刻なので、shot境界に極めて近い(<snap) 場合に "cut" を採用。
         anchor_type = "shot_start"
-        if ev.get("anchor") == "cut":
+        anchor_time = shot_start
+        # (a) shot 境界（cut）
+        dist_to_boundary = abs(t_target - shot_start)
+        if dist_to_boundary <= _SFX_ANCHOR_SNAP_SEC:
             anchor_type = "cut"
+            anchor_time = shot_start
         else:
-            # telop start ±0.3s(参考尺秒) に近ければ caption_in にする
-            for ts in telop_starts:
-                if abs(tf - ts) <= 0.3:
+            # (b) caption_in（この shot に採用された caption_in_offset_sec がある場合。
+            #     R3 codex-review 修正: 参考 telop の全 start ではなく、実際に skeleton に
+            #     採用された caption_in（telop_map の一枚目）だけを候補にする）
+            ci_time = caption_in_by_shot.get(i)
+            if ci_time is not None and ci_time <= t_target + 1e-6:
+                ci_dist = abs(t_target - ci_time)
+                if ci_dist <= 0.3 and ci_dist < dist_to_boundary:
                     anchor_type = "caption_in"
-                    break
-        # duration_sec のクランプ
-        offset_sec = max(0.0, min(offset_sec, target_dur))
+                    anchor_time = ci_time
+
+        offset_sec = max(0.0, min(t_target - anchor_time, shot_dur))
+        offset_sec = round(offset_sec, 3)
+
         result.append({
             "t_anchor": {"type": anchor_type, "shot_id": shot_id, "offset_sec": offset_sec},
             "family": family,
@@ -467,6 +611,10 @@ def _thin_sfx_events_for_shots(sfx_events, boundaries, shot_ids, scaled_duration
         return (idx, anc["offset_sec"])
     result.sort(key=_sort_key)
     return result
+
+
+# 後方互換の別名（旧関数名を参照するテスト/コードに備える）
+_thin_sfx_events_for_shots = _sfx_plan_from_salient_onsets
 
 
 def _split_long_shots(scaled_durations, max_shot_sec, min_shot_sec=_SKELETON_MIN_SHOT_SEC):
@@ -526,11 +674,23 @@ def _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids):
     return remapped
 
 
-def _remap_sfx_by_split(sfx_plan, shot_ids, new_shot_ids, split_map, new_durations):
+def _remap_sfx_by_split(sfx_plan, shot_ids, new_shot_ids, split_map, new_durations,
+                         old_telop_map=None, new_telop_map=None):
     """sfx_plan の t_anchor.shot_id / offset_sec を分割後の shot 群に写像する。
 
-    分割時、offset_sec は「旧 shot 内での位置」なので、それが新 shot 群の
-    どの断片に属するかを判定して、断片内相対 offset に付け替える。
+    R3 codex-review 修正: caption_in アンカーの offset は「caption 開始からの相対」で
+    あり、shot_start からの相対ではない。分割時にこれを混同すると、旧 shot 後半の
+    caption 付近のSEが分割後の先頭断片へ誤って移動して数秒早く鳴ってしまう。
+
+    そこで、まず anchor 型に応じて「旧 shot 内の絶対時刻（shot_start からの位置）」に
+    解決 → 分割後の断片位置を求める → 新 shot に対する anchor 型に応じた offset を計算する。
+
+    - anchor_type="cut" / "shot_start" → in_shot_pos = offset_sec
+    - anchor_type="caption_in"        → in_shot_pos = old_caption_in_off + offset_sec
+
+    分割後の新 shot でも、telop_map は分割群の先頭断片にだけ載る（_remap_telops_by_split）。
+    そのため caption_in を維持できるのは「新 shot が旧 shot の先頭断片」で telop が残る場合のみ。
+    それ以外は shot_start にフォールバックする（意味論的に一貫）。
     """
     if not sfx_plan:
         return []
@@ -546,22 +706,51 @@ def _remap_sfx_by_split(sfx_plan, shot_ids, new_shot_ids, split_map, new_duratio
         old_idx = old_id_to_idx[old_sid]
         group = split_map[old_idx] if old_idx < len(split_map) else [old_idx]
         offset = float(anc.get("offset_sec") or 0.0)
-        # 分割群内で offset が属する断片を判定
+        atype = anc.get("type") or "shot_start"
+
+        # ステップ1: 旧 shot 内の絶対位置（shot_start からの秒）を解決
+        if atype == "caption_in" and old_telop_map:
+            old_ci = 0.0
+            info = (old_telop_map or {}).get(old_sid)
+            if isinstance(info, dict) and isinstance(info.get("caption_in_offset_sec"), (int, float)):
+                old_ci = float(info["caption_in_offset_sec"])
+            in_shot_pos = old_ci + offset
+        else:
+            in_shot_pos = offset
+
+        # ステップ2: 分割群内で in_shot_pos が属する断片を判定
         cursor = 0.0
         target_new_idx = group[0]
-        target_offset = offset
+        target_pos_in_new_shot = in_shot_pos
         for j, new_idx in enumerate(group):
             dur = new_durations[new_idx]
-            if offset <= cursor + dur + 1e-6 or j == len(group) - 1:
+            if in_shot_pos <= cursor + dur + 1e-6 or j == len(group) - 1:
                 target_new_idx = new_idx
-                target_offset = max(0.0, offset - cursor)
-                target_offset = min(target_offset, dur)
+                target_pos_in_new_shot = max(0.0, in_shot_pos - cursor)
+                target_pos_in_new_shot = min(target_pos_in_new_shot, dur)
                 break
             cursor += dur
+
+        # ステップ3: 新 shot に載る anchor 型を決める
+        new_sid = new_shot_ids[target_new_idx]
+        new_atype = atype
+        new_offset = target_pos_in_new_shot
+        if atype == "caption_in":
+            # 新 shot に caption_in が残っていれば維持、無ければ shot_start にフォールバック
+            new_ci_info = (new_telop_map or {}).get(new_sid)
+            if isinstance(new_ci_info, dict) and isinstance(new_ci_info.get("caption_in_offset_sec"), (int, float)):
+                new_ci = float(new_ci_info["caption_in_offset_sec"])
+                new_offset = max(0.0, target_pos_in_new_shot - new_ci)
+                new_offset = min(new_offset, new_durations[target_new_idx])
+            else:
+                new_atype = "shot_start"
+                # new_offset はそのまま target_pos_in_new_shot（shot_start からの位置）
+
         new_ev = dict(ev)
         new_ev["t_anchor"] = dict(anc)
-        new_ev["t_anchor"]["shot_id"] = new_shot_ids[target_new_idx]
-        new_ev["t_anchor"]["offset_sec"] = round(target_offset, 3)
+        new_ev["t_anchor"]["type"] = new_atype
+        new_ev["t_anchor"]["shot_id"] = new_sid
+        new_ev["t_anchor"]["offset_sec"] = round(new_offset, 3)
         remapped.append(new_ev)
     return remapped
 
@@ -670,7 +859,9 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
     )
 
     # sfx 間引き（写像は分割前の shot_ids でまず行う）
-    sfx_plan = _thin_sfx_events_for_shots(
+    # R3 codex-review 修正: telop_map を渡して「skeleton に採用された caption_in」だけを
+    # アンカー候補にする（同一shotの2枚目以降 telop の start で誤アンカーを回避）。
+    sfx_plan = _sfx_plan_from_salient_onsets(
         reference_spec.get("sfx_events") or [],
         boundaries,
         shot_ids,
@@ -678,6 +869,7 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         ref_duration,
         float(target_duration_sec),
         reference_spec.get("telops") or [],
+        telop_map=telop_map,
     )
 
     # hook/cta shot_id 解決（分割前の shot_ids で判定）
@@ -698,12 +890,18 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
     if max_shot_sec is not None and max_shot_sec > 0:
         new_durations, split_map = _split_long_shots(scaled, float(max_shot_sec), min_shot_sec=effective_min_shot_sec)
         new_shot_ids = ["s{}".format(i + 1) for i in range(len(new_durations))]
-        # telop 写像を分割群の先頭 shot に載せ替え
+        # telop 写像を分割群の先頭 shot に載せ替え（旧 telop_map を先に保存してから remap）
+        old_telop_map = dict(telop_map)
         telop_map = _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids)
         # reference_visual 写像を分割群の全員にコピー（同じ絵の一部を切り出したもの）
         rv_map = _remap_reference_visual_by_split(rv_map, shot_ids, split_map, new_shot_ids)
         # sfx 写像を分割断片に載せ替え
-        sfx_plan = _remap_sfx_by_split(sfx_plan, shot_ids, new_shot_ids, split_map, new_durations)
+        # R3 codex-review 修正: caption_in アンカーの offset 意味論を保つため
+        # old/new telop_map を渡す（無いと caption_in→shot_start の絶対位置解決を誤る）
+        sfx_plan = _remap_sfx_by_split(
+            sfx_plan, shot_ids, new_shot_ids, split_map, new_durations,
+            old_telop_map=old_telop_map, new_telop_map=telop_map,
+        )
         # hook/cta shot_id の載せ替え（旧 -> 分割群の先頭）
         old_id_to_idx = {sid: i for i, sid in enumerate(shot_ids)}
         if hook_end_shot_id in old_id_to_idx:
@@ -765,11 +963,45 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
                 shot["expected_narration_chars"] = ec
         shots.append(shot)
 
+    # R3 codex-review 修正 P2: 参考ショット境界 -> plan shot への対応（piecewise 写像）を
+    # 後段の fidelity が使えるように、参考尺座標での「各生成 shot の参考範囲 [ref_start,
+    # ref_end]」を meta 用に返す。境界マージ・分割が働いても正しい piecewise マップを
+    # 再構築できる。
+    # 元の boundaries は merge 後の参考尺配列（len(shot_ids)+1）を反映する。
+    # 分割時: 分割群の先頭は 元 boundaries[i]、最後尾は元 boundaries[i+1] とし、
+    # 中間は等分（ref 側は元区間を等分するのが自然な近似）で埋める。
+    ref_ranges: List[Tuple[float, float]] = []
+    if max_shot_sec is not None and max_shot_sec > 0:
+        # 分割後の shot_ids は 分割群を平坦化したもの
+        for old_idx in range(len(split_map)):
+            group = split_map[old_idx]
+            if not group:
+                continue
+            lo = boundaries[old_idx]
+            hi = boundaries[old_idx + 1]
+            m = len(group)
+            if m == 1:
+                ref_ranges.append((lo, hi))
+            else:
+                # 等分割（分割後の各 new_durations と同じ比率で参考区間を分ける）
+                sub_durs = [new_durations[k] for k in group]
+                total = sum(sub_durs) or 1.0
+                cursor = lo
+                for k, d in enumerate(sub_durs):
+                    seg = (hi - lo) * (d / total)
+                    ref_ranges.append((cursor, cursor + seg))
+                    cursor += seg
+    else:
+        for i in range(len(shot_ids)):
+            ref_ranges.append((boundaries[i], boundaries[i + 1]))
+
     return {
         "shots": shots,
         "sfx_plan": sfx_plan,
         "hook_end_shot_id": hook_end_shot_id,
         "cta_start_shot_id": cta_start_shot_id,
+        # R3 P2: piecewise 写像用（fidelity が使う）— 各生成 shot に対応する参考尺の [start,end]
+        "shot_ref_ranges": [(round(a, 4), round(b, 4)) for (a, b) in ref_ranges],
         # F7: 参考 rhythm を skeleton 経由で director プロンプトへ渡す
         "narration_rhythm": {
             "chars_per_sec": rhythm.get("chars_per_sec") if rhythm else 0.0,
@@ -953,6 +1185,28 @@ def _validate_plan_matches_skeleton(plan, skeleton, target_duration_sec):
                     key, plan.get(key), skeleton.get(key)
                 )
             )
+
+    # R3: telop 数（caption 有効 shot 数）がスケルトンと一致すること。
+    # スケルトンで caption_in_offset_sec が付いている shot は「参考テロップが載る shot」
+    # として選定済み。LLM が rewrite 段で任意に telop を追加/削除すると telop_iou が
+    # 大きく崩れる（denom がずれる）ため、shot ID 単位で厳密一致を要求する。
+    skel_telop_ids = {s.get("id") for s in skel_shots if "caption_in_offset_sec" in s}
+    plan_telop_ids = {s.get("id") for s in plan_shots if isinstance(s.get("caption_jp"), str) and s.get("caption_jp").strip()}
+    if skel_telop_ids != plan_telop_ids:
+        missing = sorted(skel_telop_ids - plan_telop_ids)
+        extra = sorted(plan_telop_ids - skel_telop_ids)
+        parts = []
+        if missing:
+            parts.append("スケルトンで指定されているのに caption_jp が空: {}".format(missing))
+        if extra:
+            parts.append("スケルトンで指定されていない shot に caption_jp が入っている: {}".format(extra))
+        errors.append(
+            "telop 数（caption 有効 shot）がスケルトンと不一致(plan={}件, skeleton={}件). {} "
+            "スケルトンで caption_in_offset_sec が付いている shot だけに caption_jp を入れ、"
+            "それ以外の shot は caption_jp='' で返してください。telop 数はスケルトン固定です。".format(
+                len(plan_telop_ids), len(skel_telop_ids), " / ".join(parts) if parts else "",
+            )
+        )
 
     return errors
 
@@ -1277,6 +1531,10 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
         rewrite_prompt = (
             "以下のドラフトplanを『骨（構造）はそのまま保持し、visual_prompt/caption_jp/"
             "narration_jp の表現と参考映像情報の反映度だけをさらに向上させて再出力』してください。\n\n"
+            "**telop 数（caption_jp を持つ shot 数）は絶対に変えないこと**: ドラフトで caption_jp が"
+            "入っている shot 集合とスケルトンで caption_in_offset_sec が指定されている shot 集合は"
+            "完全一致していなければならない。rewrite では caption_jp の文言のみを推敲し、caption を"
+            "新たに追加/削除しないこと（追加/削除は不合格の原因になる）。\n\n"
             "ドラフト:\n" + json.dumps(plan, ensure_ascii=False, indent=2) + "\n\n---\n\n" + rewrite_prompt
         )
         rewrite_start = time.monotonic()
@@ -1302,6 +1560,10 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     # 参考spec の要点を meta に記録（下流の render/検証で使える）
     plan["meta"]["reference_skeleton_shot_count"] = len(skeleton["shots"])
     plan["meta"]["reference_skeleton_sfx_count"] = len(skeleton.get("sfx_plan") or [])
+    # R3: piecewise 写像用の参考尺 [start, end] 対応を meta に持たせる
+    # （qa/fidelity.py が boundary merge / shot split の場合でも piecewise IoU を可能にする）
+    if skeleton.get("shot_ref_ranges"):
+        plan["meta"]["shot_ref_ranges"] = skeleton["shot_ref_ranges"]
     # クレジット意識分割の provenance（QA が同じスケルトンを再現できるように）
     plan["meta"]["skeleton_max_shot_sec"] = max_shot_sec
     plan["meta"]["target_duration_sec"] = float(target_duration_sec)

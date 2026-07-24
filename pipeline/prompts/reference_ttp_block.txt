@@ -31,6 +31,11 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
 7. `caption_jp` は 30字以内(25字以内推奨)。`narration_jp` は音読で対応 shot の duration_sec 秒前後に
    なる長さにする。全 shots の narration_jp を出現順に連結した
    文字列が `narration_script` と完全一致すること。
+   **【telop 数はスケルトン固定・追加削除禁止】**: スケルトンで `caption_in_offset_sec`
+   が付いている shot だけに `caption_jp` を入れる。それ以外の shot は `caption_jp=""`
+   （空文字）で返すこと。**telop 数（caption を持つ shot 数）はスケルトンと完全一致**
+   でなければならない（1個でも増減させると不合格）。参考動画のテロップは参考の実カット
+   分布に沿って既に選定済みで、これを LLM が編集することは禁止（telop_iou が大きく崩れる）。
    **話速の合わせ方（F7 参考リズム写像）**: skeleton の `narration_rhythm.chars_per_sec`
    （参考動画の実測話速）が指定されていたら、それを目安に narration_jp の文字数を決めること。
    各 shot に `expected_narration_chars` があれば、その値±20% を目標にすること
