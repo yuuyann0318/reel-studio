@@ -445,6 +445,124 @@ def test_run_render_persists_tts_meta(monkeypatch):
         shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# (k) 商品画像の vision 分類が jobs 経由で配線され、logo_banner が採用リストから外れて
+#     product_manifest.json が product_dir に生成されること
+# ---------------------------------------------------------------------------
+
+def test_generate_classifies_product_images_and_writes_manifest_and_excludes_logo(monkeypatch):
+    import json as _json
+
+    def _fake_run_director(theme, cfg=None, target_duration_sec=None, no_llm=False, **kwargs):
+        return _plan_with_shots(["フック", "本編1", "本編2", "CTA"])
+
+    monkeypatch.setattr(jobs_mod.director, "run_director", _fake_run_director)
+
+    def _fake_collect(url, dest_dir, cfg, local_dir=None, fetcher=None, prober=None):
+        os.makedirs(dest_dir, exist_ok=True)
+        return {
+            "name": "テスト商品B",
+            "url": url,
+            "images": [
+                {"path": os.path.join(dest_dir, "001.jpg"), "source": "lp", "width": 800, "height": 800},
+                {"path": os.path.join(dest_dir, "002.jpg"), "source": "lp", "width": 800, "height": 800},
+                {"path": os.path.join(dest_dir, "003.jpg"), "source": "lp", "width": 800, "height": 800},
+            ],
+            "warnings": [],
+        }
+    monkeypatch.setattr(jobs_mod.product_images, "collect_product_images", _fake_collect)
+
+    # 分類はモック: 001=採用、002=logo_banner(不採用)、003=採用
+    def _fake_classify(paths, vision_call=jobs_mod.product_images._VISION_DEFAULT, timeout_sec=600):
+        results = []
+        for i, p in enumerate(paths):
+            if i == 1:
+                results.append({"path": p, "category": "logo_banner", "sharpness": "high",
+                                 "dominant_colors": [], "adopted": False, "reason": "logo_banner"})
+            else:
+                results.append({"path": p, "category": "product_solo", "sharpness": "high",
+                                 "dominant_colors": ["#123456"], "adopted": True, "reason": None})
+        return results
+    monkeypatch.setattr(jobs_mod.product_images, "classify_product_images", _fake_classify)
+
+    backend = _RecordingBackend()
+    monkeypatch.setattr(jobs_mod, "get_backend", lambda name, cfg: backend)
+    monkeypatch.setattr(jobs_mod.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
+    fake_render, tts_meta = _stub_render_project()
+    monkeypatch.setattr(jobs_mod, "_render_project", fake_render)
+
+    manager = _make_job_manager_without_worker(monkeypatch)
+    project = projects.create_project("分類配線テスト", 12.0, "mock", status="generating", product_url=PRODUCT_URL)
+    try:
+        manager._run_generate(project["id"], _generate_payload(project["id"], "分類配線テスト", product_url=PRODUCT_URL))
+
+        pdir = projects.product_dir(project["id"])
+        manifest = pdir / "product_manifest.json"
+        assert manifest.exists(), "product_manifest.json が生成されていない"
+        payload = _json.loads(manifest.read_text(encoding="utf-8"))
+        assert payload["version"] == 1
+        assert [e["adopted"] for e in payload["entries"]] == [True, False, True]
+
+        saved = projects.get_project(project["id"])
+        # media_images に adopted / category が入っていること
+        cats = [img["category"] for img in saved["product"]["images"]]
+        assert cats == ["product_solo", "logo_banner", "product_solo"]
+        assert saved["product"]["images"][1]["adopted"] is False
+
+        # backend に渡された shot に、logo画像(002.jpg)が image_path として登場していないこと
+        for s in backend.shots:
+            ip = s.get("image_path")
+            if ip:
+                assert not ip.endswith("002.jpg"), "logo_banner画像がbackendまで届いてはいけない"
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
+def test_generate_wires_reference_spec_to_assign_images_to_shots(monkeypatch):
+    """reference_spec 経路（analyze_reference が spec を返す）で、
+    assign_images_to_shots が reference_spec 付きで呼ばれること。"""
+    captured = {}
+
+    def _fake_run_director(theme, cfg=None, target_duration_sec=None, no_llm=False, **kwargs):
+        return _plan_with_shots(["フック", "本編1", "本編2", "CTA"])
+    monkeypatch.setattr(jobs_mod.director, "run_director", _fake_run_director)
+
+    def _fake_collect(url, dest_dir, cfg, local_dir=None, fetcher=None, prober=None):
+        os.makedirs(dest_dir, exist_ok=True)
+        return {"name": "商品", "url": url, "images": [
+            {"path": os.path.join(dest_dir, "001.jpg"), "source": "lp", "width": 800, "height": 800},
+        ], "warnings": []}
+    monkeypatch.setattr(jobs_mod.product_images, "collect_product_images", _fake_collect)
+
+    monkeypatch.setattr(jobs_mod.product_images, "classify_product_images",
+                        lambda paths, **kw: [{"path": p, "category": "product_solo",
+                                                "sharpness": "high", "dominant_colors": [],
+                                                "adopted": True, "reason": None} for p in paths])
+
+    original_assign = jobs_mod.product_images.assign_images_to_shots
+    def _wrap_assign(shots, image_paths, reference_spec=None):
+        captured["reference_spec"] = reference_spec
+        captured["shots_len"] = len(shots)
+        return original_assign(shots, image_paths, reference_spec=reference_spec)
+    monkeypatch.setattr(jobs_mod.product_images, "assign_images_to_shots", _wrap_assign)
+
+    backend = _RecordingBackend()
+    monkeypatch.setattr(jobs_mod, "get_backend", lambda name, cfg: backend)
+    monkeypatch.setattr(jobs_mod.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
+    fake_render, tts_meta = _stub_render_project()
+    monkeypatch.setattr(jobs_mod, "_render_project", fake_render)
+
+    manager = _make_job_manager_without_worker(monkeypatch)
+    project = projects.create_project("reference配線テスト", 12.0, "mock", status="generating", product_url=PRODUCT_URL)
+    try:
+        # reference_url を渡さずに generate（reference_spec=None が渡ることを確認）
+        manager._run_generate(project["id"], _generate_payload(project["id"], "reference配線テスト", product_url=PRODUCT_URL))
+        assert "reference_spec" in captured
+        assert captured["reference_spec"] is None  # reference_url未指定なので None
+    finally:
+        shutil.rmtree(projects.project_dir(project["id"]), ignore_errors=True)
+
+
 def test_run_resume_persists_tts_meta_and_maps_image_path_to_backend_shot(monkeypatch):
     """(f) resume経路のtts永続化 と、resumeのbackend_shotマッピングへのimage_path追加を同時に検証する。"""
     project = projects.create_project("resume時TTS+画像パス引継ぎテスト", 10.0, "mock", status="failed")

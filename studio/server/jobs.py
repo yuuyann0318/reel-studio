@@ -565,27 +565,83 @@ class JobManager:
                     "name": "", "url": product_url, "images": [],
                     "warnings": ["商品画像の取得中に予期しないエラーが発生しました: {}".format(exc)],
                 }
-            product_image_paths = [img["path"] for img in (result.get("images") or [])]
-            media_images = [
-                dict(img, path=projects.media_relpath_for_product(project_id, Path(img["path"]).name))
-                for img in (result.get("images") or [])
+            all_collected_paths = [img["path"] for img in (result.get("images") or [])]
+            classify_warnings = []
+            # visionで各画像を分類し、ロゴ/バナー/無関係/低鮮明を採用リストから外す。
+            # 分類失敗（vision CLI 不通・全バッチ失敗）は縮退＝全採用とし warning を残す。
+            manifest_entries = []
+            if all_collected_paths:
+                try:
+                    manifest_entries = product_images.classify_product_images(all_collected_paths)
+                except Exception as exc:
+                    classify_warnings.append(
+                        "商品画像の分類に失敗しました（縮退＝全採用で続行）: {}".format(exc)
+                    )
+                    manifest_entries = [
+                        {
+                            "path": p, "category": "product_solo", "sharpness": "high",
+                            "dominant_colors": [], "adopted": True, "reason": "classify_exception",
+                        }
+                        for p in all_collected_paths
+                    ]
+                # vision縮退（vision_unavailable / vision_failed）が発生していたら
+                # warning に一度だけ集約して残す（各画像ごとには出さない）。
+                degraded_reasons = {
+                    e.get("reason") for e in manifest_entries
+                    if e.get("reason") in ("vision_unavailable", "vision_failed",
+                                            "vision_missing", "vision_missing_index")
+                }
+                if degraded_reasons:
+                    classify_warnings.append(
+                        "商品画像の分類がvisionで完了しなかったため全採用で続行しました: {}".format(
+                            ", ".join(sorted(str(r) for r in degraded_reasons if r))
+                        )
+                    )
+            classify_warnings = product_images.save_product_manifest(
+                projects.product_dir(project_id), manifest_entries, warnings=classify_warnings,
+            )
+
+            adopted_paths = {e["path"] for e in manifest_entries if e.get("adopted")}
+            # 採用フラグを collect 結果に反映（UI/media_images に category/adopted を持たせる）。
+            entry_by_path = {e["path"]: e for e in manifest_entries}
+            product_image_paths = [
+                img["path"] for img in (result.get("images") or []) if img["path"] in adopted_paths
             ]
+            media_images = []
+            for img in (result.get("images") or []):
+                info = entry_by_path.get(img["path"]) or {}
+                media_images.append(dict(
+                    img,
+                    path=projects.media_relpath_for_product(project_id, Path(img["path"]).name),
+                    category=info.get("category"),
+                    sharpness=info.get("sharpness"),
+                    adopted=bool(info.get("adopted")) if info else True,
+                    reason=info.get("reason"),
+                ))
+            combined_warnings = list(result.get("warnings") or []) + classify_warnings
             product_info = {
                 "name": result.get("name") or "",
                 "url": product_url,
                 "images": media_images,
-                "warnings": result.get("warnings") or [],
+                "warnings": combined_warnings,
             }
             project = projects.get_project(project_id)
             if project is not None:
                 project["product"] = product_info
                 projects.save_project(project)
-            if result.get("warnings"):
-                self._emit(job_id, "product", 4, "商品画像の取得で注意: {}".format("; ".join(result["warnings"])))
+            if combined_warnings:
+                self._emit(job_id, "product", 4, "商品画像の取得で注意: {}".format("; ".join(combined_warnings)))
             if product_image_paths:
-                self._emit(job_id, "product", 5, "商品画像を{}枚取得しました".format(len(product_image_paths)))
+                self._emit(
+                    job_id, "product", 5,
+                    "商品画像を{}枚採用しました（取得{}枚・分類で不採用{}枚）".format(
+                        len(product_image_paths),
+                        len(all_collected_paths),
+                        len(all_collected_paths) - len(product_image_paths),
+                    ),
+                )
             else:
-                self._emit(job_id, "product", 5, "商品画像を取得できなかったため通常モードで続行します")
+                self._emit(job_id, "product", 5, "商品画像を採用できなかったため通常モードで続行します")
 
         # --- 参考動画の解析（TTP v2 経路。reference_url は create_project 側で必須化済み） ----
         # 成功時は director 側へ reference=spec を渡し、TTP スケルトンで骨まで再現する。
@@ -738,7 +794,13 @@ class JobManager:
 
         shots = plan.get("shots", [])
         if product_url and product_image_paths:
-            shots = product_images.assign_images_to_shots(shots, product_image_paths)
+            # 商品画像の割当は「参考動画上で物撮り shot と判定できる shot だけ」に限定する
+            # （2026-07-25 設計方針: 参考動画=構図の絶対ベース、商品画像=被写体スロットへの
+            # 差し替え素材のみ）。reference_spec を渡すと product_shot_indices が働き、
+            # 全shot散布 → 商品shotのみ に絞り込まれる（該当0件のときはフック+CTAへ縮退）。
+            shots = product_images.assign_images_to_shots(
+                shots, product_image_paths, reference_spec=reference_spec,
+            )
         pdir = projects.project_dir(project_id)
         clips_dir = projects.clips_dir(project_id)
         clips_dir.mkdir(parents=True, exist_ok=True)

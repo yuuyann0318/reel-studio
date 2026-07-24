@@ -574,3 +574,247 @@ def test_build_default_fetcher_rejects_before_network_when_dns_resolves_to_priva
     fetch = product_images._build_default_fetcher({})
     with pytest.raises(urllib.error.URLError):
         fetch("https://evil.example.com/x")
+
+
+# ---------------------------------------------------------------------------
+# (h) classify_product_images: vision分類 + 縮退 + manifest 保存
+# ---------------------------------------------------------------------------
+
+def test_classify_product_images_categorizes_and_filters_low_or_logo():
+    """visionが4カテゴリを返した場合、product_solo/in_use は採用、logo_banner/unrelated と
+    sharpness=low は不採用（adopted=False + reason 付き）。"""
+    def _fake_vision(prompt, paths, timeout_sec=600):
+        return {
+            "ok": True,
+            "data": [
+                {"index": 1, "category": "product_solo", "sharpness": "high",
+                 "dominant_colors": ["#ff0000", "#ffffff"]},
+                {"index": 2, "category": "product_in_use", "sharpness": "high",
+                 "dominant_colors": ["#123456"]},
+                {"index": 3, "category": "logo_banner", "sharpness": "high",
+                 "dominant_colors": []},
+                {"index": 4, "category": "unrelated", "sharpness": "high",
+                 "dominant_colors": []},
+                {"index": 5, "category": "product_solo", "sharpness": "low",
+                 "dominant_colors": []},
+            ],
+        }
+    paths = ["/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg", "/tmp/d.jpg", "/tmp/e.jpg"]
+    entries = product_images.classify_product_images(paths, vision_call=_fake_vision)
+    assert [e["adopted"] for e in entries] == [True, True, False, False, False]
+    assert entries[0]["category"] == "product_solo"
+    assert entries[0]["dominant_colors"] == ["#ff0000", "#ffffff"]
+    assert entries[2]["reason"] == "logo_banner"
+    assert entries[3]["reason"] == "unrelated"
+    assert entries[4]["reason"] == "low_sharpness"
+
+
+def test_classify_product_images_falls_back_when_vision_unavailable():
+    """vision_call=None（実行不能環境）でも例外を出さず、全採用 + reason=vision_unavailable
+    で返す（縮退動作。パイプライン全体は必ず完成する既存設計を踏襲）。"""
+    paths = ["/tmp/a.jpg", "/tmp/b.jpg"]
+    entries = product_images.classify_product_images(paths, vision_call=None)
+    assert all(e["adopted"] for e in entries)
+    assert all(e["reason"] == "vision_unavailable" for e in entries)
+
+
+def test_classify_product_images_falls_back_when_vision_call_raises():
+    def _boom(prompt, paths, timeout_sec=600):
+        raise RuntimeError("network broken")
+    entries = product_images.classify_product_images(["/tmp/a.jpg"], vision_call=_boom)
+    assert entries[0]["adopted"] is True
+    assert entries[0]["reason"] == "vision_failed"
+
+
+def test_classify_product_images_handles_missing_indexes_gracefully():
+    """LLM が index を返し漏らしたときは、その画像は縮退で採用（見落としで捨てない）。"""
+    def _partial(prompt, paths, timeout_sec=600):
+        return {"ok": True, "data": [
+            {"index": 1, "category": "product_solo", "sharpness": "high", "dominant_colors": []},
+            # index 2 の応答が欠落
+        ]}
+    entries = product_images.classify_product_images(["/tmp/a.jpg", "/tmp/b.jpg"], vision_call=_partial)
+    assert entries[0]["adopted"] is True and entries[0]["reason"] is None
+    assert entries[1]["adopted"] is True and entries[1]["reason"] == "vision_missing_index"
+
+
+def test_classify_product_images_normalizes_invalid_hex_colors():
+    def _fake(prompt, paths, timeout_sec=600):
+        return {"ok": True, "data": [{
+            "index": 1, "category": "product_solo", "sharpness": "high",
+            "dominant_colors": ["not-a-hex", "#12", "ABCDEF", "#abcdef", "#abcdef"],
+        }]}
+    entries = product_images.classify_product_images(["/tmp/a.jpg"], vision_call=_fake)
+    # 妥当な '#abcdef' / 'ABCDEF' → '#abcdef' に正規化・重複除去、最大3件
+    assert entries[0]["dominant_colors"] == ["#abcdef"]
+
+
+def test_classify_product_images_batches_over_six_images():
+    """バッチサイズ6を超える入力でも、複数コールに分けて全画像を分類する。"""
+    call_count = {"n": 0}
+
+    def _fake(prompt, paths, timeout_sec=600):
+        call_count["n"] += 1
+        return {"ok": True, "data": [
+            {"index": i + 1, "category": "product_solo", "sharpness": "high", "dominant_colors": []}
+            for i in range(len(paths))
+        ]}
+
+    paths = ["/tmp/{}.jpg".format(i) for i in range(9)]
+    entries = product_images.classify_product_images(paths, vision_call=_fake)
+    assert len(entries) == 9
+    assert call_count["n"] == 2  # 6 + 3
+    assert all(e["adopted"] for e in entries)
+
+
+def test_save_product_manifest_writes_json(tmp_path):
+    entries = [
+        {"path": "/tmp/a.jpg", "category": "product_solo", "sharpness": "high",
+         "dominant_colors": ["#ff0000"], "adopted": True, "reason": None},
+        {"path": "/tmp/b.jpg", "category": "logo_banner", "sharpness": "high",
+         "dominant_colors": [], "adopted": False, "reason": "logo_banner"},
+    ]
+    warns = product_images.save_product_manifest(tmp_path, entries)
+    assert warns == []
+    manifest = tmp_path / "product_manifest.json"
+    assert manifest.exists()
+    import json as _json
+    payload = _json.loads(manifest.read_text(encoding="utf-8"))
+    assert payload["version"] == 1
+    assert len(payload["entries"]) == 2
+    assert payload["entries"][1]["adopted"] is False
+
+
+# ---------------------------------------------------------------------------
+# (i) assign_images_to_shots: reference_spec 有り = 商品shot限定
+# ---------------------------------------------------------------------------
+
+def _shot(sid, desc_en=None):
+    s = {"id": sid, "caption_jp": ""}
+    if desc_en is not None:
+        s["reference_visual"] = {"desc_en": desc_en}
+    return s
+
+
+def test_assign_images_to_shots_with_reference_only_uses_product_shots():
+    """reference_spec 有り: reference_visual.desc_en が物撮り語を含む shot にのみ image_path。
+    それ以外は image_path キー無し（参考の絵をtext-to-videoで作らせる）。"""
+    shots = [
+        _shot("s1", "a person talks to camera in a bright room"),
+        _shot("s2", "close-up of product bottle on shelf"),
+        _shot("s3", "hand holding cosmetic jar in bathroom"),
+        _shot("s4", "outdoor landscape scene"),
+    ]
+    result = product_images.assign_images_to_shots(
+        shots, ["/p/a.jpg", "/p/b.jpg", "/p/c.jpg"], reference_spec={"shots_ref": []},
+    )
+    assert "image_path" not in result[0]
+    assert result[1]["image_path"] == "/p/a.jpg"
+    assert result[2]["image_path"] == "/p/b.jpg"
+    assert "image_path" not in result[3]
+
+
+def test_assign_images_to_shots_no_product_shots_falls_back_to_hook_and_cta():
+    """商品shotが検出できない場合はフック+CTAの2点のみに縮退（image_path=None のshotは無し）。"""
+    shots = [
+        _shot("s1", "a person talks to camera"),
+        _shot("s2", "outdoor landscape"),
+        _shot("s3", "kitchen scene with vegetables"),
+    ]
+    result = product_images.assign_images_to_shots(
+        shots, ["/p/a.jpg", "/p/b.jpg"], reference_spec={"shots_ref": []},
+    )
+    assert result[0]["image_path"] == "/p/a.jpg"
+    assert "image_path" not in result[1]
+    assert result[2]["image_path"] == "/p/b.jpg"
+
+
+def test_assign_images_to_shots_reference_none_is_backward_compat():
+    """reference_spec=None は従来の hook/CTA/middle 均等ロジックを維持（旧テストとの互換）。"""
+    shots = [_shot("s{}".format(i + 1)) for i in range(5)]
+    images = ["p0.jpg", "p1.jpg", "p2.jpg", "p3.jpg", "p4.jpg"]
+    result = product_images.assign_images_to_shots(shots, images)
+    assert result[0]["image_path"] == "p0.jpg"  # hook
+    assert result[4]["image_path"] == "p1.jpg"  # CTA
+    assert result[1]["image_path"] == "p2.jpg"
+    assert result[2]["image_path"] == "p3.jpg"
+    assert result[3]["image_path"] == "p4.jpg"
+
+
+def test_assign_images_to_shots_uses_shots_ref_by_position_when_shot_has_no_reference_visual():
+    """shot に reference_visual が無く、shots_ref と shot 数が一致する場合、
+    位置対応で shots_ref[i] を1件だけ参照する（codex-review P1: 全shots_refをどのshotにも
+    適用しない）。has_product_logo=True の shots_ref に対応する index の shot だけが
+    商品shot扱いになる。"""
+    shots = [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]
+    reference_spec = {
+        "shots_ref": [
+            {"start": 0, "end": 2, "visual_desc_en": "person face", "has_product_logo": False},
+            {"start": 2, "end": 4, "visual_desc_en": "product shelf", "has_product_logo": True},
+            {"start": 4, "end": 6, "visual_desc_en": "landscape", "has_product_logo": False},
+        ],
+    }
+    indices = product_images.product_shot_indices(shots, reference_spec)
+    assert indices == [1]  # index 1 のみ商品shot（無関係shotに商品画像が撒かれない）
+
+    result = product_images.assign_images_to_shots(
+        shots, ["/p/a.jpg", "/p/b.jpg"], reference_spec=reference_spec,
+    )
+    assert "image_path" not in result[0]
+    assert result[1]["image_path"] == "/p/a.jpg"
+    assert "image_path" not in result[2]
+
+
+def test_assign_images_to_shots_no_alignment_falls_back_to_hook_cta_when_shots_ref_len_mismatch():
+    """shots_ref と shot 数が食い違うときは位置対応不能。商品shot=0として縮退（フック+CTA）。"""
+    shots = [{"id": "s1"}, {"id": "s2"}, {"id": "s3"}]  # 3 shots
+    reference_spec = {
+        "shots_ref": [
+            {"start": 0, "end": 5, "visual_desc_en": "product close up", "has_product_logo": True},
+        ],  # 1 shots_ref のみ（不一致）
+    }
+    indices = product_images.product_shot_indices(shots, reference_spec)
+    assert indices == []
+    result = product_images.assign_images_to_shots(
+        shots, ["/p/a.jpg", "/p/b.jpg"], reference_spec=reference_spec,
+    )
+    # 縮退: フック+CTA
+    assert result[0]["image_path"] == "/p/a.jpg"
+    assert "image_path" not in result[1]
+    assert result[2]["image_path"] == "/p/b.jpg"
+
+
+def test_product_shot_indices_returns_only_product_shot_positions():
+    shots = [
+        _shot("s1", "a person talks"),
+        _shot("s2", "close-up of product bottle"),
+        _shot("s3", "landscape"),
+        _shot("s4", "hand holding jar"),
+    ]
+    assert product_images.product_shot_indices(shots, {"shots_ref": []}) == [1, 3]
+
+
+# ---------------------------------------------------------------------------
+# (j) プロンプト序列: product_block は「優先」「主役にしたまま」「悪い例」を主張しない
+# ---------------------------------------------------------------------------
+
+def test_product_block_prompt_no_priority_or_hero_claims():
+    """KR1 実証: product_block.txt から「優先」の断定・「主役にしたまま」「悪い例」
+    等の商品最優先を助長する語彙が排除されていること。逆に参考動画への従属を示す文言
+    （参考shot / 従属 / 差し替え / 参考動画）が含まれること。"""
+    from pipeline.config import project_root
+    text = (project_root() / "pipeline" / "prompts" / "product_block.txt").read_text(encoding="utf-8")
+    forbidden = ["最優先", "こちらを優先", "主役にしたまま", "悪い例"]
+    for w in forbidden:
+        assert w not in text, "product_block.txt に禁止語 '{}' が残っている".format(w)
+    # 従属性・参考ベースの文言が含まれていること
+    assert "参考動画" in text
+    assert ("参考shot" in text) or ("被写体スロット" in text) or ("差し替え" in text)
+
+
+def test_reference_ttp_block_declares_top_priority():
+    """KR1 実証: reference_ttp_block.txt に「最上位」「他ブロックと矛盾したら本ブロック優先」
+    に相当する宣言が入っていること。"""
+    from pipeline.config import project_root
+    text = (project_root() / "pipeline" / "prompts" / "reference_ttp_block.txt").read_text(encoding="utf-8")
+    assert "最上位" in text

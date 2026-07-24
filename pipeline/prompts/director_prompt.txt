@@ -6,6 +6,10 @@
 {THEME}
 {ANGLE_BLOCK}{REFERENCE_TTP_BLOCK}
 {PRODUCT_BLOCK}
+# ブロック優先順位（絶対厳守）
+- REFERENCE_TTP_BLOCK（参考動画スケルトン）> PRODUCT_BLOCK（商品モード）> その他一般ルール。
+  矛盾したら常に上位ブロックの構成・構図・カメラワーク・色調・リズムを優先すること。
+
 # 目標
 - 完成尺: 約{TARGET_DURATION}秒（±{TARGET_TOLERANCE}秒）
 - 縦型9:16のSNSショート動画

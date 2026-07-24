@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -538,21 +539,275 @@ def collect_product_images(url, dest_dir, cfg=None, local_dir=None, fetcher=None
 
 
 # ---------------------------------------------------------------------------
+# 商品画像の分類（vision）
+# ---------------------------------------------------------------------------
+
+# 分類カテゴリ: product_solo（商品単体の物撮り）/ product_in_use（使用シーン）/
+# logo_banner（ロゴ・バナー・広告テキスト画像）/ unrelated（無関係）
+_ADOPT_CATEGORIES = ("product_solo", "product_in_use")
+_NON_ADOPT_CATEGORIES = ("logo_banner", "unrelated")
+_VALID_CATEGORIES = _ADOPT_CATEGORIES + _NON_ADOPT_CATEGORIES
+
+_CLASSIFY_PROMPT = (
+    "以下の画像は商品LPから取得された素材候補です（順序どおり image1..imageN）。"
+    "各画像を次のいずれかに分類してください。"
+    "category は必ず ['product_solo','product_in_use','logo_banner','unrelated'] のいずれか。"
+    " product_solo=商品パッケージ単体の物撮り、product_in_use=商品が実際に使われている/"
+    "手に持たれている/シーンに置かれている、logo_banner=ロゴ・バナー・広告テキスト・"
+    "before/after 比較画像・成分表・受賞歴の様な図版、unrelated=商品と無関係。"
+    "sharpness は 'high'（ボケが少ない）/'low'（ボケ・低画質）の2択。"
+    "dominant_colors は画面を占める代表色2〜3件を '#RRGGBB' 形式のリストで（無理なら空配列）。"
+    "出力はJSON配列のみ。要素は {index:int(1始まり), category:str, sharpness:str, "
+    "dominant_colors:[str,...]} だけを含めること。コードフェンス禁止。"
+)
+
+
+def _normalize_hex(color):
+    if not isinstance(color, str):
+        return None
+    c = color.strip()
+    if not c:
+        return None
+    if not c.startswith("#"):
+        c = "#" + c
+    if len(c) != 7:
+        return None
+    for ch in c[1:]:
+        if ch not in "0123456789abcdefABCDEF":
+            return None
+    return "#" + c[1:].lower()
+
+
+_VISION_DEFAULT = object()  # 「引数未指定＝デフォルトを解決」を明示するためのセンチネル
+
+
+def classify_product_images(image_paths, vision_call=_VISION_DEFAULT, timeout_sec=600):
+    """画像リストを vision に投げ、各画像の分類 dict を返す。
+
+    Returns: list[dict] — 入力 image_paths と 1:1 対応。各要素は
+        {"path": str, "category": str, "sharpness": str, "dominant_colors": [hex,...],
+         "adopted": bool, "reason": str|None}
+        - adopted=True: category が product_solo / product_in_use かつ sharpness=high
+        - adopted=False: それ以外（reason に不採用理由を短く記載）
+        vision呼び出しに失敗した場合は縮退モード=全採用（adopted=True・reason="vision_failed"）
+        で返し、警告メッセージは呼び出し側の warnings に追記される想定（本関数は例外を送出
+        しない）。
+
+    vision_call: 差し込み可能な call_claude_vision_json 互換関数。テストで注入する
+        （既定は claude_runner.call_claude_vision_json）。
+    """
+    paths = [str(p) for p in (image_paths or []) if p]
+    if not paths:
+        return []
+
+    # 既定vision呼び出しは遅延importして循環依存を避ける（claude_runner→configの経路）。
+    # 明示的に vision_call=None を渡された場合は「vision不能」として縮退させ、
+    # 引数を渡さなかった場合（sentinel）だけ既定のCLIを解決する。
+    if vision_call is _VISION_DEFAULT:
+        try:
+            from pipeline.claude_runner import call_claude_vision_json as _default_call
+        except Exception:
+            _default_call = None
+        vision_call = _default_call
+
+    fallback_all_adopted = [
+        {
+            "path": p, "category": "product_solo", "sharpness": "high",
+            "dominant_colors": [], "adopted": True, "reason": "vision_unavailable",
+        }
+        for p in paths
+    ]
+
+    if vision_call is None:
+        return fallback_all_adopted
+
+    # 1バッチ最大6枚（プロンプト内のindex参照が崩れないように分割）。
+    _MAX_BATCH = 6
+    results = [None] * len(paths)
+    for start in range(0, len(paths), _MAX_BATCH):
+        batch = paths[start:start + _MAX_BATCH]
+        prompt = _CLASSIFY_PROMPT + "\n\n" + "\n".join(
+            "image{}: {}".format(i + 1, p) for i, p in enumerate(batch)
+        )
+        try:
+            resp = vision_call(prompt, batch, timeout_sec=timeout_sec)
+        except Exception as exc:
+            resp = {"ok": False, "error": "exception: {}".format(exc)}
+        if not resp or not resp.get("ok"):
+            # このバッチは失敗 → 縮退（このバッチ分は全採用）
+            for i, p in enumerate(batch):
+                results[start + i] = {
+                    "path": p, "category": "product_solo", "sharpness": "high",
+                    "dominant_colors": [], "adopted": True, "reason": "vision_failed",
+                }
+            continue
+        data = resp.get("data") or []
+        by_index = {}
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    idx = int(item.get("index"))
+                except (TypeError, ValueError):
+                    continue
+                by_index[idx] = item
+        for i, p in enumerate(batch):
+            item = by_index.get(i + 1)
+            if item is None:
+                # 応答漏れは縮退で採用（見落としで捨てるより保守的）
+                results[start + i] = {
+                    "path": p, "category": "product_solo", "sharpness": "high",
+                    "dominant_colors": [], "adopted": True, "reason": "vision_missing_index",
+                }
+                continue
+            cat = item.get("category")
+            if cat not in _VALID_CATEGORIES:
+                cat = "unrelated"
+            sharp = item.get("sharpness")
+            if sharp not in ("high", "low"):
+                sharp = "low"
+            colors_in = item.get("dominant_colors") or []
+            colors = []
+            if isinstance(colors_in, list):
+                for c in colors_in:
+                    hx = _normalize_hex(c)
+                    if hx and hx not in colors:
+                        colors.append(hx)
+                    if len(colors) >= 3:
+                        break
+            adopted = cat in _ADOPT_CATEGORIES and sharp == "high"
+            reason = None if adopted else ("low_sharpness" if sharp != "high" else cat)
+            results[start + i] = {
+                "path": p, "category": cat, "sharpness": sharp,
+                "dominant_colors": colors, "adopted": adopted, "reason": reason,
+            }
+
+    # 念のため None が残っていれば縮退で埋める
+    for i, p in enumerate(paths):
+        if results[i] is None:
+            results[i] = {
+                "path": p, "category": "product_solo", "sharpness": "high",
+                "dominant_colors": [], "adopted": True, "reason": "vision_missing",
+            }
+    return results
+
+
+def save_product_manifest(product_dir, entries, warnings=None):
+    """classify_product_images() の結果を product_dir/product_manifest.json に書き出す。
+
+    書き込み失敗は握りつぶし、警告メッセージのみを (warnings に append できる) 文字列で返す。
+    Returns: list[str] warnings（呼び出し側の warnings.extend() 用）。
+    """
+    warn_out = list(warnings or [])
+    try:
+        os.makedirs(str(product_dir), exist_ok=True)
+        path = os.path.join(str(product_dir), "product_manifest.json")
+        payload = {
+            "version": 1,
+            "entries": [dict(e) for e in (entries or [])],
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        warn_out.append("product_manifest.json の保存に失敗しました: {}".format(exc))
+    return warn_out
+
+
+# ---------------------------------------------------------------------------
+# 参考spec → 商品shot判定
+# ---------------------------------------------------------------------------
+
+# 「物撮り shot」検出用の英語キーワード（visual_desc_en 内で単語境界一致）。
+_PRODUCT_SHOT_KEYWORDS = (
+    "product", "bottle", "package", "packaging", "jar", "tube", "box",
+    "container", "cosmetic", "cosmetics", "serum", "cream", "lotion",
+    "close-up of", "close up of",
+)
+
+
+def _shot_is_product_shot(shot, shots_ref_by_time=None):
+    """shot（skeleton 由来。reference_visual を含む可能性あり）が「物撮り shot」か判定する。
+
+    判定基準（いずれか成立で True）:
+      1. shot.reference_visual.desc_en に商品キーワードが含まれる
+      2. shots_ref_by_time が渡され、対応する shots_ref item が
+         has_product_logo=True または visual_desc_en に商品キーワードを含む
+    """
+    if not isinstance(shot, dict):
+        return False
+    rv = shot.get("reference_visual") if isinstance(shot.get("reference_visual"), dict) else None
+    if rv:
+        desc = (rv.get("desc_en") or "").lower()
+        for kw in _PRODUCT_SHOT_KEYWORDS:
+            if kw in desc:
+                return True
+    # shots_ref_by_time が渡されていれば追加検査（has_product_logo 等）
+    if shots_ref_by_time and isinstance(shots_ref_by_time, list):
+        for sr in shots_ref_by_time:
+            if not isinstance(sr, dict):
+                continue
+            if sr.get("has_product_logo"):
+                return True
+            desc = (sr.get("visual_desc_en") or "").lower()
+            for kw in _PRODUCT_SHOT_KEYWORDS:
+                if kw in desc:
+                    return True
+    return False
+
+
+def product_shot_indices(shots, reference_spec=None):
+    """shots のうち「商品を主役に据えてよい shot」のインデックス配列を返す（純関数）。
+
+    判定は「そのshot固有の根拠」のみで行う（他shotの情報を混ぜない）:
+      - まず shot.reference_visual.desc_en を見る（skeleton由来。1shotに集約済み）。
+      - reference_visual が欠落・空 desc_en のshotは、対応する shots_ref を「位置ベースで
+        1:1 に対応付けた」ときだけ参照する。1:1に対応付かない場合は判定不能として False。
+        （codex-review P1 指摘: shots_ref 全体を無差別に見ると1件の product_logo だけで
+        無関係shotまで商品shot扱いになり、割当限定の意図が壊れる。）
+
+    Args:
+        shots: skeleton/plan shot dict の list。
+        reference_spec: 参考 spec dict。shots_ref を持つ。任意（無ければ shot 側のみ）。
+
+    Returns: sorted list[int]（0-indexed）
+    """
+    if not shots:
+        return []
+    shots_ref = None
+    if isinstance(reference_spec, dict):
+        shots_ref = reference_spec.get("shots_ref") or []
+    # skeleton の shot 数と shots_ref の要素数が一致するときだけ、位置ベースで 1:1
+    # 対応付ける（skeleton は shots_ref からカット境界を組み立てるため、境界マージ・
+    # 分割が発生しない限り一致する。一致しないときはあくまで shot 側の情報だけを見る）。
+    can_align = bool(shots_ref) and len(shots_ref) == len(shots)
+    indices = []
+    for i, sh in enumerate(shots):
+        rv = sh.get("reference_visual") if isinstance(sh, dict) else None
+        # 1) shot 側の reference_visual.desc_en が確定していればそれを最優先。
+        if rv and (rv.get("desc_en") or "").strip():
+            if _shot_is_product_shot(sh):
+                indices.append(i)
+                continue
+            # desc_en があってキーワード不一致なら商品shot扱いしない（他情報で救わない）。
+            continue
+        # 2) reference_visual が無いときのみ、位置対応の shots_ref[i] を1件だけ検査する。
+        if can_align:
+            sr = shots_ref[i]
+            aligned = [sr] if isinstance(sr, dict) else None
+            if aligned and _shot_is_product_shot(sh, shots_ref_by_time=aligned):
+                indices.append(i)
+        # 位置対応が取れないshotは判定不能。conservative に False で扱う
+        # （下流の縮退＝フック+CTAで安全側にフォールバックする）。
+    return indices
+
+
+# ---------------------------------------------------------------------------
 # ショットへの決定論的割り当て
 # ---------------------------------------------------------------------------
 
-def assign_images_to_shots(shots, image_paths):
-    """shots(ショットリスト)へimage_pathsを決定論的に割り当てる（非破壊）。
-
-    - shots[0](フック)には image_paths[0]。
-    - 最終shot(CTA)には image_paths[1](2枚以上ある場合) / image_paths[0](1枚のみの場合)。
-    - 残りの画像は中間shot(先頭・末尾を除く)へ等間隔に配分する。画像が尽きたら
-      それ以降(間に合わなかった)中間shotには "image_path" キーを付けない。
-    - shot dictはコピーして返す（引数のshotsは変更しない）。
-
-    Returns: 新しいshotリスト（各要素は元shot dictの浅いコピー + 割当時は"image_path"追加）。
-    """
-    shots = shots or []
+def _assign_legacy(shots, image_paths):
+    """従来の割当ロジック（フック+CTA+中間均等）。reference_spec=None の後方互換用。"""
     result = [dict(s) for s in shots]
     paths = [p for p in (image_paths or []) if p]
     n = len(result)
@@ -576,16 +831,69 @@ def assign_images_to_shots(shots, image_paths):
         count_m = len(middle_indices)
         count_r = len(remaining)
         if count_r >= count_m:
-            # 中間shot全てに1枚ずつ、remainingを間引いて均等割り当て
             for j, mi in enumerate(middle_indices):
                 img_idx = (j * count_r) // count_m
                 result[mi]["image_path"] = remaining[img_idx]
         else:
-            # remainingがmiddle shotより少ない: 均等な間隔でcount_r個のshotにのみ割り当て、
-            # それ以外の中間shotは "image_path" キー無し（画像が尽きた扱い）。
             for k in range(count_r):
                 pos = (k * count_m) // count_r
                 mi = middle_indices[pos]
                 result[mi]["image_path"] = remaining[k]
 
+    return result
+
+
+def assign_images_to_shots(shots, image_paths, reference_spec=None):
+    """shots(ショットリスト)へimage_pathsを決定論的に割り当てる（非破壊）。
+
+    ★2026-07-25 変更（設計原則）:
+        参考動画のスケルトンが唯一の被写体・構図の根拠であり、商品画像は「参考shotの
+        被写体スロットへの差し替え素材」でしかない。従って image-to-video の起点
+        （--start-image / mock の -loop -i）として商品画像を割当てるのは、参考spec上で
+        「物撮り shot」と判定できる shot に限定する。それ以外の shot は image_path を
+        載せない = テキストto動画（gradients / higgsfield 通常経路）で参考の絵を作らせる。
+
+    Args:
+        shots: skeleton 由来の shot dict list。reference_visual.desc_en があると精度が高い。
+        image_paths: 商品画像のローカル絶対パス配列。
+        reference_spec: 参考動画 v2 spec（dict）。None のときは従来経路（フック+CTA+中間）で
+            割当てる（後方互換。旧テスト・reference無しモード用）。
+
+    ロジック（reference_spec 有り）:
+        - 商品shot（product_shot_indices）を抽出。
+        - 商品shotが0件: フック(shots[0])+CTA(shots[-1]) の2点のみに割当（従来の縮退）。
+        - 商品shotが1件以上: そのshotにだけ image_path を均等に配分する（画像が枯渇したら
+          残りは image_path を載せない）。フック/CTAが商品shotに含まれていればそこにも入る。
+        - shots_ref から商品shotが検出できないときも、フック+CTAには image_path を1枚ずつ
+          載せる（これは「参考の hook_end/cta_start は物撮り率が高いため許容」の縮退動作）。
+
+    ロジック（reference_spec=None・後方互換）:
+        従来の _assign_legacy() で処理（フック+CTA+中間均等）。
+    """
+    shots = shots or []
+    paths = [p for p in (image_paths or []) if p]
+    n = len(shots)
+
+    if reference_spec is None:
+        return _assign_legacy(shots, paths)
+
+    result = [dict(s) for s in shots]
+    if n == 0 or not paths:
+        return result
+
+    product_indices = product_shot_indices(shots, reference_spec=reference_spec)
+
+    if not product_indices:
+        # 縮退: フック(0) と CTA(n-1) の2点のみ
+        if n == 1:
+            result[0]["image_path"] = paths[0]
+        else:
+            result[0]["image_path"] = paths[0]
+            result[n - 1]["image_path"] = paths[1] if len(paths) >= 2 else paths[0]
+        return result
+
+    # 商品shotのみに image_path を配分（枯渇したら image_path キー無し）
+    for j, idx in enumerate(product_indices):
+        if j < len(paths):
+            result[idx]["image_path"] = paths[j]
     return result
