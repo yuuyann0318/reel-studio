@@ -49,6 +49,39 @@ def _palette_for(shot_id):
     return _PALETTE[idx]
 
 
+def _hex_to_ff_color(hex_str):
+    """"#rrggbb" → ffmpeg gradients が受理する "0xRRGGBB"（アルファ無）。無効なら None。"""
+    if not isinstance(hex_str, str):
+        return None
+    s = hex_str.strip().lower()
+    if s.startswith("#"):
+        s = s[1:]
+    elif s.startswith("0x"):
+        s = s[2:]
+    if len(s) != 6 or any(ch not in "0123456789abcdef" for ch in s):
+        return None
+    return "0x" + s.upper()
+
+
+def _palette_for_shot(shot):
+    """shot の reference_visual.color_palette_hex を優先し、無ければ shot_id から
+    _PALETTE の循環選択にフォールバックする。参考動画の実色を mock でも表現するため。
+    """
+    if isinstance(shot, dict):
+        rv = shot.get("reference_visual")
+        if isinstance(rv, dict):
+            palette = rv.get("color_palette_hex") or []
+            if isinstance(palette, list):
+                converted = [c for c in (_hex_to_ff_color(x) for x in palette) if c]
+                if len(converted) >= 2:
+                    return converted[0], converted[1]
+                if len(converted) == 1:
+                    # 1色しか無ければ、_PALETTE の同idx色と組み合わせて自然なグラデにする
+                    fallback = _palette_for(shot.get("id"))
+                    return converted[0], fallback[1]
+    return _palette_for((shot or {}).get("id") if isinstance(shot, dict) else None)
+
+
 def _escape_drawtext(text):
     """drawtextフィルタのtext=値として安全な形にエスケープする（':' '\\' '%' 等）。"""
     text = text or ""
@@ -153,7 +186,7 @@ def build_mock_cmd(ffmpeg_bin, shot, out_path, fonts_dir=None):
             "crop={w}:{h}".format(w=OUT_W, h=OUT_H),
         ]
     else:
-        c0, c1 = _palette_for(shot_id)
+        c0, c1 = _palette_for_shot(shot)
         gradients_src = (
             "gradients=size={w}x{h}:rate={fps}:speed=0.03:c0={c0}:c1={c1}:x0=0:y0=0:x1={w}:y1={h}"
         ).format(w=OUT_W, h=OUT_H, fps=FPS, c0=c0, c1=c1)

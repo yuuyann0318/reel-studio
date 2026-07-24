@@ -34,7 +34,12 @@ segments(ASR): {SEGMENTS_JSON}
   各ショットの start は当該カット時刻、end は次のカット時刻（最後は duration_sec）。
   さらに vision の F3 拡張フィールド（shot_size / subject_count / camera_move /
   color_mood）が該当区間で得られていれば、その区間内の最頻値を **各ショットにコピー**すること。
-  vision 側で値が無いフィールドは空文字列 / 0 のまま返してよい。
+  加えて P2 拡張フィールド (framing / location / lighting / color_palette_hex) も
+  該当区間の vision 出力から**最頻値**（palette は上位2〜3色の頻度マージ）を各ショットに
+  コピーすること。visual_desc_en は同一区間内の複数フレームの記述を統合して
+  **2〜3文** にまとめる（前景・背景・動きの3要素を必ず含める。単なる貼り合わせではなく
+  最頻の被写体・場所・動きに絞る）。vision 側で値が無いフィールドは空文字列 / [] / 0 の
+  まま返してよい。
 - telops: visionで検出されたテロップを、時間順にまとめる。同一テロップが複数フレームで連続する場合は
   start/end を統合。position/color/stroke/emphasis_words を保持。
 - sfx_events: 入力オンセット表をそのまま採用し、anchor と kind と confidence を保持。
@@ -54,7 +59,7 @@ segments(ASR): {SEGMENTS_JSON}
   "beats": [{"role": "hook", "start": 0.0, "end": 2.0, "text": "…", "summary": "…"}],
   "rhythm": {"sentence_count": 0, "avg_sentence_len": 0, "max_sentence_len": 0, "tone": "", "endings": []},
   "cuts": [{"t": 0.0, "confidence": 0.9}],
-  "shots_ref": [{"index": 0, "start": 0.0, "end": 2.0, "visual_desc_en": "…", "motion": "static", "shot_size": "medium", "subject_count": 1, "camera_move": "none", "color_mood": "warm"}],
+  "shots_ref": [{"index": 0, "start": 0.0, "end": 2.0, "visual_desc_en": "Foreground sentence. Background sentence. Motion sentence.", "motion": "static", "shot_size": "medium", "subject_count": 1, "camera_move": "none", "color_mood": "warm", "framing": "product_on_hand", "location": "bathroom", "lighting": "soft daylight", "color_palette_hex": ["#f4e6d0", "#3b2a1a"]}],
   "telops": [{"start": 0.0, "end": 2.0, "text": "…", "position": "top", "style": {"color": "white", "stroke": "black stroke", "size_class": "large"}, "emphasis_words": []}],
   "sfx_events": [{"t": 0.5, "kind": "transition", "anchor": "cut", "confidence": 0.8}],
   "bgm": {"present": true, "mood_guess": ""},

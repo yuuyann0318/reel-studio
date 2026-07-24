@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import time
+from typing import List, Optional  # noqa: F401 — _augment_prompt_with_reference_visual で使用
 
 from pipeline.config import load_config
 from pipeline.visual.base import VisualBackend, VisualBackendError
@@ -152,69 +153,143 @@ def _resolve_cli_bin(configured):
     return configured
 
 
-def _augment_prompt_with_reference_visual(base_prompt, shot):
-    """R2b F4: 参考動画の映像情報（reference_visual）と motion_preset/motion_intensity を
-    元に、visual_prompt 末尾へカメラワーク・構図・色調の英語句を機械的に追記する。
+_FRAMING_PHRASES = {
+    "rule_of_thirds": "rule-of-thirds framing",
+    "center": "centered framing",
+    "symmetric": "symmetric framing",
+    "low_angle": "low-angle framing",
+    "high_angle": "high-angle framing",
+    "eye_level": "eye-level framing",
+    "over_the_shoulder": "over-the-shoulder framing",
+    "aerial": "aerial framing",
+    "dutch_angle": "dutch-angle framing",
+    "top_down": "top-down framing",
+    "closeup_face": "close-up face framing",
+    "product_on_hand": "product-on-hand framing",
+    "flatlay": "flatlay top-down framing",
+}
 
-    LLM が visual_prompt にこれらを既に盛り込んでいるとは限らないため、Higgsfield 実
-    生成の直前に決定論で「camera slowly pans to the left」等を末尾補足として付ける。
-    reference_visual が空 or 参考情報が無い shot は基のまま返す（後方互換）。
+
+def _camera_phrase(cam: str, intensity: str) -> "Optional[str]":
+    """camera_move ラベルと intensity を英語のカメラ句に変換する。未対応ラベルは None。"""
+    cam = (cam or "").strip().lower()
+    if cam in ("pan_l", "pan_left"):
+        phrase = "camera pans to the left"
+    elif cam in ("pan_r", "pan_right"):
+        phrase = "camera pans to the right"
+    elif cam == "tilt_up":
+        phrase = "camera tilts up"
+    elif cam == "tilt_down":
+        phrase = "camera tilts down"
+    elif cam == "zoom_in":
+        phrase = "camera slowly zooms in"
+    elif cam == "zoom_out":
+        phrase = "camera slowly zooms out"
+    elif cam == "handheld":
+        phrase = "handheld camera with natural micro-motion"
+    elif cam == "dolly":
+        phrase = "smooth dolly move"
+    else:
+        return None
+    intensity = (intensity or "").strip().lower()
+    if intensity == "strong":
+        phrase = phrase.replace("slowly ", "").replace("with natural ", "with pronounced ")
+        phrase = phrase + " (strong)"
+    elif intensity == "weak":
+        if "slowly" not in phrase and "natural" not in phrase:
+            phrase = "subtle " + phrase
+    return phrase
+
+
+def _augment_prompt_with_reference_visual(base_prompt, shot):
+    """P2: 「参考shotの再現」を主文に据え、商品/テーマは挿入句として従属させる。
+
+    従来（R2b F4）は base_prompt = 商品/テーマ主導の LLM 出力に対して、カメラ・構図・色調を
+    末尾補足として足すだけだったため、visual_prompt の主語が最後まで商品/テーマのままだった。
+    P2 では **参考shotの映像（reference_visual）を再現する** ことを主文にし、base_prompt は
+    その内部で何を映すかを差し替える挿入句として扱う。
+
+    構成（reference_visual が dict のとき）:
+        "Recreate reference shot: <visual_desc_en>. Location: <location>. "
+        "Framing: <framing_phrase or shot_size composition>. Lighting: <lighting>. "
+        "Camera: <camera_phrase>. Palette: <#a #b #c>. Color mood: <color_mood>. "
+        "Subject in this shot: <base_prompt>."
+
+    テストとの互換のため、camera_phrase/構図/色調の英語句は従来のものを踏襲する
+    （"camera pans to the left" / "medium shot composition" / "warm color mood" 等）。
+    reference_visual が空・参考情報が無い shot は base_prompt をそのまま返す（後方互換）。
     """
     if not isinstance(base_prompt, str):
         base_prompt = ""
-    parts = []
     rv = shot.get("reference_visual") if isinstance(shot, dict) else None
-    if isinstance(rv, dict):
-        cam = (rv.get("camera_move") or "").strip().lower()
-        intensity = (rv.get("intensity") or shot.get("motion_intensity") or "").strip().lower()
-        cam_phrase = None
-        if cam in ("pan_l", "pan_left"):
-            cam_phrase = "camera pans to the left"
-        elif cam in ("pan_r", "pan_right"):
-            cam_phrase = "camera pans to the right"
-        elif cam == "tilt_up":
-            cam_phrase = "camera tilts up"
-        elif cam == "tilt_down":
-            cam_phrase = "camera tilts down"
-        elif cam == "zoom_in":
-            cam_phrase = "camera slowly zooms in"
-        elif cam == "zoom_out":
-            cam_phrase = "camera slowly zooms out"
-        elif cam == "handheld":
-            cam_phrase = "handheld camera with natural micro-motion"
-        elif cam == "dolly":
-            cam_phrase = "smooth dolly move"
-        if cam_phrase:
-            if intensity == "strong":
-                cam_phrase = cam_phrase.replace("slowly ", "").replace("with natural ", "with pronounced ")
-                cam_phrase = cam_phrase + " (strong)"
-            elif intensity == "weak":
-                if "slowly" not in cam_phrase and "natural" not in cam_phrase:
-                    cam_phrase = "subtle " + cam_phrase
-            parts.append(cam_phrase)
-        shot_size = (rv.get("shot_size") or "").strip().lower()
-        if shot_size and shot_size != "":
-            if shot_size in ("closeup", "close_up", "close-up"):
-                parts.append("close-up composition")
-            elif shot_size == "medium":
-                parts.append("medium shot composition")
-            elif shot_size == "wide":
-                parts.append("wide shot composition")
-        color_mood = (rv.get("color_mood") or "").strip().lower()
-        if color_mood:
-            parts.append("{} color mood".format(color_mood))
+    if not isinstance(rv, dict):
+        return base_prompt
+
+    desc = (rv.get("desc_en") or "").strip()
+    location = (rv.get("location") or "").strip()
+    framing_raw = (rv.get("framing") or "").strip().lower()
+    lighting = (rv.get("lighting") or "").strip()
+    color_mood = (rv.get("color_mood") or "").strip().lower()
+    shot_size = (rv.get("shot_size") or "").strip().lower()
+    cam = (rv.get("camera_move") or "").strip().lower()
+    intensity = (rv.get("intensity") or shot.get("motion_intensity") or "").strip().lower()
+    palette = rv.get("color_palette_hex") or []
+    if not isinstance(palette, list):
+        palette = []
+
+    framing_phrase = ""
+    if framing_raw in _FRAMING_PHRASES:
+        framing_phrase = _FRAMING_PHRASES[framing_raw]
+    else:
+        if shot_size in ("closeup", "close_up", "close-up"):
+            framing_phrase = "close-up composition"
+        elif shot_size == "medium":
+            framing_phrase = "medium shot composition"
+        elif shot_size == "wide":
+            framing_phrase = "wide shot composition"
+
+    cam_phrase = _camera_phrase(cam, intensity)
+
+    # base_prompt 側に既にカメラワーク文言があれば重複させない（回帰テスト保護）。
+    lowered = base_prompt.lower()
+    base_has_camera = any(kw in lowered for kw in ("camera pan", "camera tilt", "camera zoom", "handheld", "dolly"))
+
+    parts: List[str] = []
+    if desc:
+        parts.append("Recreate reference shot: {}".format(desc.rstrip(". ")))
+    if location:
+        parts.append("in {}".format(location))
+    if framing_phrase:
+        parts.append(framing_phrase)
+    if lighting:
+        # 「natural lighting」「soft daylight lighting」等。既に "lighting" を含むなら重複防止。
+        light = lighting if "lighting" in lighting.lower() else "{} lighting".format(lighting)
+        parts.append(light)
+    if cam_phrase and not base_has_camera:
+        parts.append(cam_phrase)
+    if palette:
+        # プロンプト内では常に小文字 #rrggbb に統一（LLM の色比較を安定させる）。
+        clean_palette = [
+            c.strip().lower() for c in palette
+            if isinstance(c, str) and c.strip().startswith("#")
+        ]
+        if clean_palette:
+            parts.append("palette {}".format(" ".join(clean_palette[:3])))
+    if color_mood:
+        parts.append("{} color mood".format(color_mood))
+
+    # 参考情報が何も無ければ従来どおり base_prompt そのまま返す（後方互換）。
     if not parts:
         return base_prompt
-    suffix = ", ".join(parts)
-    # 過剰重複を避ける（既に prompt に camera/pan/zoom 単語があれば追記しない）
-    lowered = base_prompt.lower()
-    if any(kw in lowered for kw in ("camera pan", "camera tilt", "camera zoom", "handheld", "dolly")):
-        # 既にカメラワーク文言がある場合はカメラ句だけスキップし、構図/色調のみ足す
-        rest = [p for p in parts if not p.startswith("camera") and "handheld" not in p and "dolly" not in p]
-        if not rest:
-            return base_prompt
-        return base_prompt.rstrip(". ") + ". " + ", ".join(rest)
-    return base_prompt.rstrip(". ") + ". " + suffix
+
+    subject = base_prompt.strip().rstrip(". ")
+    if subject:
+        parts.append("Subject in this shot: {}".format(subject))
+    return ". ".join(parts) + "."
+
+
+# Optional 型ヒントを遅延解決するため、モジュール末尾で import する必要はない
+# （関数内では文字列としてのみ扱っている）。
 
 
 def _build_create_cmd(cli_bin, model, shot, resolution):

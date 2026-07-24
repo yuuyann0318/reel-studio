@@ -612,6 +612,70 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
 
 
 # ---------------------------------------------------------------------------
+# 7. product_subordination（P2・商品モードが cut/camera/beat 骨格を歪めていないか）
+# ---------------------------------------------------------------------------
+
+# 骨格系指標（この差分が ±SUBORDINATION_TOLERANCE 以内なら「商品は従属」と判定）:
+# telop_iou / telop_style は telop の文言や配置に依るため対象外
+# （商品情報を加えると telop 表現が変わりうるが、参考の cut/camera/beat 構造を
+# 壊さなければ subordination_ok とみなす）。
+_SUBORDINATION_SKELETON_METRICS = ("cut_match", "camera_move", "beat_alignment")
+
+
+def compute_product_subordination(
+    fid_no_product: Dict[str, Any],
+    fid_with_product: Dict[str, Any],
+    tolerance: float = 0.1,
+) -> Dict[str, Any]:
+    """商品ありplan / 商品なしplan の fidelity 差から、商品モードが参考の骨格
+    （cut / camera / beat）を歪めていないかを判定する。
+
+    Args:
+        fid_no_product: compute_fidelity() の結果（商品なしplan）
+        fid_with_product: 同（商品ありplan）
+        tolerance: 骨格系指標の許容差。既定 ±0.1。
+
+    Returns: {
+        "subordination_ok": bool,
+        "tolerance": float,
+        "diffs": {metric: {"no_product": v1, "with_product": v2, "delta": abs(v1-v2), "within": bool}},
+        "unmeasurable": [metric,...]  # どちらかが None（未測定）で比較不能な指標
+    }
+    """
+    sum_no = (fid_no_product or {}).get("summary") or {}
+    sum_with = (fid_with_product or {}).get("summary") or {}
+    diffs: Dict[str, Any] = {}
+    unmeasurable: List[str] = []
+    ok = True
+    for metric in _SUBORDINATION_SKELETON_METRICS:
+        v1 = sum_no.get(metric)
+        v2 = sum_with.get(metric)
+        if v1 is None or v2 is None:
+            unmeasurable.append(metric)
+            continue
+        try:
+            delta = abs(float(v1) - float(v2))
+        except (TypeError, ValueError):
+            unmeasurable.append(metric)
+            continue
+        within = delta <= float(tolerance) + 1e-9
+        diffs[metric] = {
+            "no_product": float(v1),
+            "with_product": float(v2),
+            "delta": round(delta, 6),
+            "within": bool(within),
+        }
+        if not within:
+            ok = False
+    return {
+        "subordination_ok": bool(ok),
+        "tolerance": float(tolerance),
+        "diffs": diffs,
+        "unmeasurable": unmeasurable,
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -619,6 +683,11 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="TTP fidelity — 参考動画再現度の5指標を JSON で出力")
     p.add_argument("--reference-spec", required=True, help="reference_spec v2 の JSON パス")
     p.add_argument("--plan", required=True, help="生成 plan v2 の JSON パス")
+    p.add_argument("--plan-no-product", default=None,
+                   help="商品なしplan v2 の JSON パス。指定時、product_subordination も算出する。"
+                   "--plan は商品ありplan として解釈される。")
+    p.add_argument("--subordination-tolerance", type=float, default=0.1,
+                   help="product_subordination の骨格指標差の許容値（既定 0.1）")
     p.add_argument("--out", default=None, help="結果 JSON の保存先（省略時は stdout）")
     args = p.parse_args(argv)
 
@@ -628,6 +697,15 @@ def main(argv=None) -> int:
         plan = json.load(f)
 
     result = compute_fidelity(ref, plan)
+    if args.plan_no_product:
+        with open(args.plan_no_product, "r", encoding="utf-8") as f:
+            plan_no = json.load(f)
+        fid_no = compute_fidelity(ref, plan_no)
+        result["product_subordination"] = compute_product_subordination(
+            fid_no, result, tolerance=float(args.subordination_tolerance),
+        )
+        # 参照用に商品なし側の summary も併記（差分の由来を追える）
+        result["no_product_summary"] = fid_no["summary"]
     payload = json.dumps(result, ensure_ascii=False, indent=2)
     if args.out:
         Path(args.out).write_text(payload + "\n", encoding="utf-8")

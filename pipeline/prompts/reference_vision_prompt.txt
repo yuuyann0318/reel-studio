@@ -13,7 +13,11 @@
 4. telop_stroke: 縁取り・シャドウ・帯背景の有無を短い英語で（例: "black stroke" / "yellow highlight" / "no stroke" / ""）。
 5. emphasis_words: 強調表示（大きさ・色・下線）されている単語の配列（無ければ [])。
 6. size_class: テロップの相対サイズ "small" / "medium" / "large" / "" のいずれか。
-7. visual_desc_en: 画面全体の映像内容を英語1〜2文で。被写体・カメラワーク・動きが分かる短文（60語以内）。
+7. visual_desc_en: 画面全体の映像内容を英語 **2〜3文** で。次の3要素を必ず入れること:
+   (a) 前景 (foreground): 主被写体・アクション・距離感（例: extreme close-up of a woman's hands squeezing serum onto her palm）。
+   (b) 背景 (background): 室内/屋外・場所・小道具（例: bright bathroom counter with tiled walls and a mirror）。
+   (c) 動き (motion / camera): 静的か・カメラの動き・被写体の動き（例: static handheld shot with subtle micro-motion）。
+   合計 120 語以内。断定的で具体的な名詞・動詞のみ（"beautiful"等の主観形容詞は避ける）。
 8. motion: 検出される動きの短い英語ラベル（例: "static" / "pan_left" / "zoom_in" / "cut_transition" / "person_talking"）。
 9. has_person: 画面に人物が写っているか true/false。
 10. has_product_logo: 商品ロゴ・ブランドロゴが写っているか true/false。
@@ -24,6 +28,17 @@
     "none" / "pan_l" / "pan_r" / "tilt_up" / "tilt_down" / "zoom_in" / "zoom_out" / "handheld" / "dolly"。
     静的なら "none"。motion と重複してよい（camera_move の方が下流の motion_preset に近い粒度）。
 14. color_mood: 色調を1語の英語ラベルで。例: "warm" / "cool" / "neutral" / "vivid" / "muted" / "monochrome" / "pastel"。
+15. framing: 構図・カメラアングルを1〜2語の英語ラベルで。次のいずれか:
+    "rule_of_thirds" / "center" / "symmetric" / "low_angle" / "high_angle" / "eye_level" /
+    "over_the_shoulder" / "aerial" / "dutch_angle" / "top_down" / "closeup_face" /
+    "product_on_hand" / "flatlay" / ""（判定不能）。
+16. location: 撮影場所を英語 **1〜3語** で。例: "bathroom" / "bedroom" / "kitchen" / "drugstore shelf" /
+    "outdoor city street" / "cafe" / "office desk" / "minecraft aerial world" / "cooking studio"。
+    ロケーションが読み取れなければ空文字列。
+17. lighting: 光の質を1〜2語の英語ラベルで。例: "natural" / "soft daylight" / "hard sunlight" /
+    "neon" / "warm indoor" / "cool fluorescent" / "backlit" / "low key" / "high key" / ""。
+18. color_palette_hex: 画面を支配する主要な色を **2〜3個の hex カラー**（"#RRGGBB" 小文字）で配列に。
+    例: ["#f4e6d0", "#3b2a1a"]（背景ベージュ+濃茶のツートン）。読み取れなければ空配列 []。
 
 # 出力スキーマ（必ずこのJSON配列のみを返す。最初の文字は [ 最後の文字は ] ）
 [
@@ -36,14 +51,18 @@
     "telop_stroke": "black stroke",
     "emphasis_words": ["…"],
     "size_class": "large",
-    "visual_desc_en": "A young woman looks into the camera in a bright bedroom, medium close-up, static.",
+    "visual_desc_en": "Extreme close-up of a woman's hands squeezing serum onto her palm. Bright bathroom counter with tiled walls and a mirror in the background. Static handheld shot with subtle micro-motion.",
     "motion": "static",
     "has_person": true,
     "has_product_logo": false,
-    "shot_size": "medium",
+    "shot_size": "closeup",
     "subject_count": 1,
     "camera_move": "none",
-    "color_mood": "warm"
+    "color_mood": "warm",
+    "framing": "product_on_hand",
+    "location": "bathroom",
+    "lighting": "soft daylight",
+    "color_palette_hex": ["#f4e6d0", "#3b2a1a"]
   }
 ]
 

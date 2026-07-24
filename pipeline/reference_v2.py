@@ -402,11 +402,23 @@ def synth_cuts_uniform(duration_sec: float, interval: float = 5.0) -> List[float
 # フレーム抽出（カット区間から2枚。上限を超えたら等間引き）
 # ---------------------------------------------------------------------------
 
-def select_frame_times_from_cuts(cuts: List[float], duration_sec: float, max_frames: int = 40) -> List[float]:
-    """各カット区間 (前カット, 次カット) から 2枚(直後+0.2s / 区間中央) の秒列を返す。
+def select_frame_times_from_cuts(
+    cuts: List[float],
+    duration_sec: float,
+    max_frames: int = 40,
+    frames_per_shot: int = 2,
+) -> List[float]:
+    """各カット区間 (前カット, 次カット) から `frames_per_shot` 枚のフレーム秒列を返す。
+
+    - frames_per_shot=2 (既定): 直後+0.2s / 区間中央 の2枚。旧挙動と後方互換。
+    - frames_per_shot=3 (P2 拡張・supreme_plus 用): 直後+0.2s / 区間中央 / 区間末-0.2s の
+      3枚を返し、色調・光・被写体の変化を細かく捉える。区間が短くて末端フレームが
+      中央と重なる場合は自動間引き（同一秒を dedup）。
+    - frames_per_shot>=4 は請求せず 3 にクリップ（vision コストが跳ねるため保険）。
 
     上限 max_frames を超える場合は等間引きする。cuts は0秒を含まない前提（先頭区間は [0, cuts[0]]）。
     """
+    fps_shot = max(1, min(3, int(frames_per_shot or 2)))
     boundaries = [0.0] + [float(c) for c in cuts] + [float(duration_sec or 0.0)]
     # 重複除去+単調非減少
     dedup = []
@@ -417,16 +429,23 @@ def select_frame_times_from_cuts(cuts: List[float], duration_sec: float, max_fra
     for i in range(len(dedup) - 1):
         seg_start = dedup[i]
         seg_end = dedup[i + 1]
-        if seg_end - seg_start < 0.1:
+        seg_len = seg_end - seg_start
+        if seg_len < 0.1:
             continue
         # 直後 +0.2s (区間長が0.4s未満なら 区間長の1/4)
-        offset = 0.2 if (seg_end - seg_start) >= 0.4 else max(0.05, (seg_end - seg_start) / 4.0)
-        t1 = seg_start + offset
-        # 区間中央
-        t2 = seg_start + (seg_end - seg_start) / 2.0
+        head_off = 0.2 if seg_len >= 0.4 else max(0.05, seg_len / 4.0)
+        t1 = seg_start + head_off
         times.append(round(min(t1, seg_end - 0.02), 3))
-        if abs(t2 - t1) > 0.1:
-            times.append(round(min(t2, seg_end - 0.02), 3))
+        if fps_shot >= 2:
+            t2 = seg_start + seg_len / 2.0
+            if abs(t2 - t1) > 0.1:
+                times.append(round(min(t2, seg_end - 0.02), 3))
+        if fps_shot >= 3 and seg_len >= 0.6:
+            # 区間末尾 -0.2s（ただし head/mid と重ならない場合のみ）
+            tail_off = 0.2 if seg_len >= 0.6 else max(0.05, seg_len / 4.0)
+            t3 = seg_end - tail_off
+            if all(abs(t3 - t) > 0.1 for t in (times[-2:] if len(times) >= 2 else times)):
+                times.append(round(max(t3, seg_start + 0.02), 3))
     times = sorted(set(times))
     if len(times) <= max_frames:
         return times
@@ -438,6 +457,62 @@ def select_frame_times_from_cuts(cuts: List[float], duration_sec: float, max_fra
         if idx < len(times):
             thinned.append(times[idx])
     return sorted(set(thinned))
+
+
+_ALLOWED_FRAMING_TOKENS = {
+    "rule_of_thirds", "center", "symmetric", "low_angle", "high_angle", "eye_level",
+    "over_the_shoulder", "aerial", "dutch_angle", "top_down", "closeup_face",
+    "product_on_hand", "flatlay",
+}
+
+
+def _normalize_palette_hex(raw: Any) -> List[str]:
+    """vision 応答の color_palette_hex を "#rrggbb" のリストに正規化する。
+
+    - 数値・空文字・None は捨てる
+    - "0xFFAA00" / "FFAA00" / "#ffaa00" などの表記ゆれを "#ffaa00" に統一
+    - 最大 3 色（重複は除去、順序は保持）
+    """
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    for c in raw:
+        if not isinstance(c, str):
+            continue
+        s = c.strip().lower()
+        if s.startswith("0x"):
+            s = "#" + s[2:]
+        elif not s.startswith("#"):
+            s = "#" + s
+        # #RRGGBB 6桁のみ受理（透明度・短縮は捨てる）
+        if len(s) != 7:
+            continue
+        if not all(ch in "0123456789abcdef" for ch in s[1:]):
+            continue
+        if s not in out:
+            out.append(s)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _resolve_frames_per_shot(cfg: Optional[Dict[str, Any]]) -> int:
+    """cfg から frames_per_shot を決める。
+
+    優先順位:
+      1. `reference.frames_per_shot` が明示されていればその値
+      2. `director_quality == "supreme_plus"` なら 3
+      3. それ以外は 2（従来挙動）
+    """
+    cfg = cfg or {}
+    ref_cfg = cfg.get("reference") or {}
+    explicit = ref_cfg.get("frames_per_shot")
+    if isinstance(explicit, int) and explicit >= 1:
+        return min(3, explicit)
+    quality = (cfg.get("director_quality") or "").strip().lower()
+    if quality == "supreme_plus":
+        return 3
+    return 2
 
 
 def extract_frames_at_times(
@@ -708,6 +783,13 @@ def analyze_frames_with_vision(
                     "subject_count": int(item.get("subject_count")) if isinstance(item.get("subject_count"), (int, float)) else 0,
                     "camera_move": item.get("camera_move") or "",
                     "color_mood": item.get("color_mood") or "",
+                    # P2 拡張: 参考ショットの構図・場所・光・パレット。director の
+                    # _map_reference_visual_to_shots が読み取り済みで、あとは vision
+                    # プロンプト側で供給できれば shot まで貫通する。
+                    "framing": (item.get("framing") or "").strip(),
+                    "location": (item.get("location") or "").strip(),
+                    "lighting": (item.get("lighting") or "").strip(),
+                    "color_palette_hex": _normalize_palette_hex(item.get("color_palette_hex")),
                 }
                 results.append(merged)
         else:
@@ -1065,7 +1147,11 @@ def analyze_reference_v2(
         # -----------------------------------------------------------------
         _progress("extract_frames")
         max_frames = int(ref_cfg.get("max_frames", 40))
-        frame_times = select_frame_times_from_cuts(cuts, duration_sec, max_frames=max_frames)
+        frames_per_shot = _resolve_frames_per_shot(cfg)
+        meta["frames_per_shot"] = frames_per_shot
+        frame_times = select_frame_times_from_cuts(
+            cuts, duration_sec, max_frames=max_frames, frames_per_shot=frames_per_shot,
+        )
         frames_dir = os.path.join(tmp_dir or tempfile.gettempdir(), "frames")
         if extract_frames_fn is extract_frames_at_times:
             frames = extract_frames_fn(ffmpeg_bin, video_path, frame_times, frames_dir)
@@ -1221,6 +1307,19 @@ def analyze_reference_v2(
                 }
 
         # -----------------------------------------------------------------
+        # P2: LLM 融合結果に framing/location/lighting/color_palette_hex が
+        # 抜けていても vision_results 側の該当区間から機械的に補完する
+        # （LLM が fusion prompt でこれらを漏らしても shots_ref に到達させる）。
+        # -----------------------------------------------------------------
+        try:
+            enrich_stats = _enrich_shots_ref_from_vision(
+                normalized_spec, vision_results, duration_sec,
+            )
+            meta["shots_ref_enrich"] = enrich_stats
+        except Exception as exc:
+            warnings.append("shots_ref_enrich 失敗: {}".format(str(exc)[:200]))
+
+        # -----------------------------------------------------------------
         # R2b F2/F8/F7/F6: 決定論的な後段整形（LLM 融合結果を機械観測で補正）
         # -----------------------------------------------------------------
         # F2: 光学フローの camera_move で shots_ref を上書き
@@ -1372,6 +1471,137 @@ def _normalize_v2_from_llm(
         }
     spec["warnings"] = list(spec.get("warnings") or []) + list(warnings or [])
     return spec
+
+
+def _pick_mode(values: List[str]) -> str:
+    """空文字を無視して最頻値を返す。全て空なら ""。"""
+    counts: Dict[str, int] = {}
+    for v in values:
+        if isinstance(v, str) and v.strip():
+            k = v.strip()
+            counts[k] = counts.get(k, 0) + 1
+    if not counts:
+        return ""
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _merge_palette_hex(hex_lists: List[List[str]], limit: int = 3) -> List[str]:
+    """複数の palette を出現頻度順にマージし、上位 `limit` 色を返す（重複除去・順序=頻度降順）。"""
+    counts: Dict[str, int] = {}
+    for palette in hex_lists:
+        if not isinstance(palette, list):
+            continue
+        for c in palette:
+            if not isinstance(c, str):
+                continue
+            k = c.strip().lower()
+            if len(k) == 7 and k.startswith("#"):
+                counts[k] = counts.get(k, 0) + 1
+    if not counts:
+        return []
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [k for k, _ in ranked[:limit]]
+
+
+def _combine_visual_desc_en(existing: str, extras: List[str]) -> str:
+    """既存の visual_desc_en が1文以下なら vision_results の説明を追記して 2〜3 文に伸ばす。
+
+    既存が既に十分な情報量（80文字以上）を持っていればそのまま返す。
+    """
+    base = (existing or "").strip()
+    if len(base) >= 80:
+        return base
+    seen = base
+    for extra in extras:
+        e = (extra or "").strip()
+        if not e or e == base:
+            continue
+        # 既存と重複する文はスキップ（先頭 30 文字が既存にあれば重複扱い）
+        if e[:30] and e[:30] in seen:
+            continue
+        seen = (seen + " " + e).strip()
+        if len(seen) >= 160:
+            break
+    return seen
+
+
+def _enrich_shots_ref_from_vision(
+    spec: Dict[str, Any],
+    vision_results: List[Dict[str, Any]],
+    duration_sec: float,
+) -> Dict[str, Any]:
+    """LLM 融合結果の shots_ref に framing / location / lighting / color_palette_hex を
+    vision_results の該当区間から補完し、visual_desc_en が 1 文しかなければ他フレームの
+    記述を追記して 2〜3 文に伸ばす。副作用: spec["shots_ref"] を破壊的に更新。
+
+    Returns 統計 dict（テスト・観測用）。
+    """
+    stats = {"enriched": 0, "palette_added": 0, "desc_extended": 0, "framing_added": 0}
+    shots_ref = spec.get("shots_ref") if isinstance(spec, dict) else None
+    if not isinstance(shots_ref, list) or not shots_ref:
+        return stats
+    for shot in shots_ref:
+        if not isinstance(shot, dict):
+            continue
+        s = shot.get("start")
+        e = shot.get("end")
+        if not isinstance(s, (int, float)) or not isinstance(e, (int, float)):
+            continue
+        s_f = float(s)
+        e_f = float(e)
+        # 区間内の vision フレームを拾う（境界一致はより小さい方の shot に含める）
+        in_shot = [
+            v for v in (vision_results or [])
+            if isinstance(v, dict) and isinstance(v.get("time"), (int, float))
+            and s_f - 1e-3 <= float(v["time"]) < e_f + 1e-3
+        ]
+        if not in_shot:
+            continue
+        enriched_here = False
+        if not (shot.get("framing") or "").strip():
+            framing = _pick_mode([v.get("framing") for v in in_shot])
+            if framing:
+                shot["framing"] = framing
+                stats["framing_added"] += 1
+                enriched_here = True
+        if not (shot.get("location") or "").strip():
+            location = _pick_mode([v.get("location") for v in in_shot])
+            if location:
+                shot["location"] = location
+                enriched_here = True
+        if not (shot.get("lighting") or "").strip():
+            lighting = _pick_mode([v.get("lighting") for v in in_shot])
+            if lighting:
+                shot["lighting"] = lighting
+                enriched_here = True
+        # codex-review 指摘(P2): LLM が返した palette が非空でも malformed(大文字/0x/無効値)
+        # だと下流(mock gradients / higgsfield prompt)が拾えない。まず既存 palette を
+        # _normalize_palette_hex で正規化し、正規化後が空なら vision 側 palette を採用する。
+        existing_palette = shot.get("color_palette_hex")
+        normalized_existing = _normalize_palette_hex(existing_palette) if isinstance(existing_palette, list) else []
+        if normalized_existing:
+            # 正規化して形が変わった場合はその形を反映（大文字 → 小文字などの上書き）。
+            if normalized_existing != existing_palette:
+                shot["color_palette_hex"] = normalized_existing
+                enriched_here = True
+        else:
+            palette = _merge_palette_hex([v.get("color_palette_hex") for v in in_shot])
+            if palette:
+                shot["color_palette_hex"] = palette
+                stats["palette_added"] += 1
+                enriched_here = True
+        # visual_desc_en の補強（既存が1文以下のとき他フレームの記述を追記）
+        combined = _combine_visual_desc_en(
+            shot.get("visual_desc_en") or "",
+            [v.get("visual_desc_en") for v in in_shot],
+        )
+        if combined and combined != (shot.get("visual_desc_en") or ""):
+            shot["visual_desc_en"] = combined
+            stats["desc_extended"] += 1
+            enriched_here = True
+        if enriched_here:
+            stats["enriched"] += 1
+    return stats
 
 
 def _correct_v2_spec(
