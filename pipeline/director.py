@@ -111,6 +111,36 @@ _SFX_SALIENT_MATCH_WINDOW_SEC = 0.3
 # 15字以上の連続一致検出(丸写し検査)の閾値
 _VERBATIM_OVERLAP_MIN_LEN = 15
 
+# F13: narration_jp 文字数バジェット。参考動画のリズム(=カット割り)を再現するため、
+# 各 shot の narration_jp 文字数を「expected_narration_chars（無ければ 尺 × chars_per_sec、
+# 既定 6.5字/秒）× (1 + 15%)」で拘束する。超過は矯正リトライ対象（TTS 実尺が伸びて
+# 音声主導同期モードで shot が引き伸ばされる→ telop_iou / cut_match が崩れるのを防ぐ）。
+_NARRATION_CHAR_BUDGET_TOLERANCE_RATIO = 0.15
+_NARRATION_DEFAULT_CHARS_PER_SEC = 6.5
+
+
+def _narration_char_budget(shot_dict, chars_per_sec_fallback):
+    """1 shot ぶんの許容文字数（上限）を返す。0 以下なら None（検査対象外）を返す。
+
+    優先順位:
+      1. shot["expected_narration_chars"] があればそれを budget として使う。
+      2. なければ shot["duration_sec"] × chars_per_sec_fallback（>0 のとき）。
+      3. どちらも取れなければ None を返す（検査スキップ）。
+    """
+    budget = None
+    ec = shot_dict.get("expected_narration_chars")
+    if isinstance(ec, (int, float)) and ec > 0:
+        budget = float(ec)
+    else:
+        dur = shot_dict.get("duration_sec")
+        cps = chars_per_sec_fallback
+        if isinstance(dur, (int, float)) and dur > 0 and isinstance(cps, (int, float)) and cps > 0:
+            budget = float(dur) * float(cps)
+    if budget is None or budget <= 0:
+        return None
+    max_chars = int(math.floor(budget * (1.0 + _NARRATION_CHAR_BUDGET_TOLERANCE_RATIO)))
+    return max(1, max_chars)
+
 
 class TTPReferenceRequiredError(RuntimeError):
     """LLM 経路で reference が未指定のときに送出する例外。
@@ -1208,6 +1238,47 @@ def _validate_plan_matches_skeleton(plan, skeleton, target_duration_sec):
             )
         )
 
+    # F13: narration_jp 文字数バジェット検査。
+    # 参考動画のリズム(=カット割り)を再現するため、narration_jp を「shotの表示尺で音読しきれる」
+    # 長さに拘束する。バジェットの基準は次の優先順位:
+    #   1) shot.expected_narration_chars（build_shot_skeleton が参考動画の実測 cps で計算した値）
+    #   2) skeleton.narration_rhythm.chars_per_sec × shot.duration_sec
+    #   3) 既定 _NARRATION_DEFAULT_CHARS_PER_SEC(6.5字/秒) × shot.duration_sec
+    #      （参考動画が transcript を持っていなくても最低限のガードを効かせる）
+    rhythm = skeleton.get("narration_rhythm") or {}
+    try:
+        rhythm_cps = float(rhythm.get("chars_per_sec") or 0.0)
+    except (TypeError, ValueError):
+        rhythm_cps = 0.0
+    effective_cps = rhythm_cps if rhythm_cps > 0 else _NARRATION_DEFAULT_CHARS_PER_SEC
+    for i, (ps, ss) in enumerate(zip(plan_shots, skel_shots)):
+        text = ps.get("narration_jp")
+        if not isinstance(text, str) or not text.strip():
+            # 空はここでは対象外（別の validator が narration_script 一致で担保）。
+            continue
+        max_chars = _narration_char_budget(ss, effective_cps)
+        if max_chars is None:
+            continue
+        actual = len(text)
+        if actual > max_chars:
+            sid = ss.get("id")
+            # rhythm_cps=0 のときはメッセージの根拠を「既定値」と明示する（0.00 字/秒 と誤表示しない）。
+            budget_source = "expected_narration_chars" if ss.get("expected_narration_chars") else \
+                "尺{:.2f}s × {:.2f}字/秒({})".format(
+                    float(ss.get("duration_sec") or 0.0), effective_cps,
+                    "参考動画実測" if rhythm_cps > 0 else "既定値",
+                )
+            errors.append(
+                "shots[{}(id={})].narration_jp が文字数バジェットを超過しています"
+                "(実{}字 > 上限{}字, 元は{} × +{:.0f}%許容). 短く書き直してください。"
+                "冗長表現（『〜のように』『そして』『けれども』『さらに』『実は』『やはり』"
+                "『ちなみに』の類）や重複するつなぎ言葉を削り、shot 尺内で音読できる長さに"
+                "調整してください。この shot は参考動画のカット割りを再現するため尺を延ばせません。".format(
+                    i, sid, actual, max_chars, budget_source,
+                    _NARRATION_CHAR_BUDGET_TOLERANCE_RATIO * 100.0,
+                )
+            )
+
     return errors
 
 
@@ -1535,6 +1606,12 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
             "入っている shot 集合とスケルトンで caption_in_offset_sec が指定されている shot 集合は"
             "完全一致していなければならない。rewrite では caption_jp の文言のみを推敲し、caption を"
             "新たに追加/削除しないこと（追加/削除は不合格の原因になる）。\n\n"
+            "**narration_jp 文字数バジェット厳守（F13）**: 各 shot の `narration_jp` は "
+            "`expected_narration_chars`（無ければ 尺×既定 6.5字/秒）× **+15% までが絶対上限**。"
+            "超過は不合格。表現の質を上げるとき、**長くしないこと**（短くする方向のみ許可）。"
+            "冗長表現（『〜のように』『そして』『けれども』『さらに』『実は』『やはり』"
+            "『ちなみに』『〜という感じで』）と重複するつなぎ言葉を削り、断定・体言止め・"
+            "短い動詞句で書き直すこと。文が長いと TTS 実尺が伸び、参考動画のカット割りが崩れる。\n\n"
             "ドラフト:\n" + json.dumps(plan, ensure_ascii=False, indent=2) + "\n\n---\n\n" + rewrite_prompt
         )
         rewrite_start = time.monotonic()

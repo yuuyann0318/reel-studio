@@ -1515,12 +1515,28 @@ def _render_project(project_id, plan, cfg):
     )
 
     sync_result = None
+    tempo_adjustments = []
     if sync_enabled:
         seg_texts = [narration_segments_map[s["id"]] for s in enabled_shots]
         seg_dir = work_dir / "narration_segments"
         sync_result = tts_mod.synthesize_segments(seg_texts, str(seg_dir), cfg, voice=cfg.get("voice", "Kyoko"))
         if not sync_result.get("ok"):
             sync_enabled = False
+        else:
+            # F13: TTS 尺整合ガードを Studio 再レンダ経路にも適用する（run.py と同挙動）。
+            # plan_durations は各 shot の trim 尺（enabled_shot["trim"] の end-start）。
+            plan_durations = [
+                float(s["trim"]["end"] - s["trim"]["start"]) for s in enabled_shots
+            ]
+            adjusted_segments, tempo_adjustments = render.enforce_tempo_guard_on_segments(
+                sync_result["segments"],
+                plan_durations=plan_durations,
+                ffmpeg_bin=ffmpeg_bin,
+                ffprobe_bin=cfg.get("ffprobe_bin") or None,
+                shot_ids=[s["id"] for s in enabled_shots],
+            )
+            # sync_result["segments"] を差し替えて後段（i 番目参照）にそのまま流す。
+            sync_result["segments"] = adjusted_segments
 
     # edit enhancement層（カット点SE/パンチイン/BGM音量カーブ/フックのインパクト）。
     # プロファイル読み込み自体が失敗しても従来レンダを継続する（edit_prof=Noneなら以降すべて無効化）。
@@ -1598,6 +1614,16 @@ def _render_project(project_id, plan, cfg):
             "requested_backend": sync_result.get("backend"), "fallback_reason": sync_result.get("fallback_reason"),
             "mode": "segment",
         }
+        # F13: 尺整合ガードの適用履歴を tts_meta に載せる（呼び出し側で report/render 表示に使う想定）。
+        if tempo_adjustments:
+            tts_meta["tempo_adjustments"] = tempo_adjustments
+            fully = sum(1 for a in tempo_adjustments if a.get("fully_absorbed"))
+            tts_meta["tempo_adjustments_summary"] = {
+                "count": len(tempo_adjustments),
+                "fully_absorbed": fully,
+                "residual_over_plan": len(tempo_adjustments) - fully,
+                "max_tempo": render.TEMPO_GUARD_MAX_TEMPO,
+            }
     else:
         tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
         tts_meta = dict(tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg))

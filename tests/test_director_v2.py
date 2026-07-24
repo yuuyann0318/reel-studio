@@ -33,7 +33,9 @@ def _plan_from_skeleton(skeleton, narration_text="オリジナルテスト用ナ
             shot["caption_jp"] = "テスト{}".format(s["id"])
         else:
             shot["caption_jp"] = ""
-        shot["narration_jp"] = narration_text
+        # F13: shot 尺で音読可能な長さへ切り詰め（既定 6.5字/秒 × 1.15 の上限）
+        budget = max(1, int(float(s.get("duration_sec") or 1.0) * 6.5 * 1.15))
+        shot["narration_jp"] = narration_text[:budget]
         shots.append(shot)
     return {
         "version": 2,

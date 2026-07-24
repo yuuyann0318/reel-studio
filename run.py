@@ -556,12 +556,23 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
 
             if sync_result and sync_result.get("ok"):
                 tts_mode = "segment"
+                # F13: TTS 尺整合ガード（共通ヘルパ）。断片実尺が plan 尺を超えたら atempo(<=1.15)で
+                # 圧縮吸収する。目標尺は plan - SYNC_GAP_SEC（gap 込みの表示尺で plan と一致させる）。
+                adjusted_segments, tempo_adjustments = render.enforce_tempo_guard_on_segments(
+                    sync_result["segments"],
+                    plan_durations=[float(s.get("duration_sec") or 0.0) for s in shots],
+                    ffmpeg_bin=cfg["ffmpeg_bin"],
+                    ffprobe_bin=cfg.get("ffprobe_bin") or None,
+                    shot_ids=[s["id"] for s in shots],
+                )
                 cursor = 0.0
                 segment_specs = []
-                for shot, seg in zip(shots, sync_result["segments"]):
-                    display = render.compute_synced_shot_duration(seg["duration_sec"])
+                for shot, seg in zip(shots, adjusted_segments):
+                    seg_dur = float(seg["duration_sec"])
+                    seg_path = seg["path"]
+                    display = render.compute_synced_shot_duration(seg_dur)
                     shot_display_durations[shot["id"]] = display
-                    segment_specs.append({"path": seg["path"], "start_sec": cursor})
+                    segment_specs.append({"path": seg_path, "start_sec": cursor})
                     cursor += display
                 cmd = render.build_narration_segments_concat_cmd(
                     cfg["ffmpeg_bin"], segment_specs, cursor, str(narration_wav_path)
@@ -587,6 +598,20 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             report["stages"]["tts"]["requested_backend"] = tts_meta.get("requested_backend")
             report["stages"]["tts"]["fallback_reason"] = tts_meta.get("fallback_reason")
             report["stages"]["tts"]["mode"] = tts_meta.get("mode")
+            # F13: TTS 尺整合ガードの適用履歴（segment モードのみ・非空のとき記録）
+            if tts_mode == "segment":
+                try:
+                    if tempo_adjustments:
+                        report["stages"]["tts"]["tempo_adjustments"] = tempo_adjustments
+                        fully = sum(1 for a in tempo_adjustments if a.get("fully_absorbed"))
+                        report["stages"]["tts"]["tempo_adjustments_summary"] = {
+                            "count": len(tempo_adjustments),
+                            "fully_absorbed": fully,
+                            "residual_over_plan": len(tempo_adjustments) - fully,
+                            "max_tempo": render.TEMPO_GUARD_MAX_TEMPO,
+                        }
+                except NameError:  # tempo_adjustments 未定義（安全ガード）
+                    pass
     except Exception:
         _write_report(report)
         return report

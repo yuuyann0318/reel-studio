@@ -41,6 +41,11 @@ def _plan_from_skeleton(skeleton, narration_text="オリジナルなナレーシ
 
     R3: telop 数の骨検査を通すため、caption_jp はスケルトンで caption_in_offset_sec
     が付いている shot だけに入れる（それ以外は空文字）。
+    F13: narration_jp 文字数バジェット検査を通すため、`narration_text` は各 shot の
+    表示尺で音読しきれる長さへ短縮する（既定 6.5字/秒 × +15% 許容が上限。長い場合は
+    その範囲へ切り詰める）。文言の verbatim(丸写し)検査を試したい呼び出し（bad_text）は、
+    最初の budget 分の文字（先頭 min(len,budget) 文字）を保持するので、参考テロップと
+    15字以上一致するプレフィックスを持つ検証が引き続き成立する。
     """
     shots = []
     for s in skeleton["shots"]:
@@ -51,7 +56,9 @@ def _plan_from_skeleton(skeleton, narration_text="オリジナルなナレーシ
             shot["caption_jp"] = "テスト{}".format(s["id"])
         else:
             shot["caption_jp"] = ""
-        shot["narration_jp"] = narration_text
+        # F13: shot 尺で音読可能な長さへ切り詰め（既定 6.5字/秒 × 1.15 の上限）
+        budget = max(1, int(float(s.get("duration_sec") or 1.0) * 6.5 * 1.15))
+        shot["narration_jp"] = narration_text[:budget]
         shots.append(shot)
     return {
         "version": 2,

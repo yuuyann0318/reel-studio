@@ -36,11 +36,17 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
    （空文字）で返すこと。**telop 数（caption を持つ shot 数）はスケルトンと完全一致**
    でなければならない（1個でも増減させると不合格）。参考動画のテロップは参考の実カット
    分布に沿って既に選定済みで、これを LLM が編集することは禁止（telop_iou が大きく崩れる）。
-   **話速の合わせ方（F7 参考リズム写像）**: skeleton の `narration_rhythm.chars_per_sec`
-   （参考動画の実測話速）が指定されていたら、それを目安に narration_jp の文字数を決めること。
-   各 shot に `expected_narration_chars` があれば、その値±20% を目標にすること
-   （例: expected=15 なら 12〜18字）。`narration_rhythm.avg_gap_sec` が大きい参考動画
-   （0.6秒以上）は「間」を大きく取る参考なので、shot境界を跨いだ文長を短めに設計すること。
+   **【narration_jp 文字数バジェット・F13・厳守】**: 各 shot の `narration_jp` は
+   `expected_narration_chars`（無ければ 尺×既定 6.5字/秒）× **+15% までを絶対上限**とする
+   （例: expected=15 なら **17字までで不合格ライン**。20字はアウト）。**超過すると自動不合格**
+   になり、矯正リトライで書き直しを強制される。理由: LLMの文が長いと TTS 実尺が伸び、
+   音声主導同期モードで shot が引き伸ばされ、**参考動画のカット割り・テロップ位置が全て崩れる**
+   （telop_iou / cut_match が壊滅する）。対処: 冗長表現（「〜のように」「そして」「けれども」
+   「さらに」「実は」「やはり」「ちなみに」「〜という感じで」）を全て削り、断定・体言止め・
+   短い動詞句で書く。**話速の合わせ方（F7 参考リズム写像）**: skeleton の
+   `narration_rhythm.chars_per_sec`（参考動画の実測話速）と `narration_rhythm.avg_gap_sec` を
+   前提の話速として使う。`avg_gap_sec` が大きい参考動画（0.6秒以上）は「間」を大きく取る
+   参考なので、shot境界を跨いだ文長を短めに設計すること。
 
 ## visual_prompt を書くときの最重要ルール（F10: 参考映像の忠実再現）
 - 各 shot に含まれる `reference_visual`（`desc_en` / `framing` / `location` /

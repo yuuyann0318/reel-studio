@@ -13,6 +13,7 @@ Python 3.9 互換構文のみ。
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 
 def escape_ffmpeg_filter_path(path):
@@ -82,6 +83,161 @@ def build_normalize_clip_cmd(ffmpeg_bin, in_path, out_path, duration_sec=None, t
 
 SYNC_GAP_SEC = 0.25  # 断片実測尺に足す「間」（無音の余白）
 SYNC_MIN_SHOT_SEC = 1.2  # ショット表示尺の下限
+
+# F13: TTS 尺整合ガード。TTS 実尺が plan 尺を +10% 超えたら atempo で圧縮吸収する。
+# 上限 1.15（音質劣化を避ける安全域）。適用したら report に記録する。
+TEMPO_GUARD_OVERRUN_RATIO = 0.10   # このぶんだけ許容（超過分は圧縮対象）
+TEMPO_GUARD_MAX_TEMPO = 1.15       # atempo の上限（超音質劣化しない範囲）
+TEMPO_GUARD_FFMPEG_TIMEOUT_SEC = 120  # atempo 変換の subprocess 上限（既存 render の方針に揃える）
+
+
+def apply_tempo_guard(ffmpeg_bin, ffprobe_bin, in_path, out_path,
+                       target_duration_sec, current_duration_sec,
+                       max_tempo=TEMPO_GUARD_MAX_TEMPO,
+                       ffmpeg_timeout_sec=TEMPO_GUARD_FFMPEG_TIMEOUT_SEC):
+    """TTS 断片の尺が plan 尺を超えたとき atempo で圧縮する。
+
+    仕様:
+      - current_duration_sec <= target_duration_sec なら圧縮せず applied=False を返す
+        （out_path は生成しない/呼び出し側は in_path をそのまま使えばよい）。
+      - 超過している場合 tempo = current / target（=倍速）を計算し、
+        [1.0, max_tempo] にクランプして atempo を適用。max_tempo が 1.0 未満で
+        呼ばれた場合は 1.0 として扱う（圧縮のみ・伸長はしない）。
+      - atempo の上限に達しても target まで届かないケースは applied=True + そのまま返し、
+        呼び出し側（run.py / studio jobs）が従来の伸長 + 警告フローに落とす。
+      - ffmpeg / ffprobe のプロセス起動失敗（FileNotFoundError 等）・タイムアウト・
+        非ゼロ終了は全て noop（applied=False, in_path 継続利用）として吸収する。
+
+    Returns:
+      {"applied": bool, "tempo": float, "new_duration_sec": float}
+      applied=False のときは new_duration_sec = current_duration_sec を返し、
+      out_path は生成しない（呼び出し側は in_path を使う）。
+    """
+    try:
+        cur = float(current_duration_sec)
+        tgt = float(target_duration_sec)
+    except (TypeError, ValueError):
+        return {"applied": False, "tempo": 1.0, "new_duration_sec": float(current_duration_sec or 0.0)}
+
+    if cur <= 0 or tgt <= 0:
+        return {"applied": False, "tempo": 1.0, "new_duration_sec": cur}
+
+    # 許容範囲内（=<= target）なら圧縮不要。
+    if cur <= tgt:
+        return {"applied": False, "tempo": 1.0, "new_duration_sec": cur}
+
+    # 目標倍速 = 元尺 / 目標尺。max_tempo は必ず 1.0 以上へクランプ（圧縮のみを許可・
+    # 呼び出し側の指定ミスで音声が「遅く」されるのを防ぐ）。
+    tempo = cur / tgt
+    if tempo <= 1.0:
+        return {"applied": False, "tempo": 1.0, "new_duration_sec": cur}
+    max_tempo_clamped = max(1.0, float(max_tempo))
+    tempo = min(tempo, max_tempo_clamped)
+
+    cmd = [
+        ffmpeg_bin, "-y", "-i", in_path,
+        "-filter:a", "atempo={:.4f}".format(tempo),
+        "-ar", "48000", "-ac", "1", "-c:a", "pcm_s16le",
+        out_path,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=ffmpeg_timeout_sec,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        # ffmpeg バイナリが無い/タイムアウト/その他 OS エラーは noop 化。
+        return {"applied": False, "tempo": 1.0, "new_duration_sec": cur}
+    if proc.returncode != 0:
+        # 失敗したら noop 相当（呼び出し側は元断片をそのまま使う）。
+        return {"applied": False, "tempo": 1.0, "new_duration_sec": cur}
+
+    # 新尺を ffprobe で実測（見積り cur/tempo と一致する想定だが実測で上書き）。
+    # ffprobe が使えないなら見積り値を返す。
+    new_dur = cur / tempo
+    if ffprobe_bin:
+        try:
+            probe = subprocess.run(
+                [ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", out_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                timeout=ffmpeg_timeout_sec,
+            )
+            new_dur = float(probe.stdout.decode("utf-8", "replace").strip())
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError, AttributeError):
+            # ffprobe 失敗は fatal ではない（見積り尺で継続）。
+            pass
+    return {"applied": True, "tempo": round(tempo, 4), "new_duration_sec": new_dur}
+
+
+def enforce_tempo_guard_on_segments(segments, plan_durations, ffmpeg_bin, ffprobe_bin,
+                                     overrun_ratio=TEMPO_GUARD_OVERRUN_RATIO,
+                                     max_tempo=TEMPO_GUARD_MAX_TEMPO,
+                                     shot_ids=None):
+    """TTS 断片のリストに対して F13 尺整合ガードを一括適用する共通ヘルパ。
+
+    run.py / studio.jobs の両方から呼ばれる。segments/plan_durations は同じ順序で
+    等長でなければならない。plan_durations[i] > 0 で seg.duration_sec が
+    plan_durations[i] × (1 + overrun_ratio) を超えるとき、apply_tempo_guard を
+    呼び出して圧縮する（out_path = seg["path"] + ".tempo.wav"）。
+
+    Args:
+      segments: [{"path": str, "duration_sec": float}, ...]
+      plan_durations: [float, ...]（各 shot の計画尺・SYNC_GAP_SEC 込みではなく
+        素の計画尺で渡すこと。ヘルパ内部で SYNC_GAP_SEC を差し引いて実際の
+        「TTS の目標尺」= plan - SYNC_GAP_SEC として atempo をかける。
+        これにより最終的な表示尺 = compute_synced_shot_duration(TTS) ≒ plan となる）
+      ffmpeg_bin / ffprobe_bin: 実行バイナリ。
+      shot_ids: 記録用の shot_id 列（省略時は index を使う）。
+
+    Returns:
+      (adjusted_segments, adjustments) のタプル。
+      adjusted_segments は入力と同順の [{"path", "duration_sec"}, ...]。
+      adjustments は [{"shot_id","plan_duration_sec","raw_tts_duration_sec","tempo",
+                        "adjusted_duration_sec","fully_absorbed"}, ...]（適用したものだけ）。
+    """
+    adjusted = []
+    adjustments = []
+    for i, seg in enumerate(segments or []):
+        seg_dur = float(seg.get("duration_sec") or 0.0)
+        seg_path = seg.get("path")
+        plan_dur = float(plan_durations[i]) if i < len(plan_durations) else 0.0
+        shot_id = shot_ids[i] if (shot_ids and i < len(shot_ids)) else "seg_{}".format(i)
+        # 表示尺(=TTS+SYNC_GAP_SEC)が plan × (1+許容) を超えるとき発火する。
+        # TTS 単体で判定すると gap のぶん見逃す（例: plan=3.0/gap=0.25 なら TTS=3.05 でも
+        # 表示 3.30 = plan+10% を超えるが素の +10% 判定では拾えない）。実効目標尺は
+        # SYNC_GAP_SEC を引いた値で圧縮する（最小 0.1 秒でクランプ）。
+        display_before = seg_dur + SYNC_GAP_SEC
+        overrun_threshold = plan_dur * (1.0 + overrun_ratio)
+        if plan_dur > 0 and display_before > overrun_threshold:
+            effective_target = max(0.1, plan_dur - SYNC_GAP_SEC)
+            adj_path = str(Path(seg_path).with_suffix(".tempo.wav")) if seg_path else None
+            if adj_path is None:
+                adjusted.append(dict(seg))
+                continue
+            guard = apply_tempo_guard(
+                ffmpeg_bin, ffprobe_bin, seg_path, adj_path,
+                target_duration_sec=effective_target,
+                current_duration_sec=seg_dur,
+                max_tempo=max_tempo,
+            )
+            if guard.get("applied"):
+                new_dur = float(guard.get("new_duration_sec") or seg_dur)
+                # 「完全吸収」= 圧縮後の表示尺(TTS+gap) が plan+許容内に収まる。
+                display_after = new_dur + SYNC_GAP_SEC
+                fully_absorbed = display_after <= plan_dur * (1.0 + overrun_ratio)
+                adjustments.append({
+                    "shot_id": shot_id,
+                    "plan_duration_sec": round(plan_dur, 3),
+                    "raw_tts_duration_sec": round(seg_dur, 3),
+                    "tempo": guard.get("tempo"),
+                    "adjusted_duration_sec": round(new_dur, 3),
+                    "fully_absorbed": bool(fully_absorbed),
+                })
+                adjusted.append({"path": adj_path, "duration_sec": new_dur})
+                continue
+        adjusted.append(dict(seg))
+    return adjusted, adjustments
 
 
 def compute_synced_shot_duration(segment_duration_sec):
