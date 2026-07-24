@@ -940,76 +940,98 @@ def _build_v2_captions(enabled_shots, shot_display_durations, timebase, ntsc,
         timing = aligned[i]
         if timing["dur_frames"] <= 0:
             continue
-        caption_text = (shot.get("caption") or shot.get("caption_jp") or "").strip()
-        if not caption_text:
-            continue
-
-        # caption_in/out offset (plan v2)。未指定なら全区間。
-        cap_in_off = shot.get("caption_in_offset_sec")
-        cap_out_off = shot.get("caption_out_offset_sec")
         shot_start_sec = timing["start_sec"]
         shot_end_sec = timing["end_sec"]
-        if cap_in_off is not None:
-            in_sec = shot_start_sec + float(cap_in_off)
-        else:
-            in_sec = shot_start_sec
-        if cap_out_off is not None:
-            out_sec = shot_start_sec + float(cap_out_off)
-        else:
-            out_sec = shot_end_sec
-        # ショット境界を越えないクランプ（subtitles.build_telop_pieces_from_shots と同じ契約）
-        if out_sec < in_sec:
-            out_sec = in_sec
-        if out_sec > shot_end_sec:
-            out_sec = shot_end_sec
-        if in_sec > shot_end_sec:
-            in_sec = shot_end_sec
-        if in_sec < shot_start_sec:
-            in_sec = shot_start_sec
-
-        start_frames = _seconds_to_frames(in_sec, timebase)
-        end_frames = _seconds_to_frames(out_sec, timebase)
-        if end_frames <= start_frames:
-            end_frames = start_frames + 1  # 最低1フレーム
-        dur_frames = end_frames - start_frames
-
-        wrapped = []
-        if wrap_caption_kinsoku is not None:
-            try:
-                wrapped = wrap_caption_kinsoku(caption_text, max_chars=max_chars, max_lines=max_lines) or []
-            except Exception:
-                wrapped = [caption_text]
-        else:
-            wrapped = [caption_text]
-
         shot_id = shot.get("id") or "s{}".format(i + 1)
-        gen_id = "gen-v2-{}".format(_deterministic_id("v2-gen", shot_id, caption_text))
-        display_name = "TL{:02d}".format(i + 1)
+        shot_style_hint = shot.get("telop_style_hint") if isinstance(shot.get("telop_style_hint"), dict) else None
 
-        # F9: telop_style_hint（参考動画の position/color/size_class）を xmeml の
-        # size/position/fontcolor パラメータへ写像する。hint が無いショットは既定値。
-        style_hint = shot.get("telop_style_hint") if isinstance(shot.get("telop_style_hint"), dict) else None
-        effective_size, effective_position, color_hex = _resolve_hint_for_xmeml(
-            style_hint, CAPTION_FONT_SIZE_DEFAULT, position,
-        )
+        # R4: shot.captions[] 対応（複数テロップ）。無ければ従来 caption_jp を単一エントリとして扱う。
+        captions_list = shot.get("captions") if isinstance(shot.get("captions"), list) else None
+        if captions_list:
+            caption_entries = []
+            for cap in captions_list:
+                text = (cap.get("text") or cap.get("caption_jp") or "").strip()
+                if not text:
+                    continue
+                caption_entries.append({
+                    "text": text,
+                    "in_off": cap.get("caption_in_offset_sec"),
+                    "out_off": cap.get("caption_out_offset_sec"),
+                    "hint": (cap.get("telop_style_hint") if isinstance(cap.get("telop_style_hint"), dict) else None) or shot_style_hint,
+                })
+        else:
+            caption_text = (shot.get("caption") or shot.get("caption_jp") or "").strip()
+            if not caption_text:
+                continue
+            caption_entries = [{
+                "text": caption_text,
+                "in_off": shot.get("caption_in_offset_sec"),
+                "out_off": shot.get("caption_out_offset_sec"),
+                "hint": shot_style_hint,
+            }]
 
-        clip_lines_list.append(
-            _generatoritem_text_lines(
-                gen_id, display_name, start_frames, end_frames, 0, dur_frames,
-                timebase, ntsc, caption_text, wrapped, depth + 1,
-                font=font, size=effective_size, align=align, position=effective_position,
-                color_hex=color_hex,
+        for j, ent in enumerate(caption_entries):
+            caption_text = ent["text"]
+            cap_in_off = ent["in_off"]
+            cap_out_off = ent["out_off"]
+            if cap_in_off is not None:
+                in_sec = shot_start_sec + float(cap_in_off)
+            else:
+                in_sec = shot_start_sec
+            if cap_out_off is not None:
+                out_sec = shot_start_sec + float(cap_out_off)
+            else:
+                out_sec = shot_end_sec
+            if out_sec < in_sec:
+                out_sec = in_sec
+            if out_sec > shot_end_sec:
+                out_sec = shot_end_sec
+            if in_sec > shot_end_sec:
+                in_sec = shot_end_sec
+            if in_sec < shot_start_sec:
+                in_sec = shot_start_sec
+
+            start_frames = _seconds_to_frames(in_sec, timebase)
+            end_frames = _seconds_to_frames(out_sec, timebase)
+            if end_frames <= start_frames:
+                end_frames = start_frames + 1
+            dur_frames = end_frames - start_frames
+
+            wrapped = []
+            if wrap_caption_kinsoku is not None:
+                try:
+                    wrapped = wrap_caption_kinsoku(caption_text, max_chars=max_chars, max_lines=max_lines) or []
+                except Exception:
+                    wrapped = [caption_text]
+            else:
+                wrapped = [caption_text]
+
+            gen_id = "gen-v2-{}".format(_deterministic_id("v2-gen", shot_id, j, caption_text))
+            display_name = "TL{:02d}{}".format(i + 1, chr(ord('a') + j) if len(caption_entries) > 1 else "")
+
+            style_hint = ent["hint"]
+            effective_size, effective_position, color_hex = _resolve_hint_for_xmeml(
+                style_hint, CAPTION_FONT_SIZE_DEFAULT, position,
             )
-        )
-        caption_pieces.append({
-            "shot_id": shot_id,
-            "in_sec": start_frames / float(timebase),
-            "out_sec": end_frames / float(timebase),
-            "in_frame": start_frames,
-            "out_frame": end_frames,
-            "text": caption_text,
-            "lines": wrapped,
-        })
+
+            clip_lines_list.append(
+                _generatoritem_text_lines(
+                    gen_id, display_name, start_frames, end_frames, 0, dur_frames,
+                    timebase, ntsc, caption_text, wrapped, depth + 1,
+                    font=font, size=effective_size, align=align, position=effective_position,
+                    color_hex=color_hex,
+                )
+            )
+            caption_pieces.append({
+                "shot_id": shot_id,
+                "caption_index": j,
+                "in_sec": start_frames / float(timebase),
+                "out_sec": end_frames / float(timebase),
+                "in_frame": start_frames,
+                "out_frame": end_frames,
+                "text": caption_text,
+                "lines": wrapped,
+            })
 
     return clip_lines_list, caption_pieces
 

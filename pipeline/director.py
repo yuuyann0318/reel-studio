@@ -390,15 +390,35 @@ def _remap_reference_visual_by_split(rv_map, shot_ids, split_map, new_shot_ids):
     return remapped
 
 
-def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_duration):
-    """spec.telops を対応 shot に写像し caption_in/out offset (相対秒) と style hint を返す。
+# R4: 1 shot あたりに保持するテロップの最大件数（超過分は confidence 降順で切る）。
+_MAX_TELOPS_PER_SHOT = 3
 
-    Returns: dict shot_id -> {"caption_in_offset_sec", "caption_out_offset_sec", "telop_style_hint"}
+
+def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_duration):
+    """spec.telops を対応 shot に写像し、shot ごとの caption 情報リストを返す。
+
+    R4: 1shot=1telop 制約を撤廃。同一 shot に載る参考テロップを最大
+    _MAX_TELOPS_PER_SHOT 件まで保持する。超過分は confidence 降順で切る。
+    先頭要素は「skeleton の代表テロップ」として caption_in_offset_sec/
+    caption_out_offset_sec/telop_style_hint の legacy キーへも投影される
+    （後方互換: 既存の sfx_planner / subtitles / premiere は先頭要素を読む）。
+
+    Returns:
+        dict shot_id -> {
+            # legacy（先頭 caption のエイリアス。後方互換）
+            "caption_in_offset_sec": float,
+            "caption_out_offset_sec": float,
+            "telop_style_hint": dict,
+            # R4: 全 caption（0 <= n <= _MAX_TELOPS_PER_SHOT）
+            "captions": [
+                {"caption_in_offset_sec": float, "caption_out_offset_sec": float,
+                 "telop_style_hint": dict, "confidence": float},
+                ...
+            ],
+        }
     """
-    ratio = 0.0
-    if ref_duration and ref_duration > 0:
-        ratio = 1.0
-    out = {}
+    # まず shot_id -> [caption dict, ...] を confidence 付きで集める
+    per_shot: dict = {}
     for tel in telops or []:
         if not isinstance(tel, dict):
             continue
@@ -416,7 +436,6 @@ def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_dur
         seg_start = boundaries[idx]
         seg_end = boundaries[idx + 1]
         seg_len = max(1e-3, seg_end - seg_start)
-        # 参考区間内の相対比 → 目標尺の相対秒へ
         rel_in = max(0.0, (s - seg_start) / seg_len)
         rel_out = max(rel_in, (e - seg_start) / seg_len)
         rel_out = min(1.0, rel_out)
@@ -431,13 +450,40 @@ def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_dur
             "size_class": (style.get("size_class") or "") if isinstance(style, dict) else "",
             "emphasis_words": tel.get("emphasis_words") or [],
         }
-        # 同一 shot に複数 telop が乗る場合は最初の一枚を採用（skeleton は 1shot=1telop 前提）。
-        if shot_id not in out:
-            out[shot_id] = {
-                "caption_in_offset_sec": caption_in,
-                "caption_out_offset_sec": caption_out,
-                "telop_style_hint": hint,
-            }
+        try:
+            conf = float(tel.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        per_shot.setdefault(shot_id, []).append({
+            "caption_in_offset_sec": caption_in,
+            "caption_out_offset_sec": caption_out,
+            "telop_style_hint": hint,
+            "confidence": conf,
+            "_seq": len(per_shot.get(shot_id, [])),  # 元順序保存（同点タイブレーク用）
+        })
+
+    out: dict = {}
+    for shot_id, entries in per_shot.items():
+        # confidence 降順で並べ、上限 _MAX_TELOPS_PER_SHOT 個まで採用。
+        # 同 confidence は元順序（先頭ほど早い）を保つ。
+        entries.sort(key=lambda x: (-float(x.get("confidence") or 0.0), int(x.get("_seq") or 0)))
+        picked = entries[:_MAX_TELOPS_PER_SHOT]
+        # 最終出力は時系列順（caption_in_offset_sec 昇順）に並べ直す
+        picked.sort(key=lambda x: float(x.get("caption_in_offset_sec") or 0.0))
+        captions = []
+        for p in picked:
+            captions.append({
+                "caption_in_offset_sec": float(p["caption_in_offset_sec"]),
+                "caption_out_offset_sec": float(p["caption_out_offset_sec"]),
+                "telop_style_hint": dict(p["telop_style_hint"]),
+            })
+        head = captions[0]
+        out[shot_id] = {
+            "caption_in_offset_sec": head["caption_in_offset_sec"],
+            "caption_out_offset_sec": head["caption_out_offset_sec"],
+            "telop_style_hint": dict(head["telop_style_hint"]),
+            "captions": captions,
+        }
     return out
 
 
@@ -681,12 +727,34 @@ def _split_long_shots(scaled_durations, max_shot_sec, min_shot_sec=_SKELETON_MIN
     return new, split_map
 
 
-def _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids):
-    """旧 shot_id -> {caption_in, caption_out, telop_style_hint} を分割後の shot に写像する。
+def _build_continuation_map(shot_ids, split_map, new_shot_ids):
+    """分割された断片(2番目以降)の新 shot_id -> 分割群の先頭 shot_id を返す辞書。
 
-    分割時、テロップは分割群の**先頭のみ**に付与し、offset は先頭 shot の尺に合わせて
-    クランプする（caption_in/out が先頭 shot の duration_sec を超える場合は先頭 shot 内に
-    収める。テロップが表示中に切り替わっても構成崩れは起きない）。
+    分割群の先頭以外の shot は「実装都合で切ったカット」であり、fidelity 側では
+    親(先頭)に集約して評価する（continuation_of 経由）。
+    """
+    result: dict = {}
+    for old_idx, old_sid in enumerate(shot_ids):
+        if old_idx >= len(split_map):
+            continue
+        group = split_map[old_idx]
+        if len(group) <= 1:
+            continue
+        head_new_sid = new_shot_ids[group[0]]
+        for k in group[1:]:
+            if 0 <= k < len(new_shot_ids):
+                result[new_shot_ids[k]] = head_new_sid
+    return result
+
+
+def _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids, new_durations=None):
+    """旧 shot_id -> {caption_in, caption_out, telop_style_hint, captions[...]} を分割後の shot に写像する。
+
+    分割時、単一 telop（captions が 1 件以下）は分割群の**先頭のみ**に付与し、offset は
+    先頭 shot の尺に合わせてクランプする（既存挙動）。
+    R4 codex-review 修正 P1: 複数 telop（captions が 2 件以上）が旧 shot に載っている場合は、
+    各 caption の start 時刻が属する分割断片に振り分ける（後半 caption を先頭断片へ潰さない）。
+    振り分け後の各断片は、その断片内の相対 offset (=0..dur) を持つ。
     """
     if not telop_map:
         return {}
@@ -698,9 +766,57 @@ def _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids):
         new_group = split_map[old_idx] if old_idx < len(split_map) else [old_idx]
         if not new_group:
             continue
-        first_new_idx = new_group[0]
-        new_sid = new_shot_ids[first_new_idx]
-        remapped[new_sid] = dict(info)
+        captions = info.get("captions") if isinstance(info.get("captions"), list) else None
+        # 単一 telop（または captions が空/未指定）: 従来どおり先頭断片へ載せる
+        if not captions or len(captions) <= 1:
+            first_new_idx = new_group[0]
+            new_sid = new_shot_ids[first_new_idx]
+            remapped[new_sid] = dict(info)
+            continue
+        # 複数 telop: 各 caption を start が属する分割断片へ振り分ける
+        # 断片開始オフセット（旧 shot 内座標）= 累積 new_durations
+        durs = [float(new_durations[j]) for j in new_group] if new_durations else None
+        # フォールバック: new_durations が無ければ全 caption を先頭断片へ（旧挙動）
+        if durs is None:
+            first_new_idx = new_group[0]
+            new_sid = new_shot_ids[first_new_idx]
+            remapped[new_sid] = dict(info)
+            continue
+        # 断片ごとの [start, end) 区間（旧 shot 座標）
+        boundaries = [0.0]
+        for d in durs:
+            boundaries.append(boundaries[-1] + d)
+        # 断片ごとに captions を集める
+        per_fragment_caps: dict = {}
+        for cap in captions:
+            cin = float(cap.get("caption_in_offset_sec") or 0.0)
+            cout = float(cap.get("caption_out_offset_sec") or cin)
+            # start が属する断片を検索（境界と等しい時は左側優先）
+            target_j = 0
+            for j in range(len(durs)):
+                if boundaries[j] - 1e-6 <= cin < boundaries[j + 1] - 1e-6 or j == len(durs) - 1:
+                    target_j = j
+                    break
+            frag_start = boundaries[target_j]
+            frag_dur = durs[target_j]
+            local_in = max(0.0, min(cin - frag_start, frag_dur))
+            local_out = max(local_in, min(cout - frag_start, frag_dur))
+            new_sid = new_shot_ids[new_group[target_j]]
+            per_fragment_caps.setdefault(new_sid, []).append({
+                "caption_in_offset_sec": round(local_in, 3),
+                "caption_out_offset_sec": round(local_out, 3),
+                "telop_style_hint": dict(cap.get("telop_style_hint") or {}),
+            })
+        # 各断片について info を組み立てる（先頭 caption を legacy キーへ）
+        for new_sid, caps in per_fragment_caps.items():
+            caps.sort(key=lambda c: c["caption_in_offset_sec"])
+            head = caps[0]
+            remapped[new_sid] = {
+                "caption_in_offset_sec": head["caption_in_offset_sec"],
+                "caption_out_offset_sec": head["caption_out_offset_sec"],
+                "telop_style_hint": dict(head["telop_style_hint"]),
+                "captions": caps,
+            }
     return remapped
 
 
@@ -917,12 +1033,18 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         )
 
     # クレジット意識分割（max_shot_sec が指定されたとき）
+    continuation_map: Dict[str, str] = {}
     if max_shot_sec is not None and max_shot_sec > 0:
         new_durations, split_map = _split_long_shots(scaled, float(max_shot_sec), min_shot_sec=effective_min_shot_sec)
         new_shot_ids = ["s{}".format(i + 1) for i in range(len(new_durations))]
+        # R4: 分割で生まれた 2番目以降の断片に continuation_of を張って fidelity 側で除外できるように。
+        continuation_map = _build_continuation_map(shot_ids, split_map, new_shot_ids)
         # telop 写像を分割群の先頭 shot に載せ替え（旧 telop_map を先に保存してから remap）
+        # R4 codex-review P1 修正: new_durations を渡して、複数テロップは start が属する断片へ振り分ける。
         old_telop_map = dict(telop_map)
-        telop_map = _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids)
+        telop_map = _remap_telops_by_split(
+            telop_map, shot_ids, split_map, new_shot_ids, new_durations=new_durations,
+        )
         # reference_visual 写像を分割群の全員にコピー（同じ絵の一部を切り出したもの）
         rv_map = _remap_reference_visual_by_split(rv_map, shot_ids, split_map, new_shot_ids)
         # sfx 写像を分割断片に載せ替え
@@ -958,6 +1080,9 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
             "id": sid,
             "duration_sec": float(scaled[i]),
         }
+        if sid in continuation_map:
+            # R4: 分割 2 番目以降の断片は continuation_of で親(先頭)を指す。
+            shot["continuation_of"] = continuation_map[sid]
         if sid in telop_map:
             info = telop_map[sid]
             # caption offset は shot 尺内へクランプ
@@ -968,6 +1093,24 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
             shot["caption_in_offset_sec"] = round(cin, 3)
             shot["caption_out_offset_sec"] = round(cout, 3)
             shot["telop_style_hint"] = info.get("telop_style_hint")
+            # R4: 複数テロップが載る shot だけ caption_slots[] を追加する。
+            # LLM が返す plan では captions[] (text 入り) を required とし、
+            # skeleton には「構造(=何枚 / いつ〜いつ / どのスタイル)」のみを caption_slots[] で伝える。
+            # 単一テロップ shot は従来どおり caption_jp + caption_in/out で扱う（後方互換）。
+            raw_captions = info.get("captions") or []
+            if len(raw_captions) > 1:
+                slots = []
+                for cap in raw_captions:
+                    _cin = float(cap.get("caption_in_offset_sec") or 0.0)
+                    _cout = float(cap.get("caption_out_offset_sec") or 0.0)
+                    _cin = max(0.0, min(_cin, float(scaled[i])))
+                    _cout = max(_cin, min(_cout, float(scaled[i])))
+                    slots.append({
+                        "caption_in_offset_sec": round(_cin, 3),
+                        "caption_out_offset_sec": round(_cout, 3),
+                        "telop_style_hint": dict(cap.get("telop_style_hint") or {}),
+                    })
+                shot["caption_slots"] = slots
         # F10: 参考映像情報を skeleton の各 shot に載せる
         if sid in rv_map:
             shot["reference_visual"] = rv_map[sid]
@@ -1141,6 +1284,59 @@ def _validate_plan_matches_skeleton(plan, skeleton, target_duration_sec):
                         "shots[{}(id={})].{} がスケルトンと一致しません(plan={}, skeleton={}, 許容±{}秒). "
                         "スケルトン値をそのまま返してください。".format(i, sid, key, pv, sv, _SKELETON_CAPTION_MATCH_TOL)
                     )
+        # R4: 分割断片(continuation_of)はスケルトンから plan にそのまま持ち越す必要がある。
+        # LLM が消してしまうと fidelity 側での continuation 除外が効かなくなる。
+        if "continuation_of" in ss:
+            pv = ps.get("continuation_of")
+            sv = ss.get("continuation_of")
+            if pv != sv:
+                errors.append(
+                    "shots[{}(id={})].continuation_of がスケルトンと一致しません"
+                    "(plan={!r}, skeleton={!r}). スケルトン値をそのまま返してください.".format(
+                        i, sid, pv, sv,
+                    )
+                )
+        # R4: caption_slots[] （スケルトン側）と captions[] （plan 側）の件数一致。
+        # skeleton は複数テロップ shot にだけ caption_slots[] を載せる。
+        # plan は caption_slots に対応する captions[] を返し、各要素に text 必須。
+        skel_slots = ss.get("caption_slots") if isinstance(ss.get("caption_slots"), list) else None
+        if skel_slots:
+            plan_caps = ps.get("captions") if isinstance(ps.get("captions"), list) else None
+            if not isinstance(plan_caps, list) or len(plan_caps) != len(skel_slots):
+                errors.append(
+                    "shots[{}(id={})].captions 件数がスケルトンと不一致"
+                    "(plan={}, skeleton={}件). スケルトンで指定されている caption の数を"
+                    "厳密に返してください（複数テロップ対応 R4）。".format(
+                        i, sid,
+                        len(plan_caps) if isinstance(plan_caps, list) else "非リスト",
+                        len(skel_slots),
+                    )
+                )
+            else:
+                for k, (pc, sc) in enumerate(zip(plan_caps, skel_slots)):
+                    if not isinstance(pc, dict):
+                        errors.append(
+                            "shots[{}(id={})].captions[{}] はオブジェクトである必要があります".format(i, sid, k)
+                        )
+                        continue
+                    for key in ("caption_in_offset_sec", "caption_out_offset_sec"):
+                        pv = pc.get(key)
+                        sv = sc.get(key)
+                        if sv is None:
+                            continue
+                        if not isinstance(pv, (int, float)) or abs(float(pv) - float(sv)) > _SKELETON_CAPTION_MATCH_TOL:
+                            errors.append(
+                                "shots[{}(id={})].captions[{}].{} がスケルトンと不一致"
+                                "(plan={}, skeleton={}, 許容±{}秒). スケルトン値をそのまま返してください.".format(
+                                    i, sid, k, key, pv, sv, _SKELETON_CAPTION_MATCH_TOL,
+                                )
+                            )
+                    tv = pc.get("text") or pc.get("caption_jp")
+                    if not isinstance(tv, str) or not tv.strip():
+                        errors.append(
+                            "shots[{}(id={})].captions[{}].text が空です. 参考動画テロップの意図"
+                            "に沿った日本語文言を必ず入れてください.".format(i, sid, k)
+                        )
         # R2b F4: motion_preset の一致（スケルトン優先=機械判定の camera_move マッピング）
         if "motion_preset" in ss:
             pv = ps.get("motion_preset")
@@ -1414,7 +1610,7 @@ def build_critique_prompt(theme, target_duration_sec, target_tolerance_sec, styl
 
 def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
                   target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC, style="default", quality=None,
-                  product=None, reference=None, checkpoint_dir=None):
+                  product=None, reference=None, checkpoint_dir=None, backend=None):
     """テーマ + 参考動画spec v2 から reel_plan を生成する。
 
     no_llm=True: claude 呼び出しを一切行わず、build_smoke_plan で最小plan を返す
@@ -1491,11 +1687,17 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     # スケルトン組み立て（純関数）
     # クレジット意識分割: config.higgsfield.max_credits_per_shot を 480p の
     # credits≒秒 換算で shot 最大尺として渡す（config が無ければ None＝分割なし）。
+    # R4: backend が明示指定されており、かつ "higgsfield" 以外（mock/cloudapi）のときは
+    # クレジット上限による分割を無効化する。mock はクレジット消費が無く、参考shotを
+    # 分割すると fidelity の cut_match が「参考に無い分割境界」で構造的に目減りするため。
+    # backend=None（明示なし）は従来挙動を保つ（後方互換）。
     hf_cfg = (config or {}).get("higgsfield") or {}
     max_shot_sec = None
     max_credits = hf_cfg.get("max_credits_per_shot")
     if isinstance(max_credits, (int, float)) and max_credits > 0:
         max_shot_sec = float(max_credits)
+    if backend is not None and backend != "higgsfield":
+        max_shot_sec = None
     # F12: config.director.min_shot_sec があれば skeleton の最小ショット尺として渡す
     # （supreme_plus プリセットで 0.5 に落として参考の高速カットを保持する）。
     director_cfg = (config or {}).get("director") or {}

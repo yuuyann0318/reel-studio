@@ -754,6 +754,8 @@ class JobManager:
             plan = director.run_director(
                 theme, cfg, target_duration_sec=target_duration_sec, no_llm=False, style=style,
                 product=director_product, reference=reference_spec,
+                # R4: Studio 経由の backend を渡してクレジット意識分割を Higgsfield 時のみに限定。
+                backend=backend_name,
             )
         except Exception as exc:
             fail("企画生成に失敗しました: {}".format(exc))

@@ -1361,58 +1361,75 @@ def build_telop_pieces_from_shots(shots, hook_shot_id=None):
         shot_start = cursor
         shot_end = cursor + dur
         cursor = shot_end
-        caption = (shot.get("caption_jp") or "").strip()
-        if not caption:
-            continue
-        # plan v2: caption_in/out offset があればテロップ表示区間をそのオフセットに合わせる。
-        cap_in_off = shot.get("caption_in_offset_sec")
-        cap_out_off = shot.get("caption_out_offset_sec")
-        if cap_in_off is not None:
-            out_start = shot_start + float(cap_in_off)
-        else:
-            out_start = shot_start
-        if cap_out_off is not None:
-            out_end = shot_start + float(cap_out_off)
-        else:
-            out_end = shot_end
-        # 極端に反転している場合の安全側フォールバック（validate_plan で弾かれる前提だが、
-        # 直接 build_telop_pieces_from_shots を叩くコード経路のための保険）。
-        if out_end < out_start:
-            out_end = out_start
-        # BUG-55: caption offsets が shot 表示境界を越えて次shotに食い込むのを防ぐ。
-        # scale 済みでも小数誤差や director の offset がショット尺と等値の場合の余裕として
-        # shot_end で厳密にクランプする。フェードアウト分は ASS の \fad が Dialogue End
-        # から逆算して描画するため、End=shot_end に切ってあれば境界越え発生しない。
-        if out_end > shot_end:
-            out_end = shot_end
-        if out_start > shot_end:
-            out_start = shot_end
-        if out_start < shot_start:
-            out_start = shot_start
-        # BUG-54: 描画幅ベースで折り返し。既定フォント(base=76 / big=92)で2行に収まらない
-        # 場合はフォントを段階縮小(min 48px)して再計算する。piece に effective font_px を
-        # 載せ、build_dialogue_line で \fs<n> を Dialogue に前置する(Style行はいじらない)。
         is_big = shot.get("id") == (hook_shot_id or first_id)
         default_font_px = STYLE_BIG_FONTSIZE if is_big else STYLE_BASE_FONTSIZE
-        # F9: telop_style_hint（参考動画の size_class）で基準フォントを先に補正してから
-        # 幅ベース折り返しをする（折り返しは実効フォントで決まるため hint 適用は必ず先）。
-        style_hint = shot.get("telop_style_hint") if isinstance(shot.get("telop_style_hint"), dict) else None
-        hinted_font_px = hint_font_px(style_hint, default_font_px)
-        lines, effective_font_px = wrap_caption_by_width(caption, hinted_font_px)
-        if not lines:
-            continue
-        style = "big" if is_big else "base"
-        piece = {
-            "out_start": out_start, "out_end": out_end, "lines": lines, "emphasis": [], "style": style,
-            "caption": caption,
-        }
-        if int(effective_font_px) != int(default_font_px):
-            piece["font_px_override"] = int(effective_font_px)
-        # F9: piece に telop_style_hint をそのまま持たせる（generate_ass 系が Dialogue の
-        # override prefix に写像する。skeleton の努力を「描画に到達させる」ための配線）。
-        if style_hint:
-            piece["telop_style_hint"] = dict(style_hint)
-        # "caption"は生のキャプション文字列（vertical_hookスタイルの縦書き組版で使う。
-        # "lines"は横書き禁則改行済みの行配列で、既定スタイルはこちらを使い続ける）。
-        pieces.append(piece)
+        shot_style_hint = shot.get("telop_style_hint") if isinstance(shot.get("telop_style_hint"), dict) else None
+
+        # R4: shot.captions[] があれば各 caption を独立した piece として展開する。
+        # 無ければ従来どおり shot.caption_jp を単一 piece として扱う（後方互換）。
+        captions_list = shot.get("captions") if isinstance(shot.get("captions"), list) else None
+        if captions_list:
+            caption_entries = []
+            for cap in captions_list:
+                text = (cap.get("text") or cap.get("caption_jp") or "").strip()
+                if not text:
+                    continue
+                caption_entries.append({
+                    "text": text,
+                    "in_off": cap.get("caption_in_offset_sec"),
+                    "out_off": cap.get("caption_out_offset_sec"),
+                    "hint": (cap.get("telop_style_hint") if isinstance(cap.get("telop_style_hint"), dict) else None) or shot_style_hint,
+                })
+        else:
+            caption_text = (shot.get("caption_jp") or "").strip()
+            if not caption_text:
+                continue
+            caption_entries = [{
+                "text": caption_text,
+                "in_off": shot.get("caption_in_offset_sec"),
+                "out_off": shot.get("caption_out_offset_sec"),
+                "hint": shot_style_hint,
+            }]
+
+        for j, ent in enumerate(caption_entries):
+            cap_in_off = ent["in_off"]
+            cap_out_off = ent["out_off"]
+            if cap_in_off is not None:
+                out_start = shot_start + float(cap_in_off)
+            else:
+                out_start = shot_start
+            if cap_out_off is not None:
+                out_end = shot_start + float(cap_out_off)
+            else:
+                out_end = shot_end
+            if out_end < out_start:
+                out_end = out_start
+            # BUG-55: shot境界を越えないようクランプ
+            if out_end > shot_end:
+                out_end = shot_end
+            if out_start > shot_end:
+                out_start = shot_end
+            if out_start < shot_start:
+                out_start = shot_start
+
+            caption = ent["text"]
+            style_hint = ent["hint"]
+            # R4 codex-review P2 修正: 各 piece の style（big/base）を先に決めてから、
+            # そのスタイルの既定フォントで hint 反映・折り返し・override 判定を行う
+            # （複数 caption の hook shot で、2枚目以降は base フォントで扱う）。
+            style = "big" if (is_big and j == 0) else "base"
+            piece_default_font_px = STYLE_BIG_FONTSIZE if style == "big" else STYLE_BASE_FONTSIZE
+            hinted_font_px = hint_font_px(style_hint, piece_default_font_px)
+            lines, effective_font_px = wrap_caption_by_width(caption, hinted_font_px)
+            if not lines:
+                continue
+            piece = {
+                "out_start": out_start, "out_end": out_end, "lines": lines, "emphasis": [], "style": style,
+                "caption": caption,
+            }
+            if int(effective_font_px) != int(piece_default_font_px):
+                piece["font_px_override"] = int(effective_font_px)
+            if style_hint:
+                piece["telop_style_hint"] = dict(style_hint)
+            pieces.append(piece)
     return pieces

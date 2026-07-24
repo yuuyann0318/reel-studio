@@ -466,6 +466,8 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 # R2b申し送り対応: 3段直列(supreme_plus)の途中失敗からリカバリできるよう
                 # 中間 plan を run_dir に随時保存する。既存プロファイル(supreme/single)にも影響なし。
                 checkpoint_dir=run_dir,
+                # R4: backend を渡してクレジット意識分割を Higgsfield 時のみに限定する。
+                backend=backend_name,
             )
             (run_dir / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
             report["stages"]["director"]["source"] = plan.get("meta", {}).get("source")

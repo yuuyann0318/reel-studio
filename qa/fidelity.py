@@ -43,7 +43,11 @@ def _cut_times_from_reference(spec: Dict[str, Any]) -> List[float]:
 
 
 def _cut_times_from_plan(plan: Dict[str, Any]) -> List[float]:
-    """plan.shots の duration_sec 累積から生成側の内部境界秒列を返す（末尾は含めない）。"""
+    """plan.shots の duration_sec 累積から生成側の内部境界秒列を返す（末尾は含めない）。
+
+    R4: shot[i+1] が continuation_of を持つ場合（= shot[i] を max_shot_sec で分割した断片）は
+    「参考に無い実装都合の分割境界」なので cut 一致の分母から除外する。
+    """
     shots = (plan or {}).get("shots") or []
     boundaries: List[float] = []
     cursor = 0.0
@@ -51,8 +55,95 @@ def _cut_times_from_plan(plan: Dict[str, Any]) -> List[float]:
         d = float(s.get("duration_sec") or 0.0)
         cursor += d
         if i < len(shots) - 1:
+            next_shot = shots[i + 1] if isinstance(shots[i + 1], dict) else {}
+            if next_shot.get("continuation_of"):
+                continue  # 分割断片への境界は実装都合。参考には存在しないので除外。
             boundaries.append(cursor)
     return boundaries
+
+
+def _merge_continuation_shots_to_parents(plan: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """R4: plan.shots のうち continuation_of で親を指す断片を、親 shot に集約した
+    "論理 shot" のリストを返す。集約後の各要素は id / duration_sec（合算） /
+    caption_jp / captions / motion_preset / telop_style_hint 等を持つ。
+
+    使い所: fidelity の telop/camera/telop_style は「参考動画の 1 shot に対して plan の
+    1 論理 shot」を対応付ける前提で書かれている。max_shot_sec で分割された断片は
+    描画上は連続する 1 shot なので、fidelity の分母から除外して親に集約する。
+
+    R4 codex-review P1 修正: 継続断片が captions を持つ場合(=複数テロップ shot が分割された
+    ケース)、それらの caption を親の captions[] へ、オフセットを親からの累積開始位置へ
+    シフトして統合する。無視すると telop_iou の denom がズレる。
+    """
+    shots = (plan or {}).get("shots") or []
+    logical: List[Dict[str, Any]] = []
+    id_to_index: Dict[str, int] = {}
+    for s in shots:
+        if not isinstance(s, dict):
+            continue
+        cof = s.get("continuation_of")
+        if cof and cof in id_to_index:
+            parent = logical[id_to_index[cof]]
+            parent_prev_dur = float(parent.get("duration_sec") or 0.0)
+            frag_dur = float(s.get("duration_sec") or 0.0)
+            parent["duration_sec"] = parent_prev_dur + frag_dur
+            # 断片側の captions[] または legacy caption_jp を親の captions[] へ吸収する。
+            frag_caps = s.get("captions") if isinstance(s.get("captions"), list) else None
+            if frag_caps:
+                extra = []
+                for cap in frag_caps:
+                    text = (cap.get("text") or cap.get("caption_jp") or "").strip()
+                    if not text:
+                        continue
+                    cin = cap.get("caption_in_offset_sec") or 0.0
+                    cout = cap.get("caption_out_offset_sec") or cin
+                    extra.append({
+                        "text": text,
+                        "caption_in_offset_sec": float(cin) + parent_prev_dur,
+                        "caption_out_offset_sec": float(cout) + parent_prev_dur,
+                        "telop_style_hint": dict(cap.get("telop_style_hint") or {}),
+                    })
+                if extra:
+                    merged = list(parent.get("captions") or [])
+                    # 親が captions[] を持たず legacy のみのときは、まず legacy を captions[] へ持ち上げる
+                    if not merged and (parent.get("caption_jp") or "").strip():
+                        merged.append({
+                            "text": parent["caption_jp"],
+                            "caption_in_offset_sec": float(parent.get("caption_in_offset_sec") or 0.0),
+                            "caption_out_offset_sec": float(parent.get("caption_out_offset_sec") or parent_prev_dur),
+                            "telop_style_hint": dict(parent.get("telop_style_hint") or {}),
+                        })
+                    merged.extend(extra)
+                    parent["captions"] = merged
+            else:
+                # 断片が captions[] を持たず legacy caption_jp のみのケース（P1 修正後の頻出パス）
+                frag_cap_text = (s.get("caption_jp") or "").strip()
+                if frag_cap_text:
+                    cin = s.get("caption_in_offset_sec") or 0.0
+                    cout = s.get("caption_out_offset_sec") or frag_dur
+                    extra = {
+                        "text": frag_cap_text,
+                        "caption_in_offset_sec": float(cin) + parent_prev_dur,
+                        "caption_out_offset_sec": float(cout) + parent_prev_dur,
+                        "telop_style_hint": dict(s.get("telop_style_hint") or {}),
+                    }
+                    merged = list(parent.get("captions") or [])
+                    if not merged and (parent.get("caption_jp") or "").strip():
+                        merged.append({
+                            "text": parent["caption_jp"],
+                            "caption_in_offset_sec": float(parent.get("caption_in_offset_sec") or 0.0),
+                            "caption_out_offset_sec": float(parent.get("caption_out_offset_sec") or parent_prev_dur),
+                            "telop_style_hint": dict(parent.get("telop_style_hint") or {}),
+                        })
+                    merged.append(extra)
+                    parent["captions"] = merged
+            continue
+        entry = dict(s)
+        # continuation_of は集約後は不要（親に集約されているので）
+        entry.pop("continuation_of", None)
+        id_to_index[entry.get("id")] = len(logical)
+        logical.append(entry)
+    return logical
 
 
 def _scale_cut_times(cuts: List[float], src_total: float, dst_total: float) -> List[float]:
@@ -214,14 +305,36 @@ def _piecewise_map_intervals(
 
 
 def _telop_intervals_from_plan(plan: Dict[str, Any]) -> List[Tuple[float, float]]:
-    """plan.shots の caption_in/out_offset_sec + ショット累積開始から出力座標の区間を返す。"""
+    """plan.shots の caption_in/out_offset_sec + ショット累積開始から出力座標の区間を返す。
+
+    R4: shot.captions[] が指定されていれば全 caption を展開する（複数テロップ対応）。
+    継続断片(continuation_of)は親 shot に統合してから展開する（fidelity 側で分割を透過化）。
+    """
+    logical = _merge_continuation_shots_to_parents(plan)
     out = []
     cursor = 0.0
-    for s in (plan or {}).get("shots") or []:
+    for s in logical:
         dur = float(s.get("duration_sec") or 0.0)
         shot_start = cursor
         shot_end = cursor + dur
         cursor = shot_end
+        captions = s.get("captions") if isinstance(s.get("captions"), list) else None
+        if captions:
+            for cap in captions:
+                text = (cap.get("text") or cap.get("caption_jp") or "").strip()
+                if not text:
+                    continue
+                cin = cap.get("caption_in_offset_sec")
+                cout = cap.get("caption_out_offset_sec")
+                start = shot_start + (float(cin) if isinstance(cin, (int, float)) else 0.0)
+                end = shot_start + (float(cout) if isinstance(cout, (int, float)) else dur)
+                if end < start:
+                    end = start
+                end = min(end, shot_end)
+                start = max(start, shot_start)
+                out.append((start, end))
+            continue
+        # 後方互換: 単一 caption（caption_jp + caption_in/out）
         if not (s.get("caption_jp") or "").strip():
             continue
         cin = s.get("caption_in_offset_sec")
@@ -382,16 +495,40 @@ def _telop_style_match(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, 
     ref_telops = [(t, _hint_from_ref_telop(t)) for t in (spec or {}).get("telops") or [] if isinstance(t, dict)]
     if not ref_telops:
         return {"score": 1.0, "matched": 0, "ref_count": 0, "gen_count": 0}
-    # 生成側: caption を持ち telop_style_hint も持つ shots
+    # R4: 継続断片を親に統合し、shot.captions[] があれば全 caption を展開する。
+    logical = _merge_continuation_shots_to_parents(plan)
     gen_intervals = _telop_intervals_from_plan(plan)
-    shots = (plan or {}).get("shots") or []
-    # gen_intervals は caption を持つ順で作られる。同順で shot を対応付ける。
+    # gen_intervals と gen_shot_hints は同順（caption 展開順）で対応付ける。
     gen_shot_hints: List[Tuple[Tuple[float, float], Optional[Dict[str, str]]]] = []
     cursor = 0.0
-    for s in shots:
+    for s in logical:
         dur = float(s.get("duration_sec") or 0.0)
         shot_start = cursor
         cursor += dur
+        captions = s.get("captions") if isinstance(s.get("captions"), list) else None
+        if captions:
+            for cap in captions:
+                text = (cap.get("text") or cap.get("caption_jp") or "").strip()
+                if not text:
+                    continue
+                cin = cap.get("caption_in_offset_sec")
+                cout = cap.get("caption_out_offset_sec")
+                start = shot_start + (float(cin) if isinstance(cin, (int, float)) else 0.0)
+                end = shot_start + (float(cout) if isinstance(cout, (int, float)) else dur)
+                # 各 caption 単位の telop_style_hint を優先し、無ければ shot 単位のヒント。
+                hint_dict = cap.get("telop_style_hint") if isinstance(cap.get("telop_style_hint"), dict) else None
+                if hint_dict is None:
+                    hint_dict = s.get("telop_style_hint") if isinstance(s.get("telop_style_hint"), dict) else None
+                if hint_dict is not None:
+                    normalized_hint = {
+                        "position": (hint_dict.get("position") or "").strip().lower(),
+                        "color": (hint_dict.get("color") or "").strip().lower(),
+                        "size_class": (hint_dict.get("size_class") or "").strip().lower(),
+                    }
+                else:
+                    normalized_hint = None
+                gen_shot_hints.append(((start, end), normalized_hint))
+            continue
         cap = (s.get("caption_jp") or "").strip()
         if not cap:
             continue
@@ -402,7 +539,7 @@ def _telop_style_match(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, 
         gen_shot_hints.append(((start, end), _hint_from_plan_shot(s)))
 
     ref_total = float((spec or {}).get("duration_sec") or 0.0)
-    gen_total = sum(float(s.get("duration_sec") or 0.0) for s in shots)
+    gen_total = sum(float(s.get("duration_sec") or 0.0) for s in logical)
 
     # 参考テロップの中心秒をスケールして生成尺座標にする
     used = set()
@@ -658,7 +795,8 @@ _MOTION_MAP = {
 
 def _camera_move_match(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
     shots_ref = (spec or {}).get("shots_ref") or []
-    shots = (plan or {}).get("shots") or []
+    # R4: 継続断片を親に統合してから比較する（分割は実装都合なので親に集約）。
+    shots = _merge_continuation_shots_to_parents(plan)
     if not shots_ref or not shots:
         return {"score": 0.0, "matched": 0, "ref_count": len(shots_ref), "gen_count": len(shots)}
     # 参考尺 vs 生成尺で開始時刻ベースに揃える。
@@ -737,11 +875,15 @@ def _beat_alignment(reference_spec: Dict[str, Any], plan: Dict[str, Any], tol_se
     else:
         beats_scaled = sorted(float(t) for t in beats)
     # 内部境界（先頭 0 と末尾は除外＝スナップ検証は「編集で選ばれた切り替え点」のみが対象）
+    # R4: continuation_of の断片境界は実装都合の分割なので除外する（fidelity 全体で透過化）。
     boundaries: List[float] = []
     cursor = 0.0
     for i, s in enumerate(shots):
         cursor += float(s.get("duration_sec") or 0.0)
         if i < len(shots) - 1:
+            next_shot = shots[i + 1] if isinstance(shots[i + 1], dict) else {}
+            if isinstance(next_shot, dict) and next_shot.get("continuation_of"):
+                continue
             boundaries.append(cursor)
     if not boundaries:
         return {"score": None, "matched": 0, "boundaries": 0, "beat_count": len(beats),

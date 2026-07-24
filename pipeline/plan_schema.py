@@ -27,6 +27,18 @@ plan スキーマ（v1: 従来互換 / v2: TTP参考動画からのスケルト�
       "caption_in_offset_sec": number,   # ショット内でテロップが出現する相対秒（0 <= x <= duration_sec）
       "caption_out_offset_sec": number,  # ショット内でテロップが消滅する相対秒（in <= x <= duration_sec）
       "telop_style_hint": dict,          # 参考spec由来の position/color/size_class 等（描画側ヒント）
+      # R4: 1shot=1telop 制約撤廃（複数テロップ対応）
+      "captions": [                       # 任意。指定すると shot 内に複数テロップを載せる
+        {"text": str,                     # 日本語テロップ本文
+         "caption_in_offset_sec": number, # ショット内相対秒（0 <= x <= duration_sec）
+         "caption_out_offset_sec": number,# 同上（in <= x <= duration_sec）
+         "telop_style_hint": dict},       # 任意
+        ...
+      ],
+      # R4: max_shot_sec 分割で生まれた 2 番目以降の断片は continuation_of で親を指す。
+      # 参考動画の "分割前の shot" と結び付けるためのメタ情報。fidelity の cut_match で
+      # 分割境界を「参考に無いカット」として計上しないための除外キーになる。
+      "continuation_of": str,             # 任意（分割断片のみ）
     }, ...
   ],
   # v2 拡張: SFX配置（renderが実際に配線するのはP3担当）。
@@ -141,6 +153,9 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
             #   "color_palette_hex": [str], "lighting": str, "shot_size": str,
             #   "subject_count": int, "color_mood": str} 等の辞書。
             reference_visual = shot.get("reference_visual")
+            # R4: 複数テロップ用の captions[] と、分割断片印の continuation_of。
+            captions_raw = shot.get("captions")
+            continuation_of = shot.get("continuation_of")
 
             ok_item = True
 
@@ -231,6 +246,82 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                 errors.append("shots[{}(id={})].reference_visual はオブジェクトである必要があります".format(i, sid))
                 ok_item = False
 
+            # R4: captions[] のバリデーション（任意フィールド）。
+            #   各要素: {text, caption_in_offset_sec, caption_out_offset_sec, telop_style_hint?}
+            normalized_captions = None
+            if captions_raw is not None:
+                if not isinstance(captions_raw, list):
+                    errors.append("shots[{}(id={})].captions はリストである必要があります".format(i, sid))
+                    ok_item = False
+                else:
+                    normalized_captions = []
+                    for k, cap in enumerate(captions_raw):
+                        if not isinstance(cap, dict):
+                            errors.append("shots[{}(id={})].captions[{}] はオブジェクトである必要があります".format(i, sid, k))
+                            ok_item = False
+                            continue
+                        c_text = cap.get("text")
+                        if c_text is None:
+                            c_text = cap.get("caption_jp")
+                        c_in = cap.get("caption_in_offset_sec")
+                        c_out = cap.get("caption_out_offset_sec")
+                        c_hint = cap.get("telop_style_hint")
+                        c_ok = True
+                        if not isinstance(c_text, str) or not c_text.strip():
+                            errors.append("shots[{}(id={})].captions[{}].text は非空文字列である必要があります".format(i, sid, k))
+                            c_ok = False
+                        elif len(c_text) > MAX_CAPTION_CHARS:
+                            errors.append(
+                                "shots[{}(id={})].captions[{}].text が{}字を超えています: {!r}".format(
+                                    i, sid, k, MAX_CAPTION_CHARS, c_text,
+                                )
+                            )
+                            c_ok = False
+                        if c_in is not None and not _is_number(c_in):
+                            errors.append("shots[{}(id={})].captions[{}].caption_in_offset_sec は数値".format(i, sid, k))
+                            c_ok = False
+                        elif c_in is not None and _dur is not None and not (-1e-6 <= float(c_in) <= _dur + 1e-6):
+                            errors.append(
+                                "shots[{}(id={})].captions[{}].caption_in_offset_sec は 0〜duration_sec の範囲(got {})".format(
+                                    i, sid, k, c_in,
+                                )
+                            )
+                            c_ok = False
+                        if c_out is not None and not _is_number(c_out):
+                            errors.append("shots[{}(id={})].captions[{}].caption_out_offset_sec は数値".format(i, sid, k))
+                            c_ok = False
+                        elif c_out is not None and _dur is not None and not (-1e-6 <= float(c_out) <= _dur + 1e-6):
+                            errors.append(
+                                "shots[{}(id={})].captions[{}].caption_out_offset_sec は 0〜duration_sec の範囲(got {})".format(
+                                    i, sid, k, c_out,
+                                )
+                            )
+                            c_ok = False
+                        elif c_in is not None and c_out is not None and _is_number(c_in) and _is_number(c_out) and float(c_out) < float(c_in) - 1e-6:
+                            errors.append(
+                                "shots[{}(id={})].captions[{}].caption_out_offset_sec は caption_in_offset_sec 以上"
+                                "(in={}, out={})".format(i, sid, k, c_in, c_out)
+                            )
+                            c_ok = False
+                        if c_hint is not None and not isinstance(c_hint, dict):
+                            errors.append("shots[{}(id={})].captions[{}].telop_style_hint は辞書である必要があります".format(i, sid, k))
+                            c_ok = False
+                        if c_ok:
+                            entry = {"text": c_text.strip()}
+                            if c_in is not None:
+                                entry["caption_in_offset_sec"] = float(c_in)
+                            if c_out is not None:
+                                entry["caption_out_offset_sec"] = float(c_out)
+                            if c_hint is not None:
+                                entry["telop_style_hint"] = dict(c_hint)
+                            normalized_captions.append(entry)
+                        else:
+                            ok_item = False
+
+            if continuation_of is not None and (not isinstance(continuation_of, str) or not continuation_of.strip()):
+                errors.append("shots[{}(id={})].continuation_of は非空文字列である必要があります".format(i, sid))
+                ok_item = False
+
             if ok_item:
                 seen_ids.add(sid)
                 if scene_id is not None:
@@ -254,6 +345,10 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                     normalized_shot["telop_style_hint"] = dict(telop_style_hint)
                 if reference_visual is not None:
                     normalized_shot["reference_visual"] = dict(reference_visual)
+                if normalized_captions is not None:
+                    normalized_shot["captions"] = normalized_captions
+                if continuation_of is not None:
+                    normalized_shot["continuation_of"] = continuation_of.strip()
                 normalized_shots.append(normalized_shot)
 
     bgm_mood = plan.get("bgm_mood")
@@ -349,6 +444,16 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                     if gain_db is not None:
                         norm_ev["gain_db"] = float(gain_db)
                     normalized_sfx_plan.append(norm_ev)
+
+    # R4: continuation_of の参照整合（存在する shot id を指しているか）を後段検証。
+    for shot in normalized_shots:
+        cof = shot.get("continuation_of")
+        if cof is not None and cof not in valid_shot_ids:
+            errors.append(
+                "shots[id={}].continuation_of {!r} は存在する shot id を指す必要があります".format(
+                    shot.get("id"), cof,
+                )
+            )
 
     hook_end_shot_id = plan.get("hook_end_shot_id")
     cta_start_shot_id = plan.get("cta_start_shot_id")

@@ -15,7 +15,7 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
 1. **shots の要素数を増減しない**。各 shot の id 名も変更しない。
 2. 各 shot の `duration_sec` / `caption_in_offset_sec` / `caption_out_offset_sec` /
    `telop_style_hint` / `reference_visual` / `motion_preset` / `motion_intensity` /
-   `scene_id` はスケルトンの値をそのまま返すこと。
+   `scene_id` / `caption_slots` / `continuation_of` はスケルトンの値をそのまま返すこと。
    （**特に motion_preset は参考動画の光学フロー機械判定に基づくマッピング結果です。
    絶対に変更しないこと。**）
 3. `sfx_plan` / `hook_end_shot_id` / `cta_start_shot_id` もスケルトンの値をそのまま返すこと。
@@ -36,6 +36,15 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
    （空文字）で返すこと。**telop 数（caption を持つ shot 数）はスケルトンと完全一致**
    でなければならない（1個でも増減させると不合格）。参考動画のテロップは参考の実カット
    分布に沿って既に選定済みで、これを LLM が編集することは禁止（telop_iou が大きく崩れる）。
+   **【複数テロップ shot・R4】**: スケルトンで `caption_slots` (配列) が付いている shot は
+   1 shot に複数枚のテロップが載る参考動画の忠実写像です。plan では
+   `captions: [{ "text": "テロップ本文", "caption_in_offset_sec": ..., "caption_out_offset_sec": ..., "telop_style_hint": {...} }, ...]`
+   を **caption_slots と同数、同じ順序・同じ時刻** で返すこと（±0.05秒以内）。
+   各要素の `text` は必ず非空の日本語テロップ本文を入れる（丸写し禁止・15字以上連続一致禁止）。
+   caption_slots 無し（=単一テロップ shot）のときは従来どおり `caption_jp` を入れる。
+   **【分割断片・R4】**: スケルトンで `continuation_of` が付いている shot は
+   Higgsfield クレジット上限のための実装都合の分割断片です。**そのまま値を保持** し、
+   `caption_jp=""`（テロップは親 shot に載る）で返すこと。visual_prompt は親 shot と同じ内容で構いません。
    **【narration_jp 文字数バジェット・F13・厳守】**: 各 shot の `narration_jp` は
    `expected_narration_chars`（無ければ 尺×既定 6.5字/秒）× **+15% までを絶対上限**とする
    （例: expected=15 なら **17字までで不合格ライン**。20字はアウト）。**超過すると自動不合格**
