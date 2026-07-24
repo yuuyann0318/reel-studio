@@ -106,6 +106,58 @@ def test_extract_page_info_dedupes_by_resolved_url():
 
 
 # ---------------------------------------------------------------------------
+# 回帰: 制御文字/空白入りURLはfetch段まで通さず extract_page_info で捨てる
+# 実機発生: LP HTMLに Liquid テンプレのエラー文字列がそのまま埋まっており、
+# 生成された img src が "https://ct.pinterest.com/v3/?pd[em]=Liquid error: internal&noscript=1"
+# のような半角スペースを含むURLになる → 従来は _fetch 直前で ValueError("URL can't contain
+# control characters") が上がり、"画像の取得に失敗しました" ノイズとして project.json の
+# warnings に記録され、UIには「画像が読み込めない」ように見えていた（ユーザー報告）。
+# ---------------------------------------------------------------------------
+
+
+def test_has_control_or_ws_chars_detects_space_tab_newline_and_c0():
+    for bad in [
+        "https://example.com/path with space",
+        "https://example.com/path\ttab",
+        "https://example.com/path\nnewline",
+        "https://example.com/path\r",
+        "https://example.com/\x01",
+        "https://example.com/\x7f",
+    ]:
+        assert product_images._has_control_or_ws_chars(bad) is True, bad
+    for good in [
+        "https://example.com/img.png",
+        "https://example.com/path?a=b&c=d",
+        "https://example.com/path%20encoded",
+        "https://example.com/日本語パス.png",  # 非ASCIIは制御文字ではない
+    ]:
+        assert product_images._has_control_or_ws_chars(good) is False, good
+
+
+def test_is_safe_url_rejects_url_with_control_chars_or_space():
+    liquid_url = (
+        "https://ct.pinterest.com/v3/?event=init&tid=2613103650650"
+        "&pd[em]=Liquid error: internal&noscript=1"
+    )
+    assert product_images._is_safe_url(liquid_url) is False
+    assert product_images._is_safe_url("https://example.com/path\nx") is False
+    assert product_images._is_safe_url("https://example.com/normal.png") is True
+
+
+def test_extract_page_info_drops_urls_with_control_chars():
+    html = (
+        '<html><head><title>t</title></head><body>'
+        '<img src="https://ok.example.com/good.png">'
+        # Liquid テンプレのレンダリング事故で埋まったURL（半角スペース入り）
+        '<img src="https://ct.pinterest.com/v3/?pd[em]=Liquid error: internal&noscript=1">'
+        '<img src="https://another.example.com/path with space.jpg">'
+        '</body></html>'
+    )
+    info = product_images.extract_page_info(html, "https://shop.example.com/lp/a")
+    assert info["image_urls"] == ["https://ok.example.com/good.png"]
+
+
+# ---------------------------------------------------------------------------
 # collect_product_images 用の共通スタブ
 # ---------------------------------------------------------------------------
 

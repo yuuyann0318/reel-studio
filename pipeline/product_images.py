@@ -40,13 +40,35 @@ _ALLOWED_SAVE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
 # URL安全性チェック（SSRF対策: 私有/ループバック系ホストへのアクセスを拒否）
 # ---------------------------------------------------------------------------
 
+def _has_control_or_ws_chars(url):
+    """URL文字列にHTTP禁止の制御文字/空白が含まれるかを判定する。
+
+    LPが Liquid テンプレート等でレンダリング失敗した場合、埋め込まれたURLに
+    半角スペースや改行が混じることがある(例: `pd[em]=Liquid error: internal`)。
+    urllib.request.Request は制御文字を含むURLを ValueError で拒否するため、
+    fetch段までは通せない=フェッチ失敗の警告として表示され「画像が読み込めない」
+    と受け取られるユーザーエラーの原因になる。事前に検知して静かにスキップする
+    (実質フェッチ不可能なURL=warningsに転記する価値がないため)。
+    """
+    if not url or not isinstance(url, str):
+        return False
+    for ch in url:
+        code = ord(ch)
+        if code < 0x20 or code == 0x7F or ch == " ":
+            return True
+    return False
+
+
 def _is_safe_url(url):
     """http/https以外、または私有系(loopback/private/link-local等)ホストなら False。
 
     DNS解決は行わない（ホスト名文字列/IPリテラルのみの判定。実ネットワーク禁止
-    環境でも決定論的に判定できるようにするため）。
+    環境でも決定論的に判定できるようにするため）。制御文字/半角スペースを含む
+    URL(HTTPで送出不可)も False とする。
     """
     if not url or not isinstance(url, str):
+        return False
+    if _has_control_or_ws_chars(url):
         return False
     try:
         parsed = urlparse(url)
@@ -261,9 +283,19 @@ def extract_page_info(html_text, base_url):
     for raw in raw_urls:
         if not raw:
             continue
+        raw_stripped = raw.strip()
+        # LPが Liquid テンプレのエラー文字列(例: "Liquid error: internal")を
+        # そのままレンダリングしていると、img src 属性値の中に半角スペース/改行が
+        # 混ざる。urllib.request.Request は制御文字を含むURLを ValueError で拒否
+        # するため、事前に弾いて fetch 側でノイジーなwarningを出さない
+        # (extract_page_info の段で捨てるので、呼び出し側は完全に気付かない)。
+        if _has_control_or_ws_chars(raw_stripped):
+            continue
         try:
-            resolved = urljoin(base_url, raw.strip())
+            resolved = urljoin(base_url, raw_stripped)
         except Exception:
+            continue
+        if _has_control_or_ws_chars(resolved):
             continue
         if _is_excluded_image_url(resolved):
             continue
