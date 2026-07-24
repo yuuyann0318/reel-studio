@@ -1416,8 +1416,25 @@ def _validate_plan_matches_skeleton(plan, skeleton, target_duration_sec):
     # スケルトンで caption_in_offset_sec が付いている shot は「参考テロップが載る shot」
     # として選定済み。LLM が rewrite 段で任意に telop を追加/削除すると telop_iou が
     # 大きく崩れる（denom がずれる）ため、shot ID 単位で厳密一致を要求する。
+    # R4.1 FIX (BUG-R4-01): 複数テロップ shot（caption_slots[]）は plan 側で captions[]
+    # を使い caption_jp=""（プロンプト側でそう指示している）なので、caption_jp だけを
+    # 数えると必ず missing 扱いになる。captions[] のいずれかに非空 text があれば
+    # 「telop あり shot」としてカウントする。
+    def _shot_has_telop(sh):
+        cj = sh.get("caption_jp")
+        if isinstance(cj, str) and cj.strip():
+            return True
+        caps = sh.get("captions")
+        if isinstance(caps, list):
+            for c in caps:
+                if isinstance(c, dict):
+                    tv = c.get("text") or c.get("caption_jp")
+                    if isinstance(tv, str) and tv.strip():
+                        return True
+        return False
+
     skel_telop_ids = {s.get("id") for s in skel_shots if "caption_in_offset_sec" in s}
-    plan_telop_ids = {s.get("id") for s in plan_shots if isinstance(s.get("caption_jp"), str) and s.get("caption_jp").strip()}
+    plan_telop_ids = {s.get("id") for s in plan_shots if _shot_has_telop(s)}
     if skel_telop_ids != plan_telop_ids:
         missing = sorted(skel_telop_ids - plan_telop_ids)
         extra = sorted(plan_telop_ids - skel_telop_ids)
@@ -1543,6 +1560,25 @@ def _attempt_plan(prompt, config, retries_left, target_duration_sec, target_tole
     meta["fallback_reason"] = result.get("fallback_reason")
     meta.setdefault("source", "ai")
     candidate["meta"] = meta
+    # R4.1 FIX (BUG-R4-02): 実 LLM は prompt の出力スキーマ節に version/meta が明記
+    # されていないと top-level に version を出さない（実測で確認）。meta と同じく
+    # 機械的に復元可能なので validate 前に自動注入して無駄な矯正リトライを避ける。
+    # skeleton モード(TTP)では v2 を、それ以外は v1 を採用する。
+    # codex-review P2 (2026-07-25) 対応: 補完対象は「未指定(None)」のみに限定する。
+    # LLM が明示的に `3` や `"2"` 等の不正値を出した場合はそのまま validate_plan に
+    # 通し、矯正リトライで「version は [1, 2] のいずれか」を LLM に伝える（不正値を
+    # 沈黙で書き換えると、後続の schema 拡張時に互換性の落とし穴になる）。
+    if "version" not in candidate or candidate.get("version") is None:
+        candidate["version"] = 2 if skeleton is not None else 1
+    # R4.1 FIX (BUG-R4-03): 実 LLM が TTP モードで scene_id を勝手に振り、しかも
+    # 「同一 scene 内の visual_prompt 一致」制約と参考映像(reference_visual)ごとに
+    # 異なる visual_prompt を要求するルールが衝突する。TTP モードでは shot 境界と
+    # 映像内容が skeleton で決まっているので、scene_id を強制的に落として plan_schema
+    # の scene_id 一致検査を発火させない（後段レンダ・fidelity には無影響）。
+    if skeleton is not None:
+        for sh in candidate.get("shots") or []:
+            if isinstance(sh, dict) and "scene_id" in sh:
+                sh.pop("scene_id", None)
 
     ok, errors, normalized = plan_schema.validate_plan(
         candidate, target_duration_sec=target_duration_sec, target_tolerance_sec=target_tolerance_sec

@@ -8,8 +8,26 @@
 （{TARGET_DURATION}秒）へスケールしたものです。**shots の数・各 duration_sec・
 caption_in_offset_sec / caption_out_offset_sec / telop_style_hint・reference_visual・
 sfx_plan・hook_end_shot_id / cta_start_shot_id は絶対に変更しないこと。**
-LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（英語）の3フィールドを
-埋めることだけです。骨（構成）は既に決まっています。
+LLM の役割は各 shot の `narration_jp` / `caption_jp`（または `captions[].text`）/
+`visual_prompt`（英語）の3フィールドを埋めることだけです。骨（構成）は既に決まっています。
+
+## 出力の作り方（穴埋め方式・R4.1 で明確化）
+下部の「スケルトンJSON」を **そのまま複製し、以下の3種類の変更のみを加えて返す** こと:
+1. **top-level に追加**: `"version": 2` と `"concept"`(1〜2文の企画コンセプト日本語)、
+   `"hook"`(3秒フックの短い日本語一言)、`"narration_script"`(全 shot の narration_jp
+   を出現順に連結した日本語ナレーション全文)、`"bgm_mood"`(upbeat/calm/emotional/none)
+   を追加する。`"meta"` は書かなくてよい（呼び出し側が自動で付与する）。
+2. **各 shot に追加**: `narration_jp` / `visual_prompt`（英語）を埋める。単一テロップ
+   shot（`caption_slots` が **無い**）は `caption_jp` を埋め、`captions[]` は書かない。
+   複数テロップ shot（`caption_slots` が **有る**）は `caption_jp=""` のままにして
+   `captions: [{text, caption_in_offset_sec, caption_out_offset_sec, telop_style_hint}, ...]`
+   を **caption_slots と同数・同順・同時刻**で追加する（時刻は caption_slots の値を
+   そのままコピーする）。
+3. **shot からは何も削除しない**（`caption_slots` / `reference_visual` / `motion_preset`
+   / `expected_narration_chars` / `continuation_of` などスケルトンにあるフィールドは
+   全て残したまま返す）。**`scene_id` は書かないこと**（TTP モードでは skeleton が
+   shot 境界と映像内容を決めているため scene_id 集約は不要。付けると `reference_visual`
+   ごとに visual_prompt が変わるため plan_schema の scene_id 一致検査に衝突する）。
 
 ## 絶対厳守のルール
 1. **shots の要素数を増減しない**。各 shot の id 名も変更しない。
@@ -32,8 +50,12 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp` / `visual_prompt`（�
    なる長さにする。全 shots の narration_jp を出現順に連結した
    文字列が `narration_script` と完全一致すること。
    **【telop 数はスケルトン固定・追加削除禁止】**: スケルトンで `caption_in_offset_sec`
-   が付いている shot だけに `caption_jp` を入れる。それ以外の shot は `caption_jp=""`
-   （空文字）で返すこと。**telop 数（caption を持つ shot 数）はスケルトンと完全一致**
+   が付いている shot は「テロップが載る shot」として選定済み。テロップの入れ場所は次のとおり:
+   - スケルトンに `caption_slots` が **無い** shot: `caption_jp` に日本語テロップ本文を入れる。
+   - スケルトンに `caption_slots` が **有る** shot: `caption_jp=""` のままにし、`captions[]`
+     を返す（下の R4 節を参照）。
+   スケルトンで `caption_in_offset_sec` が **付いていない** shot は `caption_jp=""`（空文字）
+   のまま返し、`captions[]` も付けないこと。**「テロップが載る shot 集合」はスケルトンと完全一致**
    でなければならない（1個でも増減させると不合格）。参考動画のテロップは参考の実カット
    分布に沿って既に選定済みで、これを LLM が編集することは禁止（telop_iou が大きく崩れる）。
    **【複数テロップ shot・R4】**: スケルトンで `caption_slots` (配列) が付いている shot は
