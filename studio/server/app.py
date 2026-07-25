@@ -31,6 +31,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pipeline import render
+from pipeline import plan_tier as plan_tier_mod
 from pipeline.config import load_config, project_root, output_dir
 from studio.server import projects
 from studio.server.jobs import (
@@ -112,9 +113,37 @@ async def create_project(request: Request):
     cfg = load_config()
     duration = (body or {}).get("duration")
     target_duration_sec = float(duration) if duration else cfg.get("target_duration_sec", 30)
-    backend_name = (body or {}).get("backend") or cfg.get("backend", "mock")
+
+    # plan_tier（"free" | "paid"）: UI の2択に対応する1変数。指定時は backend 個別指定より優先し、
+    # free→mock / paid→higgsfield を強制する（backend/voice/asr の混在指定を UI から撤去した設計）。
+    # 未指定のとき（上級者の backend 個別指定や後方互換クライアント）は従来どおり backend を尊重する。
+    raw_plan_tier = (body or {}).get("plan_tier")
+    plan_tier = plan_tier_mod.normalize_tier(raw_plan_tier)
+    # 「未指定」と「不正な値（typo 等）」を区別する: 非空なのに free/paid でない値は 400 で弾く。
+    # （黙って backend フォールバックさせると、既定backendがhiggsfieldの環境で "fre" のtypoが
+    # 有料生成を無料0コイン見積のまま開始してしまう。codex-review P1 指摘。）
+    if raw_plan_tier not in (None, "") and plan_tier is None:
+        _bad_request("invalid_plan_tier", "plan_tier は free/paid のいずれかである必要があります")
+    requested_backend = (body or {}).get("backend")
+    if plan_tier is not None:
+        backend_name = plan_tier_mod.resolve_backend(plan_tier, requested_backend)
+    else:
+        backend_name = requested_backend or cfg.get("backend", "mock")
     if backend_name not in ("mock", "higgsfield", "cloudapi"):
         _bad_request("invalid_backend", "backend は mock/higgsfield/cloudapi のいずれかである必要があります")
+    # 開始前の費用見積を billing.coins_estimated として記録する（表示・見積精度改善用）。
+    # plan_tier 未指定の後方互換リクエスト（backend のみ指定）でも、実際に使う backend から
+    # コースを推定して見積る（mock→free / higgsfield・cloudapi→paid）。backend=higgsfield なのに
+    # 無料0コインと記録される取り違えを防ぐ（codex-review P1 指摘）。
+    _billing_tier = plan_tier_mod.infer_tier(plan_tier, backend_name)
+    _est = plan_tier_mod.estimate_coins(cfg, _billing_tier, duration_sec=target_duration_sec)
+    billing = {
+        "plan_tier": _est["plan_tier"],
+        "coins_estimated": _est["coins"],
+        "coins_actual": None,
+        "estimate_approximate": _est["approximate"],
+        "estimate_note": _est["note"],
+    }
     style = (body or {}).get("style") or cfg.get("default_subtitle_style", "default")
     if style not in projects.VALID_SUBTITLE_PRESETS:
         _bad_request("invalid_style", "style は {} のいずれかである必要があります".format(projects.VALID_SUBTITLE_PRESETS))
@@ -145,13 +174,37 @@ async def create_project(request: Request):
 
     project = projects.create_project(
         theme.strip(), target_duration_sec, backend_name, status="generating", style=style, product_url=product_url,
-        reference_url=reference_url,
+        reference_url=reference_url, plan_tier=plan_tier, billing=billing,
     )
     job_manager.start_generate(
         project["id"], theme.strip(), target_duration_sec, backend_name, style=style, product_url=product_url,
-        reference_url=reference_url,
+        reference_url=reference_url, plan_tier=plan_tier,
     )
     return {"id": project["id"]}
+
+
+@app.post("/api/estimate")
+async def estimate_cost(request: Request):
+    """開始前の費用見積を返す（実生成はしない・クレジットは一切消費しない）。
+
+    Body: {"plan_tier": "free"|"paid", "duration": <sec, 任意>, "reference_url": <任意>}
+    Returns: {"plan_tier","coins","shot_count","per_shot","approximate","note"}
+    free は常に coins=0（0円保証）。paid は config の higgsfield.max_credits_per_shot を
+    単価にした概算（approximate=True）。本 API は Higgsfield/Fish Audio を呼ばない。
+    """
+    body = await request.json()
+    cfg = load_config()
+    plan_tier = plan_tier_mod.normalize_tier((body or {}).get("plan_tier"))
+    # 見積は「約◯コイン」を権威ある数字として表示するため、契約どおり free/paid のみ受け付ける。
+    # 未指定・typo を黙って無料0コインに解釈すると誤表示のまま有料生成へ進みうる（codex-review P2）。
+    if plan_tier is None:
+        _bad_request("invalid_plan_tier", "plan_tier は free/paid のいずれかである必要があります")
+    duration = (body or {}).get("duration")
+    try:
+        duration_sec = float(duration) if duration else cfg.get("target_duration_sec", 30)
+    except (TypeError, ValueError):
+        duration_sec = cfg.get("target_duration_sec", 30)
+    return plan_tier_mod.estimate_coins(cfg, plan_tier, duration_sec=duration_sec)
 
 
 def _probe_duration(ffprobe_bin, path):

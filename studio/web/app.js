@@ -42,7 +42,7 @@ const state = {
   job: null, // { id, kind:'generate'|'render', projectId, stage, progress, message, done }
 
   showCreateForm: false,
-  createForm: { theme: "", duration: 30, backend: "mock", style: "default" },
+  createForm: { theme: "", duration: 30, planTier: "free", style: "default" },
   createSubmitting: false,
   createError: null,
 
@@ -170,11 +170,11 @@ function toggleCreateForm(force) {
   setState({ showCreateForm: typeof force === "boolean" ? force : !state.showCreateForm, createError: null });
 }
 
-async function submitCreateProject({ theme, duration, backend, style, referenceUrl }) {
+async function submitCreateProject({ theme, duration, planTier, style, referenceUrl }) {
   setState({ createSubmitting: true, createError: null });
   try {
-    const { id } = await api.createProject({ theme, duration, backend, style, referenceUrl });
-    setState({ createSubmitting: false, showCreateForm: false, createForm: { theme: "", duration: 30, backend: "mock", style: "default" } });
+    const { id } = await api.createProject({ theme, duration, planTier, style, referenceUrl });
+    setState({ createSubmitting: false, showCreateForm: false, createForm: { theme: "", duration: 30, planTier: "free", style: "default" } });
     await loadProjects();
     await openProject(id); // status: generating のはずなので openProject 内で自動的に SSE 購読される
   } catch (err) {

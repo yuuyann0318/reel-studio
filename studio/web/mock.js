@@ -205,12 +205,22 @@ export async function getProject(id) {
   return JSON.parse(JSON.stringify(p));
 }
 
-export async function createProject({ theme, duration, backend, style }) {
+// plan_tier（"free"|"paid"）から映像バックエンドを解決する（サーバ pipeline/plan_tier.py と同じ規則）。
+function backendForPlanTier(planTier, backend) {
+  if (planTier === "free") return "mock";
+  if (planTier === "paid") return "higgsfield";
+  return backend || "mock";
+}
+
+export async function createProject({ theme, duration, backend, style, planTier }) {
   await delay(150);
   if (!theme || !theme.trim()) {
     throw new ApiError("VALIDATION_ERROR", "テーマを入力してください", 422);
   }
   const id = genId("p");
+  const resolvedBackend = backendForPlanTier(planTier, backend);
+  const tier = planTier || (resolvedBackend === "mock" ? "free" : "paid");
+  const est = estimateCoins(tier, duration || 30);
   DB.projects.set(id, {
     id,
     theme: theme.trim(),
@@ -218,11 +228,27 @@ export async function createProject({ theme, duration, backend, style }) {
     status: "generating",
     plan: null,
     renders: [],
-    backend: backend || "mock",
+    backend: resolvedBackend,
+    plan_tier: tier,
+    billing: { plan_tier: tier, coins_estimated: est.coins, coins_actual: resolvedBackend === "mock" ? 0 : null },
     style: style || "default",
   });
   startGenerateJob(id, theme.trim(), duration || 30, style || "default");
   return { id };
+}
+
+// サーバ pipeline/plan_tier.estimate_coins と同じ概算（mock: 0円保証の再現）。
+function estimateCoins(planTier, duration) {
+  if (planTier !== "paid") return { plan_tier: "free", coins: 0, approximate: false, note: "むりょうコースは0円です" };
+  const perShot = 10;
+  const shotCount = Math.max(3, Math.min(14, Math.round((Number(duration) || 30) / 4)));
+  const coins = shotCount * perShot;
+  return { plan_tier: "paid", coins, shot_count: shotCount, per_shot: perShot, approximate: true, note: `約${coins}コイン消費します（${shotCount}ショット×最大${perShot}コインの概算）` };
+}
+
+export async function estimate({ planTier, duration }) {
+  await delay(80);
+  return estimateCoins(planTier, duration || 30);
 }
 
 export async function importProject(file) {

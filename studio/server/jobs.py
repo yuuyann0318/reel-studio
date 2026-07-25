@@ -44,6 +44,7 @@ from pipeline import scenes as scenes_mod
 from pipeline import subtitles
 from pipeline import tts as tts_mod
 from pipeline.config import load_config, project_root
+from pipeline import plan_tier as plan_tier_mod
 from pipeline.visual import get_backend
 from premiere import driver as premiere_driver
 from premiere import package as premiere_package
@@ -320,7 +321,7 @@ class JobManager:
     # --- 公開API -----------------------------------------------------
 
     def start_generate(self, project_id, theme, target_duration_sec, backend_name, style="default", product_url=None,
-                        reference_url=None):
+                        reference_url=None, plan_tier=None):
         job_id = project_id  # POST /api/projects はプロジェクトIDそのものをjob_idとして使う（設計判断）
         with self._lock:
             self._jobs[job_id] = {"job_id": job_id, "kind": "generate", "status": "queued"}
@@ -328,8 +329,17 @@ class JobManager:
             "project_id": project_id, "theme": theme,
             "target_duration_sec": target_duration_sec, "backend_name": backend_name,
             "style": style, "product_url": product_url, "reference_url": reference_url,
+            "plan_tier": plan_tier,
         }))
         return job_id
+
+    def _cfg_for_tier(self, plan_tier):
+        """plan_tier（free/paid）に応じて TTS エンジン・ASR 有効/無効を上書きした cfg を返す。
+
+        plan_tier 未指定/無効なら self.cfg の複製をそのまま返す（後方互換）。free のとき
+        Fish Audio TTS/ASR のコードパスへ入らない cfg になる（0円保証の要）。
+        """
+        return plan_tier_mod.apply_tier_to_cfg(self.cfg, plan_tier)
 
     def start_render(self, project_id):
         job_id = _new_job_id()
@@ -521,10 +531,13 @@ class JobManager:
         project_id = payload["project_id"]
         theme = payload["theme"]
         target_duration_sec = payload["target_duration_sec"]
-        backend_name = payload["backend_name"]
         style = payload.get("style") or "default"
         product_url = payload.get("product_url")
-        cfg = self.cfg
+        # plan_tier（free/paid）を最優先で解決する。free は必ず mock（Higgsfield を構築しない）、
+        # paid は higgsfield。plan_tier 未指定（後方互換）のときは payload の backend_name を尊重する。
+        plan_tier = payload.get("plan_tier")
+        backend_name = plan_tier_mod.resolve_backend(plan_tier, payload["backend_name"])
+        cfg = self._cfg_for_tier(plan_tier)
 
         def fail(message):
             project = projects.get_project(project_id)
@@ -1060,6 +1073,13 @@ class JobManager:
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["tts"] = tts_meta
+        # コース/消費実績を記録する（完了画面での表示・見積精度改善用）。mock（むりょうコース）は
+        # 外部の有料APIを呼ばないため実消費 0 コインが確定している事実を記録する。
+        _billing = dict(project.get("billing") or {})
+        _billing["plan_tier"] = plan_tier_mod.infer_tier(project.get("plan_tier"), project.get("backend"))
+        if (project.get("backend") or "mock") == "mock":
+            _billing["coins_actual"] = 0
+        project["billing"] = _billing
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
@@ -1072,7 +1092,6 @@ class JobManager:
 
     def _run_render(self, job_id, payload):
         project_id = payload["project_id"]
-        cfg = self.cfg
 
         def fail(message):
             project = projects.get_project(project_id)
@@ -1088,6 +1107,8 @@ class JobManager:
         if project is None:
             fail("プロジェクトが見つかりません: {}".format(project_id))
             return
+        # プロジェクトに保存された plan_tier に応じて TTS/ASR を切り替える（free は say/ASR無効）。
+        cfg = self._cfg_for_tier(project.get("plan_tier"))
 
         self._emit(job_id, "validate", 5, "編集内容を検証中…")
         ng_words = list(compliance.DEFAULT_NG_WORDS)
@@ -1141,6 +1162,13 @@ class JobManager:
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["tts"] = tts_meta
+        # コース/消費実績を記録する（完了画面での表示・見積精度改善用）。mock（むりょうコース）は
+        # 外部の有料APIを呼ばないため実消費 0 コインが確定している事実を記録する。
+        _billing = dict(project.get("billing") or {})
+        _billing["plan_tier"] = plan_tier_mod.infer_tier(project.get("plan_tier"), project.get("backend"))
+        if (project.get("backend") or "mock") == "mock":
+            _billing["coins_actual"] = 0
+        project["billing"] = _billing
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]
@@ -1156,7 +1184,6 @@ class JobManager:
         揃ったら_render_projectで書き出しまで進める（クレジット消費済みの既存クリップは再生成しない）。
         """
         project_id = payload["project_id"]
-        cfg = self.cfg
 
         def fail(message):
             project = projects.get_project(project_id)
@@ -1172,6 +1199,8 @@ class JobManager:
         if project is None:
             fail("プロジェクトが見つかりません: {}".format(project_id))
             return
+        # プロジェクトに保存された plan_tier に応じて TTS/ASR を切り替える（free は say/ASR無効）。
+        cfg = self._cfg_for_tier(project.get("plan_tier"))
 
         plan = project.get("plan") or {}
         shots = plan.get("shots") or []
@@ -1367,6 +1396,13 @@ class JobManager:
         project["status"] = "ready"
         project["error"] = None  # 成功したら最新エラー表示を消す（履歴はerror_historyに残る）
         project["tts"] = tts_meta
+        # コース/消費実績を記録する（完了画面での表示・見積精度改善用）。mock（むりょうコース）は
+        # 外部の有料APIを呼ばないため実消費 0 コインが確定している事実を記録する。
+        _billing = dict(project.get("billing") or {})
+        _billing["plan_tier"] = plan_tier_mod.infer_tier(project.get("plan_tier"), project.get("backend"))
+        if (project.get("backend") or "mock") == "mock":
+            _billing["coins_actual"] = 0
+        project["billing"] = _billing
         project["renders"] = (project.get("renders") or []) + [
             {"path": out_path, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "ok": True}
         ]

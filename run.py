@@ -376,11 +376,21 @@ def _emit_premiere_package_from_cli(run_dir, plan, shot_display_durations, edit_
 
 def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default",
                   reference_url=None, reference_file=None, premiere_export=False,
-                  match_reference_duration=False):
+                  match_reference_duration=False, plan_tier=None):
+    from pipeline import plan_tier as _plan_tier_mod
+    _tier = _plan_tier_mod.infer_tier(plan_tier, backend_name)
     report = {
         "theme": theme,
         "target_duration_sec": target_duration_sec,
         "backend": backend_name,
+        # プラン（コース）と費用見積・実消費。mock（むりょうコース）は外部有料APIを呼ばないため
+        # 実消費 0 コインが確定している事実を記録する（見積精度改善・完了報告の材料）。
+        "plan_tier": _tier,
+        "billing": {
+            "plan_tier": _tier,
+            "coins_estimated": _plan_tier_mod.estimate_coins(cfg, _tier, duration_sec=target_duration_sec)["coins"],
+            "coins_actual": 0 if backend_name == "mock" else None,
+        },
         "no_llm": no_llm,
         "stages": {},
         "output_path": None,
@@ -963,7 +973,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="higgsfield-auto-reel: テーマ→9:16完成リール全自動パイプライン")
     parser.add_argument("--theme", required=True, help="動画のテーマ（例: 'AIで副業を始める最初の一歩'）")
     parser.add_argument("--duration", type=float, default=None, help="目標尺(秒)。未指定はconfig.jsonのtarget_duration_sec")
-    parser.add_argument("--backend", default=None, choices=["mock", "higgsfield", "cloudapi"], help="ビジュアル生成バックエンド")
+    parser.add_argument("--backend", default=None, choices=["mock", "higgsfield", "cloudapi"], help="ビジュアル生成バックエンド（上級者向け。--plan 指定時は --plan が優先）")
+    parser.add_argument(
+        "--plan", default=None, choices=["free", "paid"],
+        help="プラン（ワンセット）。free=むりょうコース（映像mock/声say/文字起こしスキップ・0円保証） / "
+             "paid=本番コース（映像higgsfield/声Fish Audio/文字起こしFish Audio ASR）。"
+             "指定時は --backend より優先し、TTS/ASR もまとめて切り替える",
+    )
     parser.add_argument("--aspect", default="9:16", choices=["9:16"], help="現状9:16のみ対応")
     parser.add_argument("--no-llm", action="store_true", help="claude CLIを使わず決定論的テンプレートで企画生成する")
     parser.add_argument(
@@ -1002,7 +1018,24 @@ def main(argv=None) -> int:
 
     cfg = load_config()
     target_duration_sec = args.duration if args.duration is not None else cfg.get("target_duration_sec", 30)
-    backend_name = args.backend or cfg.get("backend", "mock")
+
+    # プラン（ワンセット）: --plan は --backend より優先し、映像backend・TTSエンジン・ASR有無を
+    # まとめて切り替える（free=0円保証 / paid=有料一式）。両方指定で矛盾（例: --plan free --backend
+    # higgsfield）していたら明示エラーで止める（暗黙にどちらかを勝たせると事故る）。
+    from pipeline import plan_tier as plan_tier_mod
+    plan_tier = plan_tier_mod.normalize_tier(args.plan)
+    if plan_tier is not None:
+        resolved_backend = plan_tier_mod.resolve_backend(plan_tier, None)
+        if args.backend is not None and args.backend != resolved_backend:
+            print(
+                "エラー: --plan {} は映像バックエンド '{}' を使います（--backend {} と矛盾します）。"
+                "どちらか一方だけを指定してください。".format(plan_tier, resolved_backend, args.backend)
+            )
+            return 2
+        backend_name = resolved_backend
+        cfg = plan_tier_mod.apply_tier_to_cfg(cfg, plan_tier)
+    else:
+        backend_name = args.backend or cfg.get("backend", "mock")
     quality = args.quality or cfg.get("director_quality", "supreme")
 
     # TTP v2 モード必須ガード: reference_url/file が無く --no-llm でもない場合は
@@ -1017,6 +1050,7 @@ def main(argv=None) -> int:
             reference_url=args.reference_url, reference_file=args.reference_file,
             premiere_export=args.premiere_export,
             match_reference_duration=args.match_reference_duration,
+            plan_tier=plan_tier,
         )
     except director.TTPReferenceRequiredError:
         _emit_reference_required_error(args.theme)

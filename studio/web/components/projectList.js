@@ -79,11 +79,12 @@ export function renderProjectList(container, state, actions) {
         </select>
       </div>
       <div class="field">
-        <label for="f-backend">生成バックエンド</label>
-        <select class="select" id="f-backend" name="backend">
-          ${["mock", "higgsfield", "cloudapi"].map((b) => `<option value="${b}" ${createForm.backend === b ? "selected" : ""}>${b}</option>`).join("")}
+        <label for="f-plan">プラン（ワンセット）</label>
+        <select class="select" id="f-plan" name="plan_tier">
+          <option value="free" ${(createForm.planTier || "free") === "free" ? "selected" : ""}>むりょうコース（映像mock・声say・0円）</option>
+          <option value="paid" ${createForm.planTier === "paid" ? "selected" : ""}>本番コース（映像higgsfield・声Fish Audio・コイン消費）</option>
         </select>
-        <div class="field-hint">迷ったら mock（実映像を消費せず動作確認できます）</div>
+        <div class="field-hint">迷ったら「むりょうコース」（外部の有料APIを一切使わず0円で動作確認できます）</div>
       </div>
       <div class="field">
         <label for="f-style">テロップ・カットのスタイル</label>
@@ -145,7 +146,7 @@ export function renderProjectList(container, state, actions) {
       actions.submitCreateProject({
         theme: fd.get("theme"),
         duration: Number(fd.get("duration")),
-        backend: fd.get("backend"),
+        planTier: fd.get("plan_tier"),
         style: fd.get("style"),
         referenceUrl,
       });

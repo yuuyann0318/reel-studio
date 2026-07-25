@@ -116,7 +116,7 @@ def _now_iso():
 
 
 def create_project(theme, target_duration_sec, backend_name, status="generating", style="default", product_url=None,
-                    reference_url=None):
+                    reference_url=None, plan_tier=None, billing=None):
     """新規プロジェクトの雛形を作成し保存する。plan/shotsは生成ジョブが後で埋める。
 
     style: "default" | "vertical_hook"（縦書きテロップ・高速カットのTTPスタイル）。
@@ -143,6 +143,11 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
         "created_at": _now_iso(),
         "status": status,
         "backend": backend_name,
+        # plan_tier: "free"（むりょうコース） | "paid"（本番コース）。UI の2択に対応する
+        # 1変数。None（旧プロジェクト/インポート）のときは backend から後方互換で推定して表示する。
+        "plan_tier": plan_tier,
+        # billing: 開始前の費用見積と実消費の記録（コース/消費実績の表示・見積精度改善用）。
+        "billing": billing,
         "target_duration_sec": target_duration_sec,
         "style": style,
         "plan": {

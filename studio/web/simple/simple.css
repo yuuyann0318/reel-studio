@@ -153,31 +153,85 @@ body.theme-simple {
 .s-style-card__title { font-weight: 700; font-size: 13.5px; margin-bottom: 2px; color: var(--text); }
 .s-style-card__desc { font-size: 12px; color: var(--text-dim); }
 
-/* ---------- ホーム: 映像タイプ2択 ---------- */
-.s-backend-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
-.s-backend-card {
+/* ---------- ホーム: プラン（ワンセット）2択カード ---------- */
+/* 無彩色ベース＋アクセント2色: free=青(--accent) / paid=琥珀(--plan-amber)。
+   デザイン4原則: 近接=1枚に費用/特徴を集約 / 整列=2カード同格グリッド /
+   対比=選択カードを塗り分け / 反復=既存カード様式を踏襲。 */
+:root { --plan-amber: #E0932E; --plan-amber-soft: #FBF1E2; --plan-blue-soft: #EEF2FF; }
+
+.s-plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
+.s-plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   border: 1.5px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   background: #FFFFFF;
-  padding: 16px 12px;
-  text-align: center;
+  padding: 16px 14px;
+  text-align: left;
   cursor: pointer;
-  font-weight: 600;
-  font-size: 13.5px;
   color: var(--text);
-  transition: border-color var(--transition-fast), background var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
 }
-.s-backend-card[aria-pressed="true"] {
+.s-plan-card:hover { box-shadow: var(--shadow-2); }
+.s-plan-card__head { display: flex; align-items: center; justify-content: space-between; }
+.s-plan-card__icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 50%;
+  background: #F1F3F8; color: var(--text-dim);
+}
+.s-plan-card__badge {
+  font-size: 11px; font-weight: 700; letter-spacing: .02em;
+  padding: 3px 9px; border-radius: 999px;
+  background: #F1F3F8; color: var(--text-dim);
+}
+.s-plan-card__title { font-weight: 800; font-size: 15px; color: var(--text); }
+.s-plan-card__sub { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+.s-plan-card__cost {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 6px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  background: #F5F6FA;
+}
+.s-plan-card__cost-label { font-size: 11px; color: var(--text-dim); font-weight: 600; }
+.s-plan-card__cost-value { font-size: 15px; font-weight: 800; color: var(--text); }
+.s-plan-card__features { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+.s-plan-card__features li { display: flex; align-items: flex-start; gap: 6px; font-size: 11.5px; color: var(--text-dim); line-height: 1.45; }
+.s-plan-card__check { flex: none; margin-top: 1px; color: var(--text-faint); }
+
+/* free（青）の選択状態 */
+.s-plan-card--free[aria-pressed="true"] {
   border: 2px solid var(--accent);
-  background: #F4F6FF;
+  background: var(--plan-blue-soft);
 }
-.s-backend-card__icon {
-  display: flex; align-items: center; justify-content: center;
-  color: var(--text-dim);
-  margin-bottom: 6px;
+.s-plan-card--free[aria-pressed="true"] .s-plan-card__icon,
+.s-plan-card--free[aria-pressed="true"] .s-plan-card__badge { background: var(--accent); color: #FFFFFF; }
+.s-plan-card--free[aria-pressed="true"] .s-plan-card__cost-value,
+.s-plan-card--free[aria-pressed="true"] .s-plan-card__check { color: var(--accent); }
+.s-plan-card--free[aria-pressed="true"] .s-plan-card__cost { background: #FFFFFF; }
+
+/* paid（琥珀）の選択状態 */
+.s-plan-card--paid[aria-pressed="true"] {
+  border: 2px solid var(--plan-amber);
+  background: var(--plan-amber-soft);
 }
-.s-backend-card[aria-pressed="true"] .s-backend-card__icon { color: var(--accent); }
-.s-backend-card__note { font-size: 11.5px; color: var(--text-dim); font-weight: 400; margin-top: 4px; }
+.s-plan-card--paid[aria-pressed="true"] .s-plan-card__icon,
+.s-plan-card--paid[aria-pressed="true"] .s-plan-card__badge { background: var(--plan-amber); color: #FFFFFF; }
+.s-plan-card--paid[aria-pressed="true"] .s-plan-card__cost-value,
+.s-plan-card--paid[aria-pressed="true"] .s-plan-card__check { color: var(--plan-amber); }
+.s-plan-card--paid[aria-pressed="true"] .s-plan-card__cost { background: #FFFFFF; }
+
+/* コース＋消費コインのバッジ（作成中/完成画面） */
+.s-course-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin: 6px 0 2px;
+  padding: 6px 12px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 700;
+  border: 1.5px solid var(--border);
+}
+.s-course-chip__coins { font-weight: 600; color: var(--text-dim); }
+.s-course-chip--free { background: var(--plan-blue-soft); border-color: var(--accent); color: var(--accent); }
+.s-course-chip--paid { background: var(--plan-amber-soft); border-color: var(--plan-amber); color: var(--plan-amber); }
 .s-hint {
   font-size: 12.5px;
   color: var(--text-dim);
@@ -503,5 +557,5 @@ body.theme-simple {
 
 @media (max-width: 420px) {
   .s-shell { padding: 16px 14px 88px; }
-  .s-style-grid, .s-backend-grid { gap: 8px; }
+  .s-style-grid, .s-plan-grid { gap: 8px; }
 }

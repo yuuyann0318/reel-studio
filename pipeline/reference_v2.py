@@ -1226,6 +1226,23 @@ def _run_asr_and_analysis(
     }, warnings
 
 
+def _asr_disabled_post(audio_path, cfg=None, **_kw):
+    """0円保証（むりょうコース）用の no-op ASR: 外部へ一切アクセスせず「ASR不能」を返す。"""
+    return {"ok": False, "error": "asr_disabled_free_tier"}
+
+
+def resolve_asr_post(asr_post_fn, cfg):
+    """cfg["reference"]["asr_enabled"] が False のとき、外部（Fish Audio ASR=有料）を呼ばない
+    no-op ASR に差し替える。それ以外（True/未指定）は渡された asr_post_fn をそのまま使う。
+
+    plan_tier="free" のとき pipeline.plan_tier.apply_tier_to_cfg が asr_enabled=False を立てる。
+    明示的に asr_post を渡していても、asr_enabled=False が最優先（0円保証を機械的に担保するため）。
+    """
+    if ((cfg or {}).get("reference") or {}).get("asr_enabled") is False:
+        return _asr_disabled_post
+    return asr_post_fn
+
+
 def analyze_reference_v2(
     url,
     cfg=None,
@@ -1283,7 +1300,7 @@ def analyze_reference_v2(
     detect_cuts_fn = detect_cuts  # 実行時は ffmpeg_bin と閾値も引き回す
     extract_frames_fn = extract_frames or extract_frames_at_times
     ametadata_fn = ffmpeg_run_ametadata or run_ffmpeg_ametadata
-    asr_post_fn = asr_post or ref_v1.default_asr_post
+    asr_post_fn = resolve_asr_post(asr_post or ref_v1.default_asr_post, cfg)
     claude_call_fn = claude_call if claude_call is not None else call_claude_json
     fusion_call_fn = fusion_call if fusion_call is not None else call_claude_json
 

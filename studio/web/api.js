@@ -59,15 +59,29 @@ export const api = {
     return request(`/api/projects/${encodeURIComponent(id)}`);
   },
 
-  async createProject({ theme, duration, backend, style, productUrl, referenceUrl }) {
-    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl, referenceUrl });
-    const body = { theme, duration, backend, style };
+  async createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier }) {
+    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier });
+    const body = { theme, duration, style };
+    // plan_tier（"free"|"paid"）を1変数で送る。指定時はサーバ側で backend を強制解決するため、
+    // backend は送らない（後方互換のため未指定時のみ backend を尊重）。
+    if (planTier) body.plan_tier = planTier;
+    else if (backend) body.backend = backend;
     if (productUrl) body.product_url = productUrl; // 空/未指定なら送らない（通常モードのまま）
     if (referenceUrl) body.reference_url = referenceUrl; // 空/未指定なら送らない（通常の台本生成のまま）
     return request("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    });
+  },
+
+  // 開始前の費用見積（実生成はしない・クレジット消費なし）。free は常に coins=0。
+  async estimate({ planTier, duration }) {
+    if (MOCK) return mock.estimate ? mock.estimate({ planTier, duration }) : { plan_tier: planTier, coins: 0, approximate: false, note: "" };
+    return request("/api/estimate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plan_tier: planTier, duration }),
     });
   },
 

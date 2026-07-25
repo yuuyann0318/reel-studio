@@ -26,7 +26,9 @@ const state = {
   productUrl: "", // 商品リンク（任意）。貼ると商品アフィリエイト動画モードになる
   referenceUrl: "", // 参考動画リンク（任意）。貼るとその動画の構成・テンポを再現した台本になる
   style: "default", // 'default' | 'vertical_hook'
-  backend: "mock", // 'mock' | 'higgsfield'
+  planTier: "free", // 'free'（むりょうコース） | 'paid'（本番コース）。映像/声/文字起こしの課金をまとめて切替
+  estimate: { free: { coins: 0, note: "0円" }, paid: null }, // プランごとの費用見積（paidはAPIで動的取得）
+  estimateLoading: false,
   submitting: false,
   submitError: null,
 
@@ -99,7 +101,7 @@ async function submitCreate() {
   setState({ submitting: true, submitError: null });
   try {
     const { id } = await api.createProject({
-      theme, duration: 30, backend: state.backend, style: state.style,
+      theme, duration: 30, planTier: state.planTier, style: state.style,
       productUrl: productUrl || undefined, // 空なら送らない（通常モードのまま）
       referenceUrl, // TTP v2: 必須
     });
@@ -437,6 +439,32 @@ function saveLink() {
 function topbarHtml() {
   return `<div class="s-topbar"><span class="logo-dot" aria-hidden="true"></span><span>Reel Studio かんたんモード</span></div>`;
 }
+// コース＋消費コインの小さなバッジ。plan_tier と billing（サーバ/モック記録）から作る。
+// tier 未保存の旧プロジェクトは backend から後方互換で推定する。
+function courseChipHtml(tier, coinsActual, coinsEstimated) {
+  const isFree = tier !== "paid";
+  const label = isFree ? "むりょうコース" : "本番コース";
+  let coinText;
+  if (isFree) coinText = "0円（無料）";
+  else if (coinsActual != null) coinText = `${coinsActual} コイン消費`;
+  else if (coinsEstimated != null) coinText = `見積 約${coinsEstimated} コイン`;
+  else coinText = "コース: 有料";
+  return `<div class="s-course-chip s-course-chip--${isFree ? "free" : "paid"}">
+    <span class="s-course-chip__label">${escapeHtml(label)}</span>
+    <span class="s-course-chip__coins">${escapeHtml(coinText)}</span>
+  </div>`;
+}
+function courseChipForProject(project) {
+  if (!project) return "";
+  const billing = project.billing || {};
+  // 明示の plan_tier / billing.plan_tier が最優先。無い旧プロジェクトは生成バックエンドから推定する
+  // （mock→free / higgsfield・cloudapi→paid）。import 等コース概念の無いプロジェクトは表示しない
+  // （アップロードしただけの動画を「本番コース(有料)」と誤表示しないため）。
+  const BACKEND_TIER = { mock: "free", higgsfield: "paid", cloudapi: "paid" };
+  const tier = project.plan_tier || billing.plan_tier || BACKEND_TIER[project.backend || ""];
+  if (!tier) return "";
+  return courseChipHtml(tier, billing.coins_actual, billing.coins_estimated);
+}
 function proModeHref() {
   const p = new URLSearchParams(location.search);
   p.set("pro", "1");
@@ -577,17 +605,63 @@ function styleCardHtml(value, title, desc) {
       <div class="s-style-card__desc">${escapeHtml(desc)}</div>
     </button>`;
 }
-function backendCardHtml(value, iconSvg, title, note) {
-  const pressed = state.backend === value;
+// ---------- プラン（ワンセット）2択カード ----------
+// free=むりょうコース（青）/ paid=本番コース（琥珀）。1枚に「費用・何ができるか」を近接配置。
+const ICON_FLASK = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v5.3L4.9 17a2 2 0 0 0 1.7 3h10.8a2 2 0 0 0 1.7-3L14 8.3V3"/><path d="M7.6 14h8.8"/></svg>`;
+const ICON_GEM = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3 6 9l6 12 6-12-3-6M9 3l3 6 3-6"/></svg>`;
+const ICON_CHECK = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.2 11.7 13 4.5"/></svg>`;
+
+// paid の見積が未取得なら API を叩いて取得する（実生成はしない・0円保証のfree側は叩かない）。
+async function ensurePaidEstimate() {
+  if (state.estimate.paid || state.estimateLoading) return;
+  setState({ estimateLoading: true });
+  try {
+    const est = await api.estimate({ planTier: "paid", duration: 30 });
+    setState({ estimateLoading: false, estimate: { ...state.estimate, paid: est } });
+  } catch (_e) {
+    setState({ estimateLoading: false, estimate: { ...state.estimate, paid: { coins: null, note: "見積を取得できませんでした" } } });
+  }
+}
+
+// この動画にかかる費用の1行表示。free=「0円」/ paid=「約◯コイン」（取得前は「計算中…」）。
+function planCostLabel(tier) {
+  if (tier === "free") return "0円";
+  const est = state.estimate.paid;
+  if (state.estimateLoading && !est) return "計算中…";
+  if (!est) return "約 … コイン";
+  if (est.coins == null) return "見積エラー";
+  return `約 ${est.coins} コイン`;
+}
+
+function planCardHtml(tier, iconSvg, badge, title, sub, features) {
+  const pressed = state.planTier === tier;
   return `
-    <button type="button" class="s-backend-card" data-backend="${value}" aria-pressed="${pressed}">
-      <div class="s-backend-card__icon" aria-hidden="true">${iconSvg}</div>
-      <div>${escapeHtml(title)}</div>
-      <div class="s-backend-card__note">${escapeHtml(note)}</div>
+    <button type="button" class="s-plan-card s-plan-card--${tier}" data-plan="${tier}" aria-pressed="${pressed}">
+      <div class="s-plan-card__head">
+        <span class="s-plan-card__icon" aria-hidden="true">${iconSvg}</span>
+        <span class="s-plan-card__badge">${escapeHtml(badge)}</span>
+      </div>
+      <div class="s-plan-card__title">${escapeHtml(title)}</div>
+      <div class="s-plan-card__sub">${escapeHtml(sub)}</div>
+      <div class="s-plan-card__cost">
+        <span class="s-plan-card__cost-label">この動画の費用</span>
+        <span class="s-plan-card__cost-value">${escapeHtml(planCostLabel(tier))}</span>
+      </div>
+      <ul class="s-plan-card__features">
+        ${features.map((f) => `<li><span class="s-plan-card__check" aria-hidden="true">${ICON_CHECK}</span>${escapeHtml(f)}</li>`).join("")}
+      </ul>
     </button>`;
 }
-const ICON_FLASK = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v5.3L4.9 17a2 2 0 0 0 1.7 3h10.8a2 2 0 0 0 1.7-3L14 8.3V3"/><path d="M7.6 14h8.8"/></svg>`;
-const ICON_CLAPPER = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.2 5.1 5A1 1 0 0 1 6 4.3h11.8a1 1 0 0 1 .9.6L20 8.2"/><rect x="4" y="8.2" width="16" height="11.5" rx="1.5"/><path d="m8.3 4.6 1.8 3.6M13.1 4.4l1.8 3.6"/></svg>`;
+
+function planCardsHtml() {
+  return `
+    <div class="s-plan-grid" role="group" aria-label="プランを選ぶ">
+      ${planCardHtml("free", ICON_FLASK, "むりょう", "おためしコース", "まずは無料でお試し",
+        ["映像: 練習用の仮映像", "声: パソコン内蔵の音声", "料金: ずっと0円"])}
+      ${planCardHtml("paid", ICON_GEM, "本番", "本番コース", "AI映像と自然な声で仕上げる",
+        ["映像: AIが生成する本物の映像", "声: 自然なAIナレーション", "料金: コインを消費（下に表示）"])}
+    </div>`;
+}
 
 // ---------- 画面: ホーム ----------
 function renderHome() {
@@ -626,12 +700,9 @@ function renderHome() {
         ${styleCardHtml("vertical_hook", "バズ風", "縦書きテロップ・速いカット")}
       </div>
 
-      <div class="s-section-title" style="margin-top:16px;">映像タイプ</div>
-      <div class="s-backend-grid" role="group" aria-label="映像タイプ選択">
-        ${backendCardHtml("mock", ICON_FLASK, "デモ素材（無料）", "お試し・練習用")}
-        ${backendCardHtml("higgsfield", ICON_CLAPPER, "AI生成映像", "クレジットを消費")}
-      </div>
-      <div class="s-hint">クレジットは動画生成に使うポイントです。まずは無料のデモ素材でお試しください。</div>
+      <div class="s-section-title" style="margin-top:16px;">プランを選ぶ</div>
+      ${planCardsHtml()}
+      <div class="s-hint">「むりょう」はずっと0円でお試しできます。「本番」はAIが本物の映像と声を作り、コインを消費します（かかるコイン数は上に表示されます）。</div>
 
       ${state.submitError ? `<div class="s-error-banner" role="alert">${escapeHtml(state.submitError.message)}</div>` : ""}
 
@@ -656,7 +727,11 @@ function renderHome() {
   referenceUrlInput.addEventListener("input", (e) => { state.referenceUrl = e.target.value; syncSubmitButton(); });
   el.querySelectorAll("[data-chip]").forEach((btn) => btn.addEventListener("click", () => setState({ theme: btn.dataset.chip })));
   el.querySelectorAll("[data-style]").forEach((btn) => btn.addEventListener("click", () => setState({ style: btn.dataset.style })));
-  el.querySelectorAll("[data-backend]").forEach((btn) => btn.addEventListener("click", () => setState({ backend: btn.dataset.backend })));
+  el.querySelectorAll("[data-plan]").forEach((btn) => btn.addEventListener("click", () => {
+    const tier = btn.dataset.plan;
+    setState({ planTier: tier });
+    if (tier === "paid") ensurePaidEstimate(); // 選んだ瞬間に見積を取得して費用を動的表示
+  }));
   el.querySelector("#s-submit").addEventListener("click", submitCreate);
   el.querySelectorAll("[data-open-project]").forEach((c) => c.addEventListener("click", () => openPast(c.dataset.openProject)));
 }
@@ -713,6 +788,7 @@ function renderCreating() {
     <div class="s-card s-creating">
       <h2>作成しています</h2>
       <div class="s-creating__theme">「${escapeHtml(theme || "")}」</div>
+      ${state.current ? courseChipForProject(state.current) : courseChipHtml(state.planTier, null, state.planTier === "paid" && state.estimate.paid ? state.estimate.paid.coins : (state.planTier === "free" ? 0 : null))}
       <div class="s-steps">
         ${steps.map((s, i) => `
           <div class="s-step ${i < activeIdx ? "is-done" : ""} ${i === activeIdx ? "is-active" : ""}">
@@ -762,6 +838,7 @@ function renderResult() {
     <div class="s-card">
       <div class="s-section-title">動画が完成しました</div>
       <div class="s-section-sub">「${escapeHtml(project ? project.theme : "")}」</div>
+      ${courseChipForProject(project)}
       ${project && project.telop_style && project.telop_style.display_name
         ? `<div class="s-section-sub">テロップ: ${escapeHtml(project.telop_style.display_name)}</div>`
         : ""}
