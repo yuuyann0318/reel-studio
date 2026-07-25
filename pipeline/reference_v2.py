@@ -833,6 +833,35 @@ _STORYBOARD_VISION_PROMPT = (
 )
 
 
+def compute_reference_narration_mode(spec: Dict[str, Any], asr_ok: bool) -> str:
+    """参考動画の narration 有無を解析側の一次情報から確定する（統合配線）。
+
+    戻り値: "present" / "absent" / "unknown"
+
+    判定（ASR の成否を直接知れる解析側だからこそできる区別）:
+      - transcript が非空 → "present"（セリフ実在）
+      - ASR 成功 かつ transcript 空 → "absent"（ASRは動いたがセリフが無い＝元々ナレ無し）
+      - ASR 失敗（残高不足/接続断等）:
+          テロップが3枚以上 → "absent"（テロップ主導のナレ無し構成とみなす）
+          それ未満       → "unknown"（判断保留。director はフォールバックへ委ねる）
+
+    director._infer_narration_mode は ASR 成功/失敗を区別できないため、spec 側の
+    本判定を director が優先採用する（build_shot_skeleton）。
+    """
+    if not isinstance(spec, dict):
+        return "unknown"
+    transcript = spec.get("transcript")
+    if isinstance(transcript, str) and transcript.strip():
+        return "present"
+    telops = spec.get("telops") or []
+    telop_count = len([t for t in telops if isinstance(t, dict) and (t.get("text") or "").strip()])
+    if asr_ok:
+        return "absent"
+    if telop_count >= 3:
+        return "absent"
+    return "unknown"
+
+
 def _resolve_storyboard_enabled(cfg: Optional[Dict[str, Any]]) -> bool:
     """storyboard 解析を有効化するか決める。
 
@@ -1420,6 +1449,9 @@ def analyze_reference_v2(
             audio_path, duration_sec, cfg, asr_post_fn, claude_call_fn
         )
         warnings.extend(asr_warnings)
+        # 統合配線(narration_mode): ASR が成功したか(=Noneでないか)を保持する。
+        # 「ASR成功でセリフ無し→absent」と「ASR失敗→telops等から推定」を区別する材料。
+        asr_ok = asr_and_analysis is not None
         if asr_and_analysis is None:
             # ASR不可(APIキー未設定・接続断など)でも v2 の主眼(cuts/telops/sfx_events)は
             # 映像+ffmpeg側で得られるので、transcript/segments/beats を空で埋めて融合を続行する。
@@ -1542,6 +1574,11 @@ def analyze_reference_v2(
         # 行うため。vision不能等で空になっても毎回再解析しないようにする）。
         if _resolve_storyboard_enabled(cfg):
             normalized_spec["storyboard"] = storyboard_results
+
+        # 統合配線(narration_mode): 解析側で narration 有無を確定して spec に載せる。
+        # director はこの spec 値を _infer フォールバックより優先採用する。
+        normalized_spec["narration_mode"] = compute_reference_narration_mode(normalized_spec, asr_ok)
+        meta["narration_mode"] = normalized_spec["narration_mode"]
 
         # -----------------------------------------------------------------
         # R2b F2/F8/F7/F6: 決定論的な後段整形（LLM 融合結果を機械観測で補正）

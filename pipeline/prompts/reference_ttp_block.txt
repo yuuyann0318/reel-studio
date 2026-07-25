@@ -93,18 +93,33 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp`（または `captions
   ナレーションを勝手に足さないこと（足すと参考のカット割りより尺が伸びて再現度が壊れる）。
 - `narration_mode` が `"present"`/未指定のときは従来どおり各 shot に `narration_jp` を書く。
 
-## visual_prompt を書くときの最重要ルール（F10: 参考映像の忠実再現）
-- 各 shot に含まれる `reference_visual`（`desc_en` / `framing` / `location` /
-  `camera_move` / `shot_size` / `color_mood` / `lighting` / `color_palette_hex`）は
-  **参考動画の実映像から抽出した根拠**です。visual_prompt は必ずこの値を第一の
-  根拠として構成すること。
-- 具体的には visual_prompt の英文に、`reference_visual.location`（撮影場所・
-  ロケーション）・`framing` または `shot_size`（構図・被写体距離）・`camera_move`
+## visual_prompt を書くときの最重要ルール（F10 + 統合配線: 3秒 storyboard 由来の区間忠実再現）
+- 各 shot に含まれる `reference_visual` は**参考動画のその区間で実際に見えたもの**を
+  機械抽出した根拠です。visual_prompt は必ずこの値を第一の根拠として構成すること。
+- **`reference_visual.scene_desc_ja`（最重要・統合配線）**: これは参考動画のその 3秒区間を
+  1枚ずつ vision 解析して得た「実際に画面に見えた内容」の日本語記述です。存在する場合、
+  visual_prompt は **この scene_desc_ja を英訳したもの**を土台にすること。手順は次のとおり:
+  1. scene_desc_ja を英語に**忠実に翻訳**する（構図・人物の動作・持ち物・映っている物・
+     主要な色をそのまま英文にする）。
+  2. **テーマ/商品に該当する名詞だけを置換**する（例: 参考の「美容液容器」を今回の商品名に、
+     参考の人物を今回のペルソナに）。それ以外の構図・カメラ距離・動作・場所・色は変えない。
+  3. **画面に見えていない要素を発明して足すことを固く禁止する**。scene_desc_ja に無い小物・
+     背景・エフェクトを勝手に加えないこと（ハルシネーション＝再現度崩壊の原因）。
+  - `reference_visual.person_desc` があれば、その人物像（性別・年代感・服装・動作）を英訳して
+    被写体に反映する（今回のペルソナに沿って自然に置換してよいが、構図・動作は保つ）。
+  - `reference_visual.objects`（画面内の主要な物）があれば、それらの英訳を visual_prompt に
+    含める（テーマに該当する物のみ今回の題材へ置換）。
+  - `reference_visual.on_screen_text` は「その区間に画面表示されていた要点文字」の参考情報です。
+    visual_prompt に**文字を焼き込む指示は書かない**（テロップは caption/captions が担う）。
+    シーン理解の補助としてのみ使うこと。
+- `scene_desc_ja` が無い shot は、`desc_en` / `framing` / `location` / `camera_move` /
+  `shot_size` / `color_mood` / `lighting` / `color_palette_hex` を第一根拠にする。visual_prompt の
+  英文に、`location`（撮影場所）・`framing` または `shot_size`（構図・被写体距離）・`camera_move`
   （カメラワーク）・`color_mood`（色調）を必ず語彙として含めること。
-- テーマに合わせて内容（人物/物体/題材）だけを置換し、ロケーション・構図・
-  カメラワーク・色調は参考動画に一致させること。参考が料理シーンなら kitchen /
-  食材、旅行シーンなら outdoor / 景色、Minecraft の俯瞰なら aerial high-angle と
-  いった具合に、参考の実映像に忠実な語彙を使うこと。
+- テーマに合わせて内容（人物/物体/題材）だけを置換し、ロケーション・構図・カメラワーク・
+  色調は参考動画に一致させること。参考が料理シーンなら kitchen / 食材、旅行シーンなら
+  outdoor / 景色、Minecraft の俯瞰なら aerial high-angle といった具合に、参考の実映像に
+  忠実な語彙を使うこと。
 - `reference_visual` が空・欠落している shot に限り、director_prompt.txt の
   「UGC 生活感」フォールバックに従う。それ以外の shot で美容UGC 固定テンプレ
   （bathroom / drugstore shelf 等）を強制しないこと。

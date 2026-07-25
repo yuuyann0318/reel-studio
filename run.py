@@ -549,6 +549,15 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 per_shot_meta.append(meta)
             report["stages"]["visual"]["backend"] = backend.name
             report["stages"]["visual"]["clip_count"] = len(raw_clip_paths)
+            # 統合配線: persona_anchor（人物 shot の identity 統一）の発火分布を記録する。
+            # has_person→reference_visual.has_person→backend が読む配線が実際に効いたかの証跡。
+            _pa_counts = {}
+            for _m in per_shot_meta:
+                _pa = (_m or {}).get("persona_anchor")
+                if _pa:
+                    _pa_counts[_pa] = _pa_counts.get(_pa, 0) + 1
+            if _pa_counts:
+                report["stages"]["visual"]["persona_anchor"] = _pa_counts
     except Exception:
         _write_report(report)
         return report

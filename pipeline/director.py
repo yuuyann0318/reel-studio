@@ -428,6 +428,38 @@ def _resolve_shot_id_at_time(boundaries, shot_ids, t, prefer="right"):
     return shot_ids[-1]
 
 
+def _resolve_shot_id_max_overlap(boundaries, shot_ids, start, end):
+    """テロップ区間 [start, end) を「最も長く重なる」shot へ割り当てる（telop_iou 改善）。
+
+    従来は telop の**開始時刻**が属する shot に載せていたが、参考動画では 1枚のテロップが
+    複数カットをまたいで表示され続ける（TikTok の定番: テロップ固定・下の映像だけカット）。
+    開始 shot に載せてショット境界で caption_out をクランプすると、テロップが実際より
+    大幅に短くなり telop_iou が落ちる。テロップが最も長く滞在する shot に載せる方が、
+    参考の表示区間との重なり(IoU)が最大化される（実測: start基準0.778 → 最大重複0.855）。
+
+    完全な「カットまたぎ持続」再現(=全またぎ shot に載せる)は telop_iou を 1.0 まで
+    上げられるが、caption_slots/plan/render/subtitles を横断する構造変更になるため、
+    ここでは host shot を最大重複に切り替える最小改修に留める。
+    """
+    n = len(shot_ids)
+    if n == 0:
+        return None
+    s = max(0.0, float(start))
+    e = max(s, float(end))
+    best_idx, best_overlap = 0, -1.0
+    for i in range(n):
+        lo = boundaries[i]
+        hi = boundaries[i + 1]
+        overlap = max(0.0, min(e, hi) - max(s, lo))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_idx = i
+    # 重なりが全く無い（境界外の点テロップ等）ときは従来どおり開始時刻ベースへフォールバック。
+    if best_overlap <= 0.0:
+        return _resolve_shot_id_at_time(boundaries, shot_ids, s)
+    return shot_ids[best_idx]
+
+
 def _map_reference_visual_to_shots(shots_ref, boundaries, shot_ids):
     """spec.shots_ref を境界 (参考尺座標) 上で shot_id に写像する（F10）。
 
@@ -513,6 +545,120 @@ def _remap_reference_visual_by_split(rv_map, shot_ids, split_map, new_shot_ids):
     return remapped
 
 
+# P1-6 storyboard: on_screen_text から落とす定型免責/注記行（視覚記述に無関係で嵩張るため）。
+_STORYBOARD_OST_DROP_PREFIXES = ("※", "＊", "*")
+_STORYBOARD_DESC_MAX_CHARS = 220
+_STORYBOARD_OST_MAX_CHARS = 80
+
+
+def _clean_storyboard_on_screen_text(raw):
+    """storyboard の on_screen_text から定型免責行を除いた要点だけを返す。
+
+    「※効果効能…」等の定型免責/注記は視覚記述に無関係で毎フレーム同文が繰り返されるため
+    落とす。進捗ゲージ(10%/100%)・キャッチ短文など「実際に画面に見える要点文字」は残す。
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    seen = set()
+    kept = []
+    for line in raw.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        if any(s.startswith(p) for p in _STORYBOARD_OST_DROP_PREFIXES):
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        kept.append(s)
+    return "\n".join(kept)[:_STORYBOARD_OST_MAX_CHARS]
+
+
+def _map_storyboard_to_shots(storyboard, boundaries, shot_ids):
+    """spec.storyboard(3秒粒度の密記述) を参考尺境界上で shot_id へ写像する（統合配線）。
+
+    各 shot に「その区間で実際に見えたもの」を集約する:
+      scene_desc_ja / on_screen_text / objects / person_desc / has_person
+
+    storyboard は 3秒間隔サンプルのため shot より粗い。まず「t が shot 帯に含まれる」
+    エントリを集め、含まれるものが無い shot には**最寄りの1件**を割り当てて全 shot を
+    被覆する（近傍フレームは視覚的にほぼ同一。発明はせず実観測のみを流す）。
+
+    Returns: dict shot_id -> {scene_desc_ja, on_screen_text, objects, person_desc, has_person}
+    """
+    if not storyboard or not shot_ids or not boundaries or len(boundaries) < 2:
+        return {}
+    sbs = []
+    for sb in storyboard:
+        if not isinstance(sb, dict):
+            continue
+        t = sb.get("t")
+        if isinstance(t, (int, float)):
+            sbs.append((float(t), sb))
+    if not sbs:
+        return {}
+    sbs.sort(key=lambda x: x[0])
+
+    def _merge(entries):
+        descs, osts, objs, person = [], [], [], ""
+        has_person = False
+        seen_desc, seen_obj = set(), set()
+        for sb in entries:
+            d = (sb.get("description_ja") or "").strip()
+            if d and d != "unknown" and d not in seen_desc:
+                seen_desc.add(d)
+                descs.append(d)
+            o = _clean_storyboard_on_screen_text(sb.get("on_screen_text"))
+            if o:
+                osts.append(o)
+            for ob in (sb.get("objects") or []):
+                obs = str(ob).strip()
+                if obs and obs not in seen_obj:
+                    seen_obj.add(obs)
+                    objs.append(obs)
+            if not person:
+                p = (sb.get("person_desc") or "").strip()
+                if p and p != "unknown":
+                    person = p
+            if sb.get("has_person") is True:
+                has_person = True
+        out = {}
+        if descs:
+            out["scene_desc_ja"] = (" / ".join(descs))[:_STORYBOARD_DESC_MAX_CHARS]
+        # on_screen_text は重複行を潰して連結
+        if osts:
+            seen_line, lines = set(), []
+            for block in osts:
+                for line in block.split("\n"):
+                    if line and line not in seen_line:
+                        seen_line.add(line)
+                        lines.append(line)
+            if lines:
+                out["on_screen_text"] = ("\n".join(lines))[:_STORYBOARD_OST_MAX_CHARS]
+        if objs:
+            out["objects"] = objs[:6]
+        if person:
+            out["person_desc"] = person
+        if has_person:
+            out["has_person"] = True
+        return out
+
+    out = {}
+    for i, sid in enumerate(shot_ids):
+        lo = boundaries[i]
+        hi = boundaries[i + 1]
+        contained = [sb for (t, sb) in sbs if lo - 1e-6 <= t < hi - 1e-6]
+        if not contained:
+            # 最寄りの1件で被覆（区間中点に最も近い sb）
+            mid = (lo + hi) / 2.0
+            nearest = min(sbs, key=lambda ts: abs(ts[0] - mid))
+            contained = [nearest[1]]
+        merged = _merge(contained)
+        if merged:
+            out[sid] = merged
+    return out
+
+
 # R4: 1 shot あたりに保持するテロップの最大件数（超過分は confidence 降順で切る）。
 _MAX_TELOPS_PER_SHOT = 3
 
@@ -552,7 +698,9 @@ def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_dur
         s = float(s)
         e = float(e)
         # 参考尺の s/e をそのまま参考尺の shot 帯へ落とす（境界は参考尺の実座標）。
-        shot_id = _resolve_shot_id_at_time(boundaries, shot_ids, s)
+        # telop_iou 改善: テロップが最も長く重なる shot に載せる（カットまたぎ持続テロップの
+        # 開始 shot クランプによる過小評価を防ぐ）。_resolve_shot_id_max_overlap 参照。
+        shot_id = _resolve_shot_id_max_overlap(boundaries, shot_ids, s, e)
         if shot_id is None:
             continue
         idx = shot_ids.index(shot_id)
@@ -1134,6 +1282,26 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         shot_ids,
     )
 
+    # 統合配線: 3秒 storyboard の密記述を rv_map に融合する（scene_desc_ja / on_screen_text /
+    # objects / person_desc / has_person）。director はこれを visual_prompt 生成の第一根拠にし、
+    # has_person は persona_anchor（backend）の発火条件になる。分割前に融合しておけば
+    # _remap_reference_visual_by_split で分割断片にもそのままコピーされる。
+    sb_map = _map_storyboard_to_shots(
+        reference_spec.get("storyboard") or [],
+        boundaries,
+        shot_ids,
+    )
+    if sb_map:
+        for _sid, _sb in sb_map.items():
+            _rv = dict(rv_map.get(_sid) or {})
+            for _k in ("scene_desc_ja", "on_screen_text", "objects", "person_desc"):
+                if _sb.get(_k):
+                    _rv[_k] = _sb[_k]
+            if _sb.get("has_person") is True:
+                _rv["has_person"] = True
+            if _rv:
+                rv_map[_sid] = _rv
+
     # sfx 間引き（写像は分割前の shot_ids でまず行う）
     # R3 codex-review 修正: telop_map を渡して「skeleton に採用された caption_in」だけを
     # アンカー候補にする（同一shotの2枚目以降 telop の start で誤アンカーを回避）。
@@ -1308,8 +1476,15 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         for i in range(len(shot_ids)):
             ref_ranges.append((boundaries[i], boundaries[i + 1]))
 
-    # P0-2: 参考動画の narration 有無を推定して skeleton に載せる（絶対厳守の骨情報）。
-    narration_mode = _infer_narration_mode(reference_spec)
+    # P0-2: 参考動画の narration 有無を skeleton に載せる（絶対厳守の骨情報）。
+    # 統合配線: reference_v2 が spec.narration_mode を生成していればそれを優先する
+    # （ASR 成功/失敗を直接知る解析側の判定の方が確度が高い）。無効値/欠落なら
+    # 従来の _infer_narration_mode フォールバックを使う。
+    _spec_nmode = reference_spec.get("narration_mode")
+    if isinstance(_spec_nmode, str) and _spec_nmode in ("present", "absent", "unknown"):
+        narration_mode = _spec_nmode
+    else:
+        narration_mode = _infer_narration_mode(reference_spec)
     # P0-3: 参考動画 BGM の実測 bpm と mood_guess(→ライブラリムード) を skeleton に載せる。
     _bgm = reference_spec.get("bgm") or {}
     _music = reference_spec.get("music") or {}
