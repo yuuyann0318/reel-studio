@@ -20,6 +20,29 @@ Premiereの「トラックスタイル」ファイル（`.prtextstyle`）はAdob
 - 行間: フォントサイズの1.2倍程度
 - セーフエリア: 画面左右10%・下20%には文字がかからないようにする
 
+## テロップごとの見た目（style_detail: 参考動画からの高解像度TTP）
+
+参考動画の各テロップは vision 解析で `style_detail` として1枚ずつ精密抽出され、xmeml の
+`<generatoritem>` に**テロップ単位で**焼き込まれます（`premiere.export_xmeml._resolve_hint_for_xmeml`）。
+Premiere の汎用 Text ジェネレータは全パラメータを厳密には反映しないため、下表を「トラック
+スタイル作成時の狙い」として使ってください。ASS 焼き込み版（自動生成MP4）はこの style_detail を
+libass で忠実に再現しています（フォント/色/縁/位置/サイズ/背景帯）。
+
+| style_detail | 意味 | xmeml への反映 | 実フォント/値の対応 |
+|---|---|---|---|
+| font_class | 書体系統 | `<parameterid>font` | gothic→Noto Sans JP Black / mincho→Noto Serif JP Black / rounded→Zen Maru Gothic Black / pop→Mochiy Pop One / handwriting→Klee One SemiBold |
+| weight | 太さ | （ASS は \b / Premiere はフォント選択） | normal/bold/heavy（同梱フォントは主に Black 単一ウェイトのため weight 忠実度は粗い） |
+| fill_color_hex | 文字色 | `<parameterid>fontcolor`(#RRGGBB) | そのまま |
+| stroke_color_hex / stroke_width | 縁の色・太さ | （ASS は \3c+\bord。Premiere は .prtextstyle 側で設定） | none/thin(≈3px)/thick(≈9px) |
+| bg / bg_color_hex | 背景（箱/帯） | （ASS は BorderStyle=3 相当の矩形レイヤ。Premiere は背景シェイプで代替） | none/box(文字幅)/band(全幅帯) |
+| pos_x / pos_y_pct | 水平・垂直位置 | `<parameterid>position`（top_safe/center/bottom_safe） | pos_y_pct<34→上, <67→中央, それ以上→下 |
+| size_pct | 文字高（画面高%） | `<parameterid>size`（px = size_pct/100×1920×0.7） | 例: 7%→約94px |
+| line_count | 行数 | 折り返しの目安 | — |
+
+font_class→実フォントの対応は `pipeline/font_map.py`（`assets/fonts` 同梱・libass 実測で
+`\fn` マッチ確認済みのファミリのみ採用）。旧 telop（style_detail 無し）は従来どおり
+position/color/size_class の3属性から解決します（後方互換）。
+
 ## 参考
 
 本仕様は `assets/profiles/ttp_reference.json` の `telop` セクション（参考動画のTTP解析値）

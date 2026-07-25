@@ -41,7 +41,11 @@ segments(ASR): {SEGMENTS_JSON}
   最頻の被写体・場所・動きに絞る）。vision 側で値が無いフィールドは空文字列 / [] / 0 の
   まま返してよい。
 - telops: visionで検出されたテロップを、時間順にまとめる。同一テロップが複数フレームで連続する場合は
-  start/end を統合。position/color/stroke/emphasis_words を保持。
+  start/end を統合。position/color/stroke/emphasis_words を保持。加えて vision の
+  telop_style_detail が得られていれば、そのテロップの style_detail（font_class/weight/
+  fill_color_hex/stroke_color_hex/stroke_width/bg/bg_color_hex/pos_x/pos_y_pct/size_pct/
+  line_count）をそのまま各 telop の "style_detail" にコピーすること（見た目の忠実再現に使う）。
+  値が無い/判別不能なキーは "unknown" または null のまま残す（創作禁止）。
 - sfx_events: 入力オンセット表をそのまま採用し、anchor と kind と confidence を保持。
 - bgm: 全区間で発話区間以外にも低〜中帯域の連続性が観測できるかどうかを present:true/false で。
   mood_guess は英語で短く（例: "upbeat pop" / "chill lo-fi"）。判断不能なら空文字列。
@@ -60,7 +64,7 @@ segments(ASR): {SEGMENTS_JSON}
   "rhythm": {"sentence_count": 0, "avg_sentence_len": 0, "max_sentence_len": 0, "tone": "", "endings": []},
   "cuts": [{"t": 0.0, "confidence": 0.9}],
   "shots_ref": [{"index": 0, "start": 0.0, "end": 2.0, "visual_desc_en": "Foreground sentence. Background sentence. Motion sentence.", "motion": "static", "shot_size": "medium", "subject_count": 1, "camera_move": "none", "color_mood": "warm", "framing": "product_on_hand", "location": "bathroom", "lighting": "soft daylight", "color_palette_hex": ["#f4e6d0", "#3b2a1a"]}],
-  "telops": [{"start": 0.0, "end": 2.0, "text": "…", "position": "top", "style": {"color": "white", "stroke": "black stroke", "size_class": "large"}, "emphasis_words": []}],
+  "telops": [{"start": 0.0, "end": 2.0, "text": "…", "position": "top", "style": {"color": "white", "stroke": "black stroke", "size_class": "large"}, "emphasis_words": [], "style_detail": {"font_class": "gothic", "weight": "heavy", "fill_color_hex": "#ffffff", "stroke_color_hex": "#111111", "stroke_width": "thick", "bg": "none", "bg_color_hex": "", "pos_x": "center", "pos_y_pct": 18.0, "size_pct": 7.0, "line_count": 2}}],
   "sfx_events": [{"t": 0.5, "kind": "transition", "anchor": "cut", "confidence": 0.8}],
   "bgm": {"present": true, "mood_guess": ""},
   "hook_end_sec": 2.0,

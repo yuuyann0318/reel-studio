@@ -26,6 +26,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+try:
+    from pipeline import telop_style as _telop_style_mod
+except Exception:  # pragma: no cover
+    _telop_style_mod = None
+
 
 # ---------------------------------------------------------------------------
 # 1. cut 一致率（F1、±0.5s 窓）
@@ -474,6 +479,91 @@ def _hint_from_ref_telop(tel: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+# --- style_detail ベースの5属性(フォント/色/縁/位置/サイズ)一致率 -------------------
+_STYLE5_KEYS = ("font_class", "fill_bucket", "stroke_width", "pos_bucket", "size_bucket")
+
+
+def _fill_bucket(hex_str: str) -> str:
+    """#rrggbb → 最も近い色名バケット。空/不明は ""。"""
+    if not hex_str or _telop_style_mod is None:
+        return ""
+    h = hex_str.lstrip("#")
+    if len(h) != 6:
+        return ""
+    try:
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    except Exception:
+        return ""
+    best, best_d = "", 1e9
+    for name, hx in _telop_style_mod.COLOR_WORD_HEX.items():
+        hh = hx.lstrip("#")
+        rr, gg, bb = int(hh[0:2], 16), int(hh[2:4], 16), int(hh[4:6], 16)
+        d = (r - rr) ** 2 + (g - gg) ** 2 + (b - bb) ** 2
+        if d < best_d:
+            best_d, best = d, name
+    # gray/grey は同一バケットに寄せる
+    return "gray" if best == "grey" else best
+
+
+def _pos_bucket(pos_y_pct) -> str:
+    if pos_y_pct is None or not isinstance(pos_y_pct, (int, float)):
+        return ""
+    v = float(pos_y_pct)
+    if v < 34.0:
+        return "top"
+    if v < 67.0:
+        return "mid"
+    return "bottom"
+
+
+def _size_bucket(size_pct) -> str:
+    if size_pct is None or not isinstance(size_pct, (int, float)):
+        return ""
+    v = float(size_pct)
+    if v < 4.0:
+        return "small"
+    if v < 5.5:
+        return "medium"
+    if v < 7.5:
+        return "large"
+    return "xl"
+
+
+def _style5_from_detail(sd: Dict[str, Any]) -> Dict[str, str]:
+    """正規化済み style_detail → 5属性バケット。unknown/None は "" に落とす。"""
+    def _e(v):
+        s = (str(v).strip().lower() if v is not None else "")
+        return "" if s in ("", "unknown") else s
+    return {
+        "font_class": _e(sd.get("font_class")),
+        "fill_bucket": _fill_bucket(sd.get("fill_color_hex") or ""),
+        "stroke_width": _e(sd.get("stroke_width")),
+        "pos_bucket": _pos_bucket(sd.get("pos_y_pct")),
+        "size_bucket": _size_bucket(sd.get("size_pct")),
+    }
+
+
+def _style5_from_ref_telop(tel: Dict[str, Any]) -> Dict[str, str]:
+    if _telop_style_mod is None:
+        return {}
+    return _style5_from_detail(_telop_style_mod.derive_style_detail(tel))
+
+
+def _style5_from_gen_hint(hint: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    if not isinstance(hint, dict) or _telop_style_mod is None:
+        return {}
+    sd = hint.get("style_detail")
+    if isinstance(sd, dict):
+        return _style5_from_detail(_telop_style_mod.normalize_style_detail(sd))
+    # style_detail が無い gen ヒントは legacy(position/color/size_class)から派生。
+    pseudo = {
+        "position": hint.get("position") or "",
+        "style": {"color": hint.get("color") or "", "stroke": hint.get("stroke") or "",
+                  "size_class": hint.get("size_class") or ""},
+    }
+    return _style5_from_detail(_telop_style_mod.derive_style_detail(pseudo))
+
+
 def _hint_from_plan_shot(shot: Dict[str, Any]) -> Optional[Dict[str, str]]:
     h = shot.get("telop_style_hint")
     if not isinstance(h, dict):
@@ -516,18 +606,11 @@ def _telop_style_match(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, 
                 start = shot_start + (float(cin) if isinstance(cin, (int, float)) else 0.0)
                 end = shot_start + (float(cout) if isinstance(cout, (int, float)) else dur)
                 # 各 caption 単位の telop_style_hint を優先し、無ければ shot 単位のヒント。
+                # style_detail を含む「生の」ヒントを保持する（5属性照合で style_detail を読む）。
                 hint_dict = cap.get("telop_style_hint") if isinstance(cap.get("telop_style_hint"), dict) else None
                 if hint_dict is None:
                     hint_dict = s.get("telop_style_hint") if isinstance(s.get("telop_style_hint"), dict) else None
-                if hint_dict is not None:
-                    normalized_hint = {
-                        "position": (hint_dict.get("position") or "").strip().lower(),
-                        "color": (hint_dict.get("color") or "").strip().lower(),
-                        "size_class": (hint_dict.get("size_class") or "").strip().lower(),
-                    }
-                else:
-                    normalized_hint = None
-                gen_shot_hints.append(((start, end), normalized_hint))
+                gen_shot_hints.append(((start, end), hint_dict))
             continue
         cap = (s.get("caption_jp") or "").strip()
         if not cap:
@@ -536,7 +619,8 @@ def _telop_style_match(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, 
         cout = s.get("caption_out_offset_sec")
         start = shot_start + (float(cin) if isinstance(cin, (int, float)) else 0.0)
         end = shot_start + (float(cout) if isinstance(cout, (int, float)) else dur)
-        gen_shot_hints.append(((start, end), _hint_from_plan_shot(s)))
+        raw_hint = s.get("telop_style_hint") if isinstance(s.get("telop_style_hint"), dict) else None
+        gen_shot_hints.append(((start, end), raw_hint))
 
     ref_total = float((spec or {}).get("duration_sec") or 0.0)
     gen_total = sum(float(s.get("duration_sec") or 0.0) for s in logical)
@@ -569,19 +653,34 @@ def _telop_style_match(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, 
         used.add(best_i)
         _, gen_hint = gen_shot_hints[best_i]
         if not gen_hint:
-            # skeleton にヒントが伝わっていない = F9 前の状態と同じ = 0/3
+            # skeleton にヒントが伝わっていない = F9 前の状態と同じ = 0点
             total += 0.0
             matched += 1
             continue
-        agree = 0
-        for k in ("position", "color", "size_class"):
-            rv = ref_hint.get(k) or ""
-            gv = gen_hint.get(k) or ""
-            if rv and gv and rv == gv:
-                agree += 1
-            elif not rv and not gv:
-                agree += 1  # 両方空: 情報なし=合致扱い
-        total += agree / 3.0
+        if _telop_style_mod is not None:
+            # 高解像度: style_detail 5属性(font/色/縁/位置/サイズ)一致率。
+            # 参考側は derive_style_detail（旧3属性しか無くても派生）で 5属性化。
+            ref5 = _style5_from_ref_telop(ref_tel)
+            gen5 = _style5_from_gen_hint(gen_hint)
+            agree = 0
+            for k in _STYLE5_KEYS:
+                rv = ref5.get(k) or ""
+                gv = gen5.get(k) or ""
+                if rv and gv and rv == gv:
+                    agree += 1
+                elif not rv and not gv:
+                    agree += 1  # 両方不明: 情報なし=合致扱い
+            total += agree / float(len(_STYLE5_KEYS))
+        else:
+            agree = 0
+            for k in ("position", "color", "size_class"):
+                rv = ref_hint.get(k) or ""
+                gv = (gen_hint.get(k) or "").strip().lower() if isinstance(gen_hint, dict) else ""
+                if rv and gv and rv == gv:
+                    agree += 1
+                elif not rv and not gv:
+                    agree += 1
+            total += agree / 3.0
         matched += 1
     denom = max(len(ref_telops), matched, 1)
     return {"score": total / denom, "matched": matched,

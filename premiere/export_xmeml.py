@@ -46,6 +46,15 @@ import warnings as _warnings
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+try:
+    from pipeline import telop_style as _telop_style_mod  # style_detail(高解像度テロップ)
+except Exception:  # pragma: no cover
+    _telop_style_mod = None
+try:
+    from pipeline import font_map as _font_map_mod  # font_class -> 実在フォント名
+except Exception:  # pragma: no cover
+    _font_map_mod = None
+
 DEFAULT_FPS = 30
 SEQUENCE_WIDTH = 1080
 SEQUENCE_HEIGHT = 1920
@@ -429,20 +438,64 @@ _HINT_SIZE_TO_PX = {
 }
 
 
-def _resolve_hint_for_xmeml(telop_style_hint, base_size, base_position):
-    """F9: telop_style_hint (参考動画由来 position/color/size_class) を xmeml パラメータへ写像する。
+def _pos_pct_to_premiere(pos_y_pct):
+    """pos_y_pct(上端から%) → Premiere 位置語(top_safe/center/bottom_safe)。None は None。"""
+    if pos_y_pct is None or not isinstance(pos_y_pct, (int, float)):
+        return None
+    v = float(pos_y_pct)
+    if v < 34.0:
+        return _HINT_POSITION_TO_PREMIERE.get("top", "top_safe")
+    if v < 67.0:
+        return _HINT_POSITION_TO_PREMIERE.get("mid", "center")
+    return _HINT_POSITION_TO_PREMIERE.get("bottom", "bottom_safe")
 
-    Returns: (size:int, position:str, color_hex:str|None)
+
+def _resolve_hint_for_xmeml(telop_style_hint, base_size, base_position, base_font=CAPTION_FONT_DEFAULT):
+    """telop_style_hint を xmeml パラメータ(size/position/color/font)へ写像する。
+
+    style_detail(高解像度: font_class/weight/fill_color_hex/pos_y_pct/size_pct)があれば最優先で
+    使い、無ければ従来の粗い position/color/size_class から解決する（後方互換）。STYLE_SPEC.md 参照。
+
+    Returns: (size:int, position:str, color_hex:str|None, font:str)
     """
     if not isinstance(telop_style_hint, dict):
-        return (int(base_size), base_position, None)
+        return (int(base_size), base_position, None, base_font)
+
+    sd = telop_style_hint.get("style_detail")
+    if isinstance(sd, dict) and _telop_style_mod is not None:
+        try:
+            nsd = _telop_style_mod.normalize_style_detail(sd)
+        except Exception:
+            nsd = None
+        if nsd is not None and _telop_style_mod.is_effective(nsd):
+            # フォント: font_class → 実在フォント名。
+            font = base_font
+            fc = nsd.get("font_class")
+            if fc and fc != "unknown" and _font_map_mod is not None:
+                try:
+                    font = _font_map_mod.resolve_font_family(fc, nsd.get("weight"))
+                except Exception:
+                    font = base_font
+            # サイズ: size_pct(1920基準) → px。無ければ base_size。
+            size = int(base_size)
+            sp = nsd.get("size_pct")
+            if isinstance(sp, (int, float)):
+                size = max(24, min(160, int(round(float(sp) / 100.0 * 1920.0 * 0.7))))
+            # 位置: pos_y_pct → Premiere 位置語。
+            position = _pos_pct_to_premiere(nsd.get("pos_y_pct")) or base_position
+            # 色: fill_color_hex を優先。
+            color_hex = (nsd.get("fill_color_hex") or "").upper() or None
+            if color_hex and not color_hex.startswith("#"):
+                color_hex = "#" + color_hex
+            return (int(size), position, color_hex, font)
+
     pos = (telop_style_hint.get("position") or "").strip().lower()
     color = (telop_style_hint.get("color") or "").strip().lower()
     sc = (telop_style_hint.get("size_class") or "").strip().lower()
     size = _HINT_SIZE_TO_PX.get(sc, int(base_size))
     position = _HINT_POSITION_TO_PREMIERE.get(pos, base_position)
     color_hex = _HINT_COLOR_TO_HEX.get(color)
-    return (int(size), position, color_hex)
+    return (int(size), position, color_hex, base_font)
 
 
 def _generatoritem_text_lines(gen_id, name, start_frames, end_frames, in_frame, out_frame,
@@ -1010,15 +1063,15 @@ def _build_v2_captions(enabled_shots, shot_display_durations, timebase, ntsc,
             display_name = "TL{:02d}{}".format(i + 1, chr(ord('a') + j) if len(caption_entries) > 1 else "")
 
             style_hint = ent["hint"]
-            effective_size, effective_position, color_hex = _resolve_hint_for_xmeml(
-                style_hint, CAPTION_FONT_SIZE_DEFAULT, position,
+            effective_size, effective_position, color_hex, effective_font = _resolve_hint_for_xmeml(
+                style_hint, CAPTION_FONT_SIZE_DEFAULT, position, base_font=font,
             )
 
             clip_lines_list.append(
                 _generatoritem_text_lines(
                     gen_id, display_name, start_frames, end_frames, 0, dur_frames,
                     timebase, ntsc, caption_text, wrapped, depth + 1,
-                    font=font, size=effective_size, align=align, position=effective_position,
+                    font=effective_font, size=effective_size, align=align, position=effective_position,
                     color_hex=color_hex,
                 )
             )

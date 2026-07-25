@@ -51,6 +51,11 @@ from pipeline import telop_refine as telop_refine_mod  # R2b F8: テロップ帯
 from pipeline import narration_rhythm as narration_rhythm_mod  # R2b F7: ナレーション話速統計
 from pipeline import sfx_matcher as sfx_matcher_mod  # R2b F6: SE音色 MFCC
 
+try:
+    from pipeline import telop_style as _telop_style_mod  # F-STYLE: テロップ見た目高解像度モデル
+except Exception:  # pragma: no cover
+    _telop_style_mod = None
+
 
 _PROMPT_DIR = os.path.join(os.path.dirname(__file__), "prompts")
 _VISION_PROMPT_FILE = "reference_vision_prompt.txt"
@@ -791,6 +796,14 @@ def analyze_frames_with_vision(
                     "lighting": (item.get("lighting") or "").strip(),
                     "color_palette_hex": _normalize_palette_hex(item.get("color_palette_hex")),
                 }
+                # F-STYLE: テロップ見た目の高解像度モデル。vision が telop_style_detail を返し、
+                # かつテロップ文言があるときだけ載せる（ハルシネーション回避）。正規化して格納。
+                sd_raw = item.get("telop_style_detail")
+                if isinstance(sd_raw, dict) and merged["telop_text"] and _telop_style_mod is not None:
+                    try:
+                        merged["telop_style_detail"] = _telop_style_mod.normalize_style_detail(sd_raw)
+                    except Exception:
+                        pass
                 results.append(merged)
         else:
             warnings.append("visionレスポンスがJSON配列ではない(call={})".format(calls_used))
@@ -1222,6 +1235,16 @@ def validate_reference_spec_v2(spec: Any) -> Tuple[bool, List[str], Optional[Dic
             errors.append("telops[{}] の end<start です".format(i))
         if duration_f and (float(s) < -0.1 or float(e) > duration_f + 0.5):
             errors.append("telops[{}] の秒が [0, duration] を超えています".format(i))
+        # F-STYLE: style_detail は任意フィールド。dict なら正規化し、非dict/非nullは型エラー。
+        sd = tel.get("style_detail")
+        if sd is not None:
+            if not isinstance(sd, dict):
+                errors.append("telops[{}].style_detail はオブジェクトである必要があります".format(i))
+            elif _telop_style_mod is not None:
+                try:
+                    tel["style_detail"] = _telop_style_mod.normalize_style_detail(sd)
+                except Exception:
+                    pass
 
     # sfx_events
     prev_t = -1.0
