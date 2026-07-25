@@ -467,6 +467,50 @@ body.theme-simple {
 .s-progress-pct { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 4px; }
 .s-encourage { font-size: 13.5px; color: var(--text-dim); font-weight: 500; }
 
+/* 経過時間（常に1秒ごとに動く＝「生きている」ことを伝える最重要要素） */
+.s-elapsed-row {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  margin: 0 auto 14px; padding: 6px 14px;
+  border-radius: 999px; background: var(--card-2, rgba(127,127,127,0.08));
+  border: 1px solid var(--border);
+}
+.s-elapsed-label { font-size: 12px; color: var(--text-dim); font-weight: 600; }
+.s-elapsed {
+  font-size: 17px; font-weight: 700; color: var(--text);
+  font-variant-numeric: tabular-nums; letter-spacing: 0.5px;
+}
+
+/* 所要時間の目安 + 「閉じてOK」案内 */
+.s-time-note {
+  margin-top: 12px; padding: 11px 13px;
+  font-size: 12.5px; line-height: 1.6; color: var(--text-dim);
+  background: var(--plan-blue-soft, rgba(79,107,255,0.08));
+  border-radius: 10px; text-align: left;
+}
+.s-time-note strong { color: var(--text); }
+
+/* スタック検知の案内（10分イベント無し / SSE切断中） */
+.s-stuck-notice {
+  margin-top: 12px; padding: 11px 13px;
+  font-size: 12.5px; line-height: 1.6; font-weight: 500;
+  color: var(--text); text-align: left;
+  background: rgba(224,138,60,0.12);
+  border: 1px solid var(--warning);
+  border-radius: 10px;
+}
+
+/* 進捗値が取れないときのインジケータ（％を出さず「動いている」ことだけ示す） */
+.s-progress-bar--indeterminate { position: relative; }
+.s-progress-bar__indet {
+  position: absolute; top: 0; left: 0; height: 100%; width: 40%;
+  border-radius: 999px; background: var(--accent);
+  animation: s-indet 1.3s ease-in-out infinite;
+}
+@keyframes s-indet {
+  0%   { left: -40%; }
+  100% { left: 100%; }
+}
+
 /* ---------- できあがり / 動画プレビュー ---------- */
 .s-video-wrap { display: flex; justify-content: center; }
 .s-video-wrap .preview-frame {

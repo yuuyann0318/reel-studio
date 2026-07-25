@@ -42,14 +42,156 @@ const state = {
 
   job: null, // { phase:'generate'|'render'|'premiere_export', totalPhases, stage, progress, message }
   premiereExport: null, // { path } | null（「Premiereで編集」書き出し完了後の書き出し先パス）
+
+  // --- 作成中画面の「動いていること」を保証するための状態 ---
+  flowStartedAt: null, // 作成中画面に入った時刻(ms)。経過時間 mm:ss の起点（生成→仕上げを貫通）
+  lastEventAt: null,   // 最後にSSE進捗イベントを受け取った時刻(ms)。スタック検知に使う
+  sseDisconnected: false, // SSE(進捗受信)が切断中か。再接続で自動復帰する
+  maxStepIdx: 0,       // 到達済みの最大段インデックス（段を後退させないための高水位マーク）
 };
 
 let unsubscribeJob = null;
 let pollTimer = null;
+let elapsedTimer = null; // 経過時間を1秒ごとに更新するティッカー（作成中画面のみ稼働）
+
+const STUCK_THRESHOLD_MS = 10 * 60 * 1000; // 10分イベント無しでスタック案内を出す
 
 function setState(patch) { Object.assign(state, patch); render(); }
 function stopJobSub() { if (unsubscribeJob) { unsubscribeJob(); unsubscribeJob = null; } }
 function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// SSE進捗を受信したときの共通処理: 受信時刻を記録し、切断表示を解除する。
+// progress が非有限（undefined/NaN 等）の壊れたイベントでも state に素直に格納する
+// （％表示側で非有限を弾くため、ここでの握りつぶしはしない）。
+function noteJobEvent(d) {
+  if (!state.job) return;
+  // サーバがエラーペイロード（例: {"error":{"code":"not_found"}}）を進捗チャネルで返した場合は
+  // 終端エラー。再接続しても回復しないため流れを抜ける（進捗undefinedのまま待たせない）。
+  if (d && d.error) {
+    handleTerminalJobError((d.error && d.error.message) || "この動画の進捗を取得できませんでした");
+    return;
+  }
+  state.lastEventAt = Date.now();
+  state.sseDisconnected = false;
+  stopPoll(); // SSEが復帰したのでフォールバックのポーリングは不要
+  setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
+}
+// SSEの onError ハンドラ。終端エラー（ジョブが存在しない等）と、伝送レベルの一時切断を区別する。
+// - 終端（mock の JOB_NOT_FOUND）: 再接続しても回復しないので安全な画面へ抜ける。
+// - 一時切断（実APIは 404 でも常に SSE_ERROR になる）: 切断表示を立てつつ、SSEに頼らず
+//   プロジェクト状態のポーリング（フォールバック）で「完了/消滅」を検知する。これにより
+//   ジョブがサーバ再起動等で消えても無限リトライで固着しない（＝有界回復）。
+//   一時的な瞬断なら EventSource が自動再接続し、次の進捗イベントで stopPoll される。
+//   本物のジョブ失敗は onDone（ok:false → status:failed）経由で拾う。
+function noteJobSseError(err, recover) {
+  if (!state.job) return; // すでに完了・離脱済みなら無視
+  if (err && err.code === "JOB_NOT_FOUND") {
+    handleTerminalJobError(err.message || "この動画の進捗を取得できませんでした");
+    return;
+  }
+  setState({ sseDisconnected: true });
+  if (recover) recover();
+}
+// SSE切断時のフォールバック: プロジェクト状態を5秒おきに読み、終端（消滅/完了）を検知して
+// 有界に回復・離脱する。getProject は読み取り専用（実ジョブに副作用なし）。
+function startFallbackPoll(id, kind) {
+  if (pollTimer) return; // 既に稼働中（多重起動しない）
+  // myTimer は「このポーラのオーナー権」。stopPoll / beginRender が pollTimer を差し替えると
+  // 別値になる。await をまたぐたびに pollTimer===myTimer を確認し、SSE再接続や別コールバックに
+  // 追い越された古い呼び出しは何もせず抜ける（beginRender/startRender の二重発火を防ぐ）。
+  const myTimer = setInterval(async () => {
+    if (pollTimer !== myTimer) return; // 既にキャンセル/置換済み
+    if (!state.job) { stopPoll(); return; }
+    let project;
+    try {
+      project = await api.getProject(id);
+    } catch (err) {
+      if (pollTimer !== myTimer) return; // await中に追い越された
+      // 確実に「見つからない」(404) ときだけ終端化する。一時的なネットワーク/サーバ不通は
+      // 終端化せず次回のポーリングに委ねる（＝瞬断からの自動回復を殺さない）。
+      if (err && err.status === 404) {
+        handleTerminalJobError("この動画が見つかりませんでした（サーバーが再起動した可能性があります）");
+      }
+      return;
+    }
+    // await 後: まだ自分がオーナーで、ジョブが継続中のときだけ判定に進む（この後は同期実行）。
+    if (pollTimer !== myTimer || !state.job) return;
+    const st = project.status;
+    if (kind === "generate") {
+      // generate ジョブは同一ジョブ内で status を generating→rendering と進めて初回レンダーまで行う。
+      // よって generating/rendering はどちらも「まだ進行中」= 非終端（ここで beginRender すると
+      // 走行中ジョブと startRender が衝突する）。終端（ready/failed 等）になってから動く。
+      if (st === "generating" || st === "rendering") return;
+      stopPoll(); stopJobSub();
+      if (st === "failed") {
+        // 生成失敗を仕上げ開始と誤認しない。元の失敗理由を出して編集/ホームへ戻す。
+        setState({
+          current: project,
+          draftPlan: project.plan ? deepClone(project.plan) : null,
+          job: null,
+          screen: project.plan ? "edit" : "home",
+        });
+        showApiError(new Error(project.error || "台本づくりに失敗しました"), "台本づくりに失敗しました");
+        return;
+      }
+      setState({ current: project, draftPlan: project.plan ? deepClone(project.plan) : null });
+      await beginRender(id, { totalPhases: 2 });
+    } else { // render / resume（finishRender が failed も含めて画面遷移を担う）
+      if (st !== "rendering" && st !== "generating") {
+        stopPoll(); stopJobSub();
+        await finishRender(project);
+      }
+    }
+  }, 5000);
+  pollTimer = myTimer;
+}
+// 終端エラー時の安全な復帰: 購読を閉じ（再接続ループを止める）、下書きがあれば編集画面、
+// 無ければホームへ戻す。ホームは作り直しになるが、待っても回復しない終端エラー時のみの導線。
+function handleTerminalJobError(message) {
+  stopJobSub();
+  stopPoll();
+  showApiError(new Error(message || "進捗を取得できませんでした"), "進捗を取得できませんでした");
+  setState({ screen: state.draftPlan ? "edit" : "home", job: null });
+}
+
+// ---------- 作成中画面のティッカー（経過時間・スタック検知） ----------
+function fmtMMSS(totalSec) {
+  const s = Math.max(0, Math.floor(totalSec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+}
+function isStuck() {
+  if (state.sseDisconnected) return true;
+  if (!state.lastEventAt) return false;
+  return (Date.now() - state.lastEventAt) > STUCK_THRESHOLD_MS;
+}
+// 1秒ごとに経過時間とスタック案内だけをDOM直更新する（全画面再描画は避ける）。
+function tickCreatingUI() {
+  const elapsedEl = document.getElementById("s-elapsed");
+  if (elapsedEl && state.flowStartedAt) {
+    elapsedEl.textContent = fmtMMSS((Date.now() - state.flowStartedAt) / 1000);
+  }
+  const stuckEl = document.getElementById("s-stuck-notice");
+  if (stuckEl) stuckEl.hidden = !isStuck();
+}
+// 作成中画面に入っている間だけティッカーを回す。flowStartedAt / lastEventAt を初期化する。
+function ensureCreatingTickers() {
+  if (state.flowStartedAt == null) {
+    state.flowStartedAt = Date.now();
+    state.lastEventAt = Date.now();
+    state.sseDisconnected = false;
+    state.maxStepIdx = 0; // 新しい作成フローの開始時に高水位をリセット
+  }
+  if (!elapsedTimer) elapsedTimer = setInterval(tickCreatingUI, 1000);
+}
+function stopCreatingTickers() {
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+  state.flowStartedAt = null;
+  state.lastEventAt = null;
+  state.sseDisconnected = false;
+  state.maxStepIdx = 0;
+}
 
 // ---------- データ読み込み ----------
 async function loadProjects() {
@@ -151,10 +293,7 @@ async function beginGenerate(id) {
 
   // 契約: 生成ジョブの id はプロジェクト作成レスポンスの{id}と同一（docs/STUDIO-DESIGN.md準拠）
   unsubscribeJob = api.subscribeJobEvents(id, {
-    onMessage: (d) => {
-      if (!state.job) return;
-      setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
-    },
+    onMessage: (d) => noteJobEvent(d),
     onDone: async () => {
       stopJobSub();
       try {
@@ -165,11 +304,8 @@ async function beginGenerate(id) {
       }
       await beginRender(id, { totalPhases: 2 });
     },
-    onError: (err) => {
-      showApiError(err, "台本づくりでエラーが発生しました");
-      stopJobSub();
-      setState({ screen: "home", job: null });
-    },
+    // 切断は失敗扱いにせず待つ（自動再接続）。長引く場合はポーリングで終端を検知する。
+    onError: (err) => noteJobSseError(err, () => startFallbackPoll(id, "generate")),
   });
 }
 
@@ -195,10 +331,7 @@ async function beginRender(id, { totalPhases = 1, resumeIfRendering = false } = 
   try {
     const { job_id } = await api.startRender(id);
     unsubscribeJob = api.subscribeJobEvents(job_id, {
-      onMessage: (d) => {
-        if (!state.job) return;
-        setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
-      },
+      onMessage: (d) => noteJobEvent(d),
       onDone: async () => {
         stopJobSub();
         try {
@@ -209,11 +342,7 @@ async function beginRender(id, { totalPhases = 1, resumeIfRendering = false } = 
           setState({ screen: "edit", job: null });
         }
       },
-      onError: (err) => {
-        showApiError(err, "仕上げ中にエラーが発生しました");
-        stopJobSub();
-        setState({ screen: "edit", job: null });
-      },
+      onError: (err) => noteJobSseError(err, () => startFallbackPoll(id, "render")),
     });
   } catch (err) {
     showApiError(err, "仕上げを開始できませんでした");
@@ -364,10 +493,7 @@ async function resumeGenerate() {
   try {
     const { job_id } = await api.resumeProject(project.id);
     unsubscribeJob = api.subscribeJobEvents(job_id, {
-      onMessage: (d) => {
-        if (!state.job) return;
-        setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
-      },
+      onMessage: (d) => noteJobEvent(d),
       onDone: async () => {
         stopJobSub();
         try {
@@ -378,11 +504,7 @@ async function resumeGenerate() {
           setState({ screen: "edit", job: null });
         }
       },
-      onError: (err) => {
-        showApiError(err, "続きからの作成でエラーが発生しました");
-        stopJobSub();
-        setState({ screen: "edit", job: null });
-      },
+      onError: (err) => noteJobSseError(err, () => startFallbackPoll(project.id, "resume")),
     });
   } catch (err) {
     showApiError(err, "続きからの作成を開始できませんでした");
@@ -404,10 +526,7 @@ async function beginPremiereExport() {
   try {
     const { job_id } = await api.premiereExport(project.id);
     unsubscribeJob = api.subscribeJobEvents(job_id, {
-      onMessage: (d) => {
-        if (!state.job) return;
-        setState({ job: { ...state.job, stage: d.stage, progress: d.progress, message: d.message } });
-      },
+      onMessage: (d) => noteJobEvent(d),
       onDone: (d) => {
         stopJobSub();
         setState({
@@ -781,17 +900,35 @@ const STEP_DEFS_PREMIERE = [
 ];
 const STEP_ICON_DONE = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.2 11.7 13 4.5"/></svg>`;
 
-function overallProgress(job) {
-  if (!job) return 0;
-  if (job.totalPhases === 2) return job.phase === "generate" ? job.progress * 0.5 : 50 + job.progress * 0.5;
-  return job.progress;
+// 有限数だけを返す。非有限（undefined/NaN/Infinity/数値化不能）は null にして
+// 「進捗値が取れない」ことを呼び出し側に伝える（NaN% を構造的に発生させないための要）。
+function toFiniteOrNull(n) {
+  const v = typeof n === "number" ? n : Number(n);
+  return Number.isFinite(v) ? v : null;
 }
+// 全体進捗(0-100)。進捗値が取れないときは null を返す（％を出さない合図）。
+function overallProgress(job) {
+  if (!job) return null;
+  const p = toFiniteOrNull(job.progress);
+  if (p === null) return null;
+  if (job.totalPhases === 2) return job.phase === "generate" ? p * 0.5 : 50 + p * 0.5;
+  return p;
+}
+
+// アクティブ段は「SSE由来の全体進捗％」から決める（進捗は各SSEイベントの progress が源）。
+// 進捗％は generate(0-50%)→render(50-100%) と単調増加なので段も単調（逆流しない）。
+// stage 文字列そのものではなく％で段を割るのは、generate ジョブが visual/render まで一気に
+// 進む・mock が done イベントを挟む等、stage直写像だと段が飛んだり終端で固着するため。
+// 進捗が取れないとき（null）は段を確定できないので null を返し、呼び出し側が直前の段を保つ。
 function activeStepIndex(job, steps) {
+  if (steps === STEP_DEFS_PREMIERE) return 0;
   const pct = overallProgress(job);
+  if (pct === null) return null; // 進捗不明 → 直前の段を維持（高水位マーク側で担保）
   const per = 100 / steps.length;
   return clamp(Math.floor(pct / per), 0, steps.length - 1);
 }
 function encourageText(pct) {
+  if (pct === null) return "処理を進めています";
   if (pct >= 95) return "まもなく完成します";
   if (pct >= 70) return "あと少しです";
   if (pct >= 35) return "順調に進んでいます";
@@ -802,6 +939,14 @@ function stepIconHtml(i, activeIdx) {
   if (i === activeIdx) return `<span class="s-step__spinner" aria-hidden="true"></span>`;
   return `<span>${i + 1}</span>`;
 }
+// この作成が有料コースか（時間目安の文言を切り替えるため）。
+function creatingIsPaid() {
+  const p = state.current;
+  const billing = (p && p.billing) || {};
+  const BACKEND_TIER = { mock: "free", higgsfield: "paid", cloudapi: "paid" };
+  const tier = (p && (p.plan_tier || billing.plan_tier || BACKEND_TIER[p.backend || ""])) || state.planTier;
+  return tier === "paid";
+}
 
 function renderCreating() {
   const el = document.getElementById("simple-app");
@@ -809,9 +954,26 @@ function renderCreating() {
   const steps = job.phase === "premiere_export"
     ? STEP_DEFS_PREMIERE
     : (job.totalPhases === 2 ? STEP_DEFS_FULL : STEP_DEFS_RENDER_ONLY);
-  const pct = Math.round(clamp(overallProgress(job), 0, 100));
-  const activeIdx = activeStepIndex(job, steps);
+  const raw = overallProgress(job);              // null = 進捗値なし
+  const hasPct = raw !== null;
+  const pct = hasPct ? Math.round(clamp(raw, 0, 100)) : null;
+  // 段は前進のみ（高水位マーク）。フェーズ移行時の queued/percent や mock の done イベントで
+  // 段が一瞬後退するのを防ぐ（映像→仕上げ 到達後に台本/映像へ戻らない）。
+  const candidateIdx = activeStepIndex(job, steps);
+  if (candidateIdx > state.maxStepIdx) state.maxStepIdx = candidateIdx;
+  const activeIdx = clamp(state.maxStepIdx, 0, steps.length - 1);
   const theme = state.current ? state.current.theme : state.theme;
+  const isPremiere = job.phase === "premiere_export";
+
+  // 所要時間の目安 + 「閉じてOK」案内（Premiere書き出しには時間目安を出さない）。
+  let timeNote = "";
+  if (isPremiere) {
+    timeNote = `<div class="s-time-note">Premiere用のファイルを書き出しています。少しお待ちください。</div>`;
+  } else if (creatingIsPaid()) {
+    timeNote = `<div class="s-time-note"><strong>実映像の生成には20〜40分ほどかかります。</strong>この画面を閉じても大丈夫です（あとで「これまでの動画」の一覧から見られます）。</div>`;
+  } else {
+    timeNote = `<div class="s-time-note">数分で終わります。この画面を閉じても、あとで一覧から見られます。</div>`;
+  }
 
   el.innerHTML = `
     ${topbarHtml()}
@@ -827,11 +989,27 @@ function renderCreating() {
           </div>
         `).join("")}
       </div>
-      <div class="s-progress-pct">${pct}%</div>
-      <div class="s-progress-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
-        <div class="s-progress-bar__fill" style="width:${pct}%"></div>
+
+      <div class="s-elapsed-row">
+        <span class="s-elapsed-label">経過時間</span>
+        <span class="s-elapsed" id="s-elapsed">${fmtMMSS(state.flowStartedAt ? (Date.now() - state.flowStartedAt) / 1000 : 0)}</span>
       </div>
+
+      ${hasPct
+        ? `<div class="s-progress-pct">${pct}%</div>
+           <div class="s-progress-bar" role="progressbar" aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100">
+             <div class="s-progress-bar__fill" style="width:${pct}%"></div>
+           </div>`
+        : `<div class="s-progress-bar s-progress-bar--indeterminate" role="progressbar" aria-label="処理中">
+             <div class="s-progress-bar__indet"></div>
+           </div>`}
+
       <div class="s-encourage">${escapeHtml(encourageText(pct))}</div>
+      ${timeNote}
+
+      <div class="s-stuck-notice" id="s-stuck-notice" role="status" ${isStuck() ? "" : "hidden"}>
+        時間がかかっています。ページを再読み込みしても、進行は止まりません（作成はこのまま続きます）。
+      </div>
     </div>
     ${footerHtml()}
   `;
@@ -1026,6 +1204,8 @@ function renderEdit() {
 
 // ---------- 描画ディスパッチ ----------
 function render() {
+  // 作成中画面に居る間だけ経過時間ティッカーを回す（それ以外では止めて起点をリセット）。
+  if (state.screen === "creating") ensureCreatingTickers(); else stopCreatingTickers();
   switch (state.screen) {
     case "creating": renderCreating(); break;
     case "result": renderResult(); break;
