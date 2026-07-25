@@ -143,6 +143,38 @@ class SilentTTSBackend(TTSBackend):
         return {"backend": self.name, "duration_sec": duration, "is_silent": True}
 
 
+def synthesize_silent_track(out_wav_path, duration_sec, cfg=None):
+    """P0-2: narration_mode="absent"（参考にナレーション無し）用の無音トラック生成。
+
+    指定尺ちょうどの無音 wav を作る（TTS はスキップし、BGM+テロップだけで成立させる）。
+    render 段の音声ミックス経路は narration トラックの存在を前提にしているため、
+    無音でも「尺ぴったりの音声トラック」を渡すことで BGM が主音声になり、
+    ducking も鳴らない（無音なので）。動画尺は参考のカット割り通り＝duration_drift 0。
+    """
+    cfg = cfg or load_config()
+    ffmpeg_bin = cfg.get("ffmpeg_bin") or str(project_root() / "bin" / "ffmpeg")
+    try:
+        dur = float(duration_sec)
+    except (TypeError, ValueError):
+        dur = 0.0
+    dur = max(_MIN_FALLBACK_SEC, dur)
+    cmd = [
+        ffmpeg_bin, "-y",
+        "-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=48000",
+        "-t", "{:.3f}".format(dur),
+        "-c:a", "pcm_s16le",
+        str(out_wav_path),
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise TTSError(
+            "無音ナレーショントラック生成に失敗しました: {}".format(
+                proc.stderr.decode("utf-8", "replace")[:300]
+            )
+        )
+    return {"backend": "none", "duration_sec": dur, "is_silent": True, "mode": "none"}
+
+
 def _default_fish_audio_http_post(url, payload, api_key, model, timeout_sec=60):
     """Fish Audio TTS APIへPOSTし、音声バイト列を返す(stdlib urllib.requestのみ・依存追加ゼロ)。
 

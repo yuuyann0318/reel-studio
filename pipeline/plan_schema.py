@@ -116,8 +116,24 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
         errors.append("hook は非空文字列である必要があります")
         hook = ""
 
+    # P0-2: narration_mode ∈ {present, absent, unknown}。任意フィールド（後方互換）。
+    # "absent"（参考動画にナレーション無し）のときは narration_script の空文字を許容する
+    # （BGM+テロップだけで語る TikTok 構成の忠実再現。TTS はスキップされる）。
+    narration_mode = plan.get("narration_mode")
+    if narration_mode is not None and narration_mode not in ("present", "absent", "unknown"):
+        errors.append(
+            "narration_mode は present/absent/unknown のいずれかである必要があります (got: {!r})".format(
+                narration_mode
+            )
+        )
     narration = plan.get("narration_script")
-    if not isinstance(narration, str) or not narration.strip():
+    if narration_mode == "absent":
+        # 参考にナレーション無し → narration は必ず空へ正規化する（非空でも黙って捨てる
+        # のではなく、明示的に "" にして下流 TTS スキップと整合させる。codex-review High）。
+        if narration is not None and not isinstance(narration, str):
+            errors.append("narration_script は文字列である必要があります")
+        narration = ""
+    elif not isinstance(narration, str) or not narration.strip():
         errors.append("narration_script は非空文字列である必要があります")
         narration = ""
 
@@ -335,7 +351,10 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
                 }
                 if scene_id is not None:
                     normalized_shot["scene_id"] = scene_id
-                if narration_jp is not None:
+                if narration_mode == "absent":
+                    # 参考にナレーション無し → shot ナレーションも空へ正規化（codex-review High）。
+                    normalized_shot["narration_jp"] = ""
+                elif narration_jp is not None:
                     normalized_shot["narration_jp"] = narration_jp.strip()
                 if caption_in_off is not None:
                     normalized_shot["caption_in_offset_sec"] = float(caption_in_off)
@@ -491,6 +510,8 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
         "shots": normalized_shots,
         "bgm_mood": bgm_mood,
     }
+    if narration_mode in ("present", "absent", "unknown"):
+        normalized_plan["narration_mode"] = narration_mode
     if normalized_sfx_plan is not None:
         normalized_plan["sfx_plan"] = normalized_sfx_plan
     if hook_end_shot_id is not None:

@@ -111,6 +111,115 @@ _SFX_SALIENT_MATCH_WINDOW_SEC = 0.3
 # 15字以上の連続一致検出(丸写し検査)の閾値
 _VERBATIM_OVERLAP_MIN_LEN = 15
 
+# P0-1a: 参考テロップ実文言の複製。1行が _TELOP_VERBATIM_MAX_CHARS(14字) 以内の
+# 短文・記号・数値(進捗ゲージ「10%/100%」等)は verbatim 維持を要求する。
+# 15字以上の文章は TTPS 層で自分の言葉に言い換える（=丸写し検査 _VERBATIM_OVERLAP_MIN_LEN
+# と整合。ユーザーの TTPS ルール「14字まで完コピ可」に一致）。
+_TELOP_VERBATIM_MAX_CHARS = 14
+
+
+def _verbatim_required_lines(text):
+    """参考テロップ text から「verbatim 維持を要求する行」を返す。
+
+    テロップは複数行のことがある（例: "10%/100%\\nSNSでバズってる美容液"）。
+    各行について、_TELOP_VERBATIM_MAX_CHARS(14) 以内の非空行だけを verbatim 必須とする。
+    15字以上の行は言い換え対象なので除外する。
+    """
+    if not isinstance(text, str):
+        return []
+    out = []
+    for raw in text.replace("\r", "\n").split("\n"):
+        line = raw.strip()
+        if line and len(line) <= _TELOP_VERBATIM_MAX_CHARS:
+            out.append(line)
+    return out
+
+
+import re as _re
+
+# P0-1a: verbatim 複製を「ハード強制」する対象は、純粋な進捗ゲージ/数値トークンだけに絞る。
+# 「10%/100%」「100%」「1/2」のように **数字・%・スラッシュ・空白・小数点のみ** で構成される
+# 行を対象にする。価格「¥1980」・期間「30日で改善」・型番などの「数字を含むが文章/単位付き」
+# の行は対象外（それらを verbatim 強制すると参考の事実流用=誤情報の温床になる。codex-review 指摘）。
+_GAUGE_LINE_RE = _re.compile(r"^[\d%％/／.\s]+$")
+
+
+def _gauge_tokens(text):
+    """参考テロップ text のうち「純粋な進捗ゲージ/数値トークンの ≤14字行」を返す（P0-1a）。
+
+    対象: 「10%/100%」「100%」「1/2」等（数字＋%／スラッシュのみ・数字と(%|/)を含む）。
+    非対象: 「汚肌改善生活」（数字なし・言い換え自由）／「30日で改善」「¥1980」
+      （文章・単位付き＝事実の中身なので今回テーマの値へ言い換えるべき）。
+    ハード骨検査はこの純ゲージだけを verbatim 強制する（誤情報の再生産を防ぐ）。
+    「Before/After」等の短い記号語はプロンプトで初期値として渡すが、ハード強制はしない。
+    """
+    out = []
+    for line in _verbatim_required_lines(text):
+        if not _GAUGE_LINE_RE.match(line):
+            continue
+        has_digit = any(ch.isdigit() for ch in line)
+        has_gauge_mark = ("%" in line) or ("％" in line) or ("/" in line) or ("／" in line)
+        if has_digit and has_gauge_mark:
+            out.append(line)
+    return out
+
+
+def _infer_narration_mode(reference_spec):
+    """参考動画の narration 有無を推定する（P0-2）。
+
+    戻り値: "present" / "absent" / "unknown"
+
+    判定:
+      - transcript が非空 → "present"
+      - transcript が空 かつ (ASR 失敗 warning あり または bgm.present) かつ telops>=3
+        → "absent"（=「ナレーション無し・BGM+テロップだけで語る」典型 TikTok 構成）
+      - それ以外 → "unknown"
+
+    ASR 失敗（Fish Audio 残高不足等）と「そもそもナレーションが無い動画」を混同しない
+    ためのフォールバック。telops が充実していれば「無いから足す」のではなく
+    「参考が元々ナレーション無し」とみなす。
+    """
+    if not isinstance(reference_spec, dict):
+        return "unknown"
+    transcript = reference_spec.get("transcript")
+    if isinstance(transcript, str) and transcript.strip():
+        return "present"
+    telops = reference_spec.get("telops") or []
+    telop_count = len([t for t in telops if isinstance(t, dict) and (t.get("text") or "").strip()])
+    warnings = reference_spec.get("warnings") or []
+    asr_failed = any(
+        isinstance(w, str) and ("ASR" in w or "文字起こし" in w or "transcript" in w)
+        for w in warnings
+    )
+    bgm = reference_spec.get("bgm") or {}
+    bgm_present = bool(bgm.get("present")) if isinstance(bgm, dict) else False
+    if telop_count >= 3 and (asr_failed or bgm_present):
+        return "absent"
+    return "unknown"
+
+
+# P0-3: 参考動画 bgm.mood_guess("upbeat pop"等の自由文) を BGM ライブラリの
+# 既知ムード語(upbeat/calm/emotional/dramatic/lofi)へ写像する。
+_LIBRARY_MOODS = ("upbeat", "calm", "emotional", "dramatic", "lofi")
+
+
+def _map_mood_guess_to_library_mood(mood_guess):
+    """"upbeat pop" -> "upbeat" のように既知ムード語へ写像。未知は None。"""
+    if not isinstance(mood_guess, str) or not mood_guess.strip():
+        return None
+    low = mood_guess.lower()
+    for m in _LIBRARY_MOODS:
+        if m in low:
+            return m
+    # よくある同義語の最小マッピング
+    if "pop" in low or "energetic" in low or "bright" in low or "happy" in low:
+        return "upbeat"
+    if "ambient" in low or "chill" in low or "relax" in low or "soft" in low:
+        return "calm"
+    if "sad" in low or "emotional" in low or "melancholic" in low:
+        return "emotional"
+    return None
+
 # F13: narration_jp 文字数バジェット。参考動画のリズム(=カット割り)を再現するため、
 # 各 shot の narration_jp 文字数を「expected_narration_chars（無ければ 尺 × chars_per_sec、
 # 既定 6.5字/秒）× (1 + 15%)」で拘束する。超過は矯正リトライ対象（TTS 実尺が伸びて
@@ -472,6 +581,8 @@ def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_dur
             "caption_in_offset_sec": caption_in,
             "caption_out_offset_sec": caption_out,
             "telop_style_hint": hint,
+            # P0-1a: 参考テロップの実文言。captions[].text の初期値/verbatim検査に使う。
+            "ref_text": (tel.get("text") or "") if isinstance(tel.get("text"), str) else "",
             "confidence": conf,
             "_seq": len(per_shot.get(shot_id, [])),  # 元順序保存（同点タイブレーク用）
         })
@@ -490,12 +601,14 @@ def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_dur
                 "caption_in_offset_sec": float(p["caption_in_offset_sec"]),
                 "caption_out_offset_sec": float(p["caption_out_offset_sec"]),
                 "telop_style_hint": dict(p["telop_style_hint"]),
+                "ref_text": p.get("ref_text") or "",
             })
         head = captions[0]
         out[shot_id] = {
             "caption_in_offset_sec": head["caption_in_offset_sec"],
             "caption_out_offset_sec": head["caption_out_offset_sec"],
             "telop_style_hint": dict(head["telop_style_hint"]),
+            "ref_text": head.get("ref_text") or "",
             "captions": captions,
         }
     return out
@@ -820,6 +933,8 @@ def _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids, new_dur
                 "caption_in_offset_sec": round(local_in, 3),
                 "caption_out_offset_sec": round(local_out, 3),
                 "telop_style_hint": dict(cap.get("telop_style_hint") or {}),
+                # P0-1a: 分割断片でも参考テロップ実文言を保持する。
+                "ref_text": cap.get("ref_text") or "",
             })
         # 各断片について info を組み立てる（先頭 caption を legacy キーへ）
         for new_sid, caps in per_fragment_caps.items():
@@ -829,6 +944,7 @@ def _remap_telops_by_split(telop_map, shot_ids, split_map, new_shot_ids, new_dur
                 "caption_in_offset_sec": head["caption_in_offset_sec"],
                 "caption_out_offset_sec": head["caption_out_offset_sec"],
                 "telop_style_hint": dict(head["telop_style_hint"]),
+                "ref_text": head.get("ref_text") or "",
                 "captions": caps,
             }
     return remapped
@@ -1107,9 +1223,15 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
             shot["caption_in_offset_sec"] = round(cin, 3)
             shot["caption_out_offset_sec"] = round(cout, 3)
             shot["telop_style_hint"] = info.get("telop_style_hint")
+            # P0-1a: 単一テロップ shot に参考テロップの実文言を載せる（LLM の初期値・
+            # verbatim 検査の根拠）。空なら載せない。
+            _ref_txt = info.get("ref_text") or ""
+            if _ref_txt.strip():
+                shot["ref_caption_text"] = _ref_txt
             # R4: 複数テロップが載る shot だけ caption_slots[] を追加する。
             # LLM が返す plan では captions[] (text 入り) を required とし、
-            # skeleton には「構造(=何枚 / いつ〜いつ / どのスタイル)」のみを caption_slots[] で伝える。
+            # skeleton には「構造(=何枚 / いつ〜いつ / どのスタイル)」+ P0-1a の
+            # 参考実文言(ref_text) を caption_slots[] で伝える。
             # 単一テロップ shot は従来どおり caption_jp + caption_in/out で扱う（後方互換）。
             raw_captions = info.get("captions") or []
             if len(raw_captions) > 1:
@@ -1119,11 +1241,15 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
                     _cout = float(cap.get("caption_out_offset_sec") or 0.0)
                     _cin = max(0.0, min(_cin, float(scaled[i])))
                     _cout = max(_cin, min(_cout, float(scaled[i])))
-                    slots.append({
+                    _slot = {
                         "caption_in_offset_sec": round(_cin, 3),
                         "caption_out_offset_sec": round(_cout, 3),
                         "telop_style_hint": dict(cap.get("telop_style_hint") or {}),
-                    })
+                    }
+                    _cap_ref = cap.get("ref_text") or ""
+                    if _cap_ref.strip():
+                        _slot["ref_text"] = _cap_ref
+                    slots.append(_slot)
                 shot["caption_slots"] = slots
         # F10: 参考映像情報を skeleton の各 shot に載せる
         if sid in rv_map:
@@ -1182,11 +1308,28 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         for i in range(len(shot_ids)):
             ref_ranges.append((boundaries[i], boundaries[i + 1]))
 
+    # P0-2: 参考動画の narration 有無を推定して skeleton に載せる（絶対厳守の骨情報）。
+    narration_mode = _infer_narration_mode(reference_spec)
+    # P0-3: 参考動画 BGM の実測 bpm と mood_guess(→ライブラリムード) を skeleton に載せる。
+    _bgm = reference_spec.get("bgm") or {}
+    _music = reference_spec.get("music") or {}
+    _mood_guess = _bgm.get("mood_guess") if isinstance(_bgm, dict) else None
+    _ref_bpm = _music.get("bpm") if isinstance(_music, dict) else None
+    reference_bgm = {
+        "mood_guess": _mood_guess,
+        "library_mood": _map_mood_guess_to_library_mood(_mood_guess),
+        "bpm": float(_ref_bpm) if isinstance(_ref_bpm, (int, float)) and _ref_bpm > 0 else None,
+    }
+
     return {
         "shots": shots,
         "sfx_plan": sfx_plan,
         "hook_end_shot_id": hook_end_shot_id,
         "cta_start_shot_id": cta_start_shot_id,
+        # P0-2: narration 有無。"absent" のとき director は narration を空にし run.py が TTS をスキップする。
+        "narration_mode": narration_mode,
+        # P0-3: BGM 選定を参考準拠にするための参考 bgm 情報。
+        "reference_bgm": reference_bgm,
         # R3 P2: piecewise 写像用（fidelity が使う）— 各生成 shot に対応する参考尺の [start,end]
         "shot_ref_ranges": [(round(a, 4), round(b, 4)) for (a, b) in ref_ranges],
         # F7: 参考 rhythm を skeleton 経由で director プロンプトへ渡す
@@ -1597,6 +1740,49 @@ def _validate_plan_matches_skeleton(plan, skeleton, target_duration_sec):
                 )
             )
 
+    # P0-1a: 進捗ゲージ/数値テロップ(≤14字・数字含む「10%/100%」等)の verbatim 複製を強制。
+    # 参考テロップの数値ゲージ文言は「複製」対象（言い換えると再現度が壊れる）。
+    # skeleton の ref_caption_text / caption_slots[].ref_text を根拠に、plan 側 caption に
+    # 該当トークンがそのまま含まれているか検査する。含まれなければ矯正対象。
+    for i, (ps, ss) in enumerate(zip(plan_shots, skel_shots)):
+        sid = ss.get("id")
+        # 単一テロップ shot: ref_caption_text の数値ゲージ行を caption_jp が含むこと
+        ref_single = ss.get("ref_caption_text")
+        if isinstance(ref_single, str) and ref_single.strip():
+            plan_text = ps.get("caption_jp") or ""
+            # 複数テロップ plan の場合は captions[].text も連結して照合対象にする
+            for c in (ps.get("captions") or []):
+                if isinstance(c, dict):
+                    plan_text += "\n" + (c.get("text") or c.get("caption_jp") or "")
+            for tok in _gauge_tokens(ref_single):
+                if tok not in plan_text:
+                    errors.append(
+                        "shots[{}(id={})] の進捗ゲージ/数値テロップ {!r} が caption に複製されていません。"
+                        "参考の数値ゲージ文言はそのまま（verbatim）残してください（14字以内・数字を含む"
+                        "短文は複製対象）。".format(i, sid, tok)
+                    )
+        # 複数テロップ shot: 各 caption_slots[].ref_text の数値ゲージ行を、対応する
+        # plan captions[k].text（無ければ shot 全 caption 連結）が含むこと
+        skel_slots = ss.get("caption_slots") if isinstance(ss.get("caption_slots"), list) else None
+        if skel_slots:
+            plan_caps = ps.get("captions") if isinstance(ps.get("captions"), list) else []
+            all_texts = "\n".join(
+                (c.get("text") or c.get("caption_jp") or "") for c in plan_caps if isinstance(c, dict)
+            )
+            for k, slot in enumerate(skel_slots):
+                ref_slot = slot.get("ref_text") if isinstance(slot, dict) else None
+                if not isinstance(ref_slot, str) or not ref_slot.strip():
+                    continue
+                target = ""
+                if k < len(plan_caps) and isinstance(plan_caps[k], dict):
+                    target = plan_caps[k].get("text") or plan_caps[k].get("caption_jp") or ""
+                for tok in _gauge_tokens(ref_slot):
+                    if tok not in target and tok not in all_texts:
+                        errors.append(
+                            "shots[{}(id={})].captions[{}] の進捗ゲージ/数値テロップ {!r} が複製されていません。"
+                            "参考の数値ゲージ文言はそのまま（verbatim）残してください。".format(i, sid, k, tok)
+                        )
+
     return errors
 
 
@@ -1684,6 +1870,16 @@ def _attempt_plan(prompt, config, retries_left, target_duration_sec, target_tole
         for sh in candidate.get("shots") or []:
             if isinstance(sh, dict) and "scene_id" in sh:
                 sh.pop("scene_id", None)
+
+    # P0-2: narration absent 参考の忠実再現。skeleton が "absent" を推定していれば、
+    # LLM が narration を書いていても機械的に空へ落とす（TTS スキップ・尺 drift 0 の前提）。
+    # プロンプトでも空指示するが、LLM の作文余地を残さないため validate 前に強制する。
+    if skeleton is not None and skeleton.get("narration_mode") == "absent":
+        candidate["narration_mode"] = "absent"
+        candidate["narration_script"] = ""
+        for sh in candidate.get("shots") or []:
+            if isinstance(sh, dict):
+                sh["narration_jp"] = ""
 
     ok, errors, normalized = plan_schema.validate_plan(
         candidate, target_duration_sec=target_duration_sec, target_tolerance_sec=target_tolerance_sec
@@ -1985,6 +2181,29 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     plan["meta"]["product"] = (product or {}).get("name") if product else None
     if quality in ("supreme", "supreme_plus"):
         plan["meta"]["stages"] = stages
+
+    # P0-2: narration_mode を plan の top-level へ確定させる（run.py が TTS スキップに使う）。
+    _nmode = skeleton.get("narration_mode")
+    if _nmode in ("present", "absent", "unknown"):
+        plan["narration_mode"] = _nmode
+        if _nmode == "absent":
+            # 念のため（_attempt_plan で強制済みだが)最終 plan でも空に統一する。
+            plan["narration_script"] = ""
+            for _sh in plan.get("shots") or []:
+                if isinstance(_sh, dict):
+                    _sh["narration_jp"] = ""
+
+    # P0-3: BGM 選定を参考準拠にする。参考 bgm.mood_guess を既知ムードへ写像して
+    # plan.bgm_mood を上書きし、参考 bpm を meta に載せる（run.py が ±15BPM 近傍を選ぶ）。
+    _ref_bgm = skeleton.get("reference_bgm") or {}
+    _lib_mood = _ref_bgm.get("library_mood")
+    if _lib_mood:
+        plan["bgm_mood"] = _lib_mood
+    _ref_bpm = _ref_bgm.get("bpm")
+    if isinstance(_ref_bpm, (int, float)) and _ref_bpm > 0:
+        plan["meta"]["reference_bpm"] = float(_ref_bpm)
+    if _ref_bgm.get("mood_guess"):
+        plan["meta"]["reference_bgm_mood_guess"] = _ref_bgm.get("mood_guess")
     # 参考spec の要点を meta に記録（下流の render/検証で使える）
     plan["meta"]["reference_skeleton_shot_count"] = len(skeleton["shots"])
     plan["meta"]["reference_skeleton_sfx_count"] = len(skeleton.get("sfx_plan") or [])

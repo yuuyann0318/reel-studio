@@ -301,7 +301,7 @@ def test_jobs_resolve_bgm_uses_pick_bgm(monkeypatch):
 
     calls = []
 
-    def _fake_pick(mood, seed=None, manifest=None, history=None, record_project_id=None, history_path_override=None):
+    def _fake_pick(mood, seed=None, manifest=None, history=None, record_project_id=None, history_path_override=None, target_bpm=None):
         calls.append({"mood": mood, "seed": seed, "record_project_id": record_project_id})
         return {"file": "library/fake_test.m4a", "mood": mood}
 
@@ -361,7 +361,7 @@ def test_run_resolve_bgm_uses_pick_bgm(monkeypatch, tmp_path):
     from pipeline import bgm_library as blib
 
     fake_file = "library/upbeat_bright_01.m4a"  # 実生成済みなのでパス解決に成功する
-    def _fake_pick(mood, seed=None, manifest=None, history=None, record_project_id=None, history_path_override=None):
+    def _fake_pick(mood, seed=None, manifest=None, history=None, record_project_id=None, history_path_override=None, target_bpm=None):
         return {"file": fake_file, "mood": mood}
 
     monkeypatch.setattr(blib, "pick_bgm", _fake_pick)

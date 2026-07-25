@@ -133,11 +133,13 @@ def _new_run_dir(theme):
     return run_id, run_dir
 
 
-def _resolve_bgm(mood, seed=None, project_id=None):
+def _resolve_bgm(mood, seed=None, project_id=None, target_bpm=None):
     """ムードから BGM の絶対パスを返す（pipeline.bgm_library.pick_bgm 経由）。
 
     後方互換: 従来と同様の str(path) or None を返す。
     seed / project_id で決定論選曲＋直近使用2曲回避（"BGMが毎回同じ" 対策）。
+    target_bpm(P0-3): 参考動画の実測 bpm。指定すると mood 適合曲の中から ±15BPM の
+    曲を最優先で選ぶ（参考のテンポに準拠）。
     """
     if not mood or mood == "none":
         return None
@@ -148,7 +150,7 @@ def _resolve_bgm(mood, seed=None, project_id=None):
     if bgm_library is None:
         return None
     entry = bgm_library.pick_bgm(mood, seed=(seed if seed is not None else project_id),
-                                 record_project_id=project_id)
+                                 record_project_id=project_id, target_bpm=target_bpm)
     if not entry:
         return None
     fname = entry.get("file", "")
@@ -561,8 +563,29 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     narration_wav_path = run_dir / "narration.wav"
     tts_mode = "full"
     shot_display_durations = {}
+    # P0-2: narration_mode="absent"（参考にナレーション無し）は TTS を丸ごとスキップし、
+    # 尺ぴったりの無音トラックだけ用意する（BGM+テロップで成立・尺 drift 0）。
+    narration_absent = (plan.get("narration_mode") == "absent") or (
+        bool(shots)
+        and all(not (isinstance(s.get("narration_jp"), str) and s.get("narration_jp").strip()) for s in shots)
+        and not (isinstance(plan.get("narration_script"), str) and plan.get("narration_script").strip())
+    )
     try:
         with _timed_stage(report, "tts"):
+          if narration_absent:
+            tts_mode = "none"
+            for shot in shots:
+                shot_display_durations[shot["id"]] = shot["duration_sec"]
+            _absent_total = sum(shot["duration_sec"] for shot in shots) if shots else 0.0
+            tts_meta = tts_mod.synthesize_silent_track(
+                str(narration_wav_path), _absent_total, cfg
+            )
+            report["stages"]["tts"]["backend"] = tts_meta.get("backend")
+            report["stages"]["tts"]["duration_sec"] = tts_meta.get("duration_sec")
+            report["stages"]["tts"]["is_silent"] = True
+            report["stages"]["tts"]["mode"] = "none"
+            report["stages"]["tts"]["narration_mode"] = "absent"
+          else:
             sync_eligible = bool(shots) and all(
                 isinstance(s.get("narration_jp"), str) and s.get("narration_jp").strip() for s in shots
             )
@@ -736,8 +759,16 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     output_path = None
     try:
         with _timed_stage(report, "render"):
-            bgm_path = _resolve_bgm(plan.get("bgm_mood"), project_id=run_id)
+            # P0-3: 参考動画の実測 bpm を BGM 選定へ渡す（±15BPM 近傍を優先）。
+            _ref_bpm = None
+            _ref_music = (reference_spec or {}).get("music") if isinstance(reference_spec, dict) else None
+            if isinstance(_ref_music, dict):
+                _bpm_v = _ref_music.get("bpm")
+                if isinstance(_bpm_v, (int, float)) and _bpm_v > 0:
+                    _ref_bpm = float(_bpm_v)
+            bgm_path = _resolve_bgm(plan.get("bgm_mood"), project_id=run_id, target_bpm=_ref_bpm)
             report["stages"]["render"]["bgm_mood"] = plan.get("bgm_mood")
+            report["stages"]["render"]["bgm_reference_bpm"] = _ref_bpm
             report["stages"]["render"]["bgm_path"] = bgm_path
 
             out_duration = sum(shot_display_durations.get(s["id"], s["duration_sec"]) for s in shots) if shots else total_shot_duration

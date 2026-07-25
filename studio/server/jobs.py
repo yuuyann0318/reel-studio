@@ -1648,8 +1648,23 @@ def _render_project(project_id, plan, cfg):
     # horizontal_pool(7スタイル)から seed で選ぶ。選択結果は project["telop_style"] に記録し
     # かんたんモードの完成画面に「テロップ: <名前>」1行を表示する。
     _plan_sub_style = subtitles.resolve_subtitle_style(plan.get("subtitle_style"))
+    _preset = _plan_sub_style.get("preset")
+    # P2-8: TTPモードで参考テロップが横書き(style_hint.position が縦書き系でない)なら、
+    # vertical_hook プリセットの "vertical-serif"(縦書き明朝) 固定を解除し、参考のスタイル
+    # (横書き白+黒フチ)に近い horizontal_pool から選ぶ（診断#10: 縦書き明朝固定の是正）。
+    _hint_positions = [
+        (sh.get("telop_style_hint") or {}).get("position")
+        for sh in plan.get("shots") or []
+        if isinstance(sh, dict) and sh.get("telop_style_hint")
+    ]
+    _ref_horizontal = bool(_hint_positions) and all(
+        (p or "") not in ("vertical", "right", "left", "vertical-right", "vertical-left")
+        for p in _hint_positions
+    )
+    if _ref_horizontal and _preset == "vertical_hook":
+        _preset = None
     telop_style_name = subtitles.pick_telop_style_name(
-        project_id, preset=_plan_sub_style.get("preset"), record_project_id=project_id,
+        project_id, preset=_preset, record_project_id=project_id,
     )
     ass_text = subtitles.generate_ass_with_style(
         telop_pieces, plan.get("subtitle_style"), product_name=product_name,

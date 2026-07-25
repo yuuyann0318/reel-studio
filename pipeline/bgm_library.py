@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -51,6 +52,21 @@ KNOWN_MOODS = {"upbeat", "calm", "emotional", "dramatic", "lofi", "any"}
 _AUDIO_EXTS = {".mp3", ".wav", ".m4a"}
 _HISTORY_MAX = 64
 _AVOID_LAST_N = 2
+# P0-3: 参考動画の BGM テンポ(bpm)に「準拠」する近傍幅。±この値以内を最優先候補にする。
+# 該当が無ければ最寄り bpm 1曲へフォールバック（BGM を完全に落とすよりベター）。
+_BPM_MATCH_TOLERANCE = 15.0
+
+
+def _bpm_of(entry):
+    """manifest entry から bpm(有限 float>0) を取り出す。無ければ None。"""
+    v = entry.get("bpm") if isinstance(entry, dict) else None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(f) or f <= 0:
+        return None
+    return f
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +356,8 @@ def _save_history_to(path, history):
 # ---------------------------------------------------------------------------
 
 def pick_bgm(mood, seed=None, manifest=None, history=None,
-             record_project_id=None, history_path_override=None):
+             record_project_id=None, history_path_override=None,
+             target_bpm=None):
     """ムード適合曲からシード乱択＋直近2曲を回避して1曲を選ぶ。
 
     引数:
@@ -350,6 +367,10 @@ def pick_bgm(mood, seed=None, manifest=None, history=None,
       - history: 事前ロード済み history（Noneなら実ファイルから）
       - record_project_id: 指定時は選曲結果を history に追記して永続化する
       - history_path_override: テスト用の history 書き出し先
+      - target_bpm: P0-3。参考動画の実測 bpm。指定すると mood 適合候補の中から
+        |bpm - target_bpm| <= _BPM_MATCH_TOLERANCE(±15) の曲を最優先で選ぶ。
+        近傍が無ければ最寄り bpm の1曲を採用する（BGM を落とさない）。
+        None なら従来どおり mood のみで選ぶ（後方互換）。
 
     戻り値: manifest entry(dict) or None
     """
@@ -386,6 +407,27 @@ def pick_bgm(mood, seed=None, manifest=None, history=None,
         candidates = fallback_all
     else:
         return None
+
+    # P0-3: 参考動画の bpm に準拠する。target_bpm 指定時は mood 適合候補の中から
+    # ±_BPM_MATCH_TOLERANCE 以内の曲だけに絞る（=「129BPM/upbeat の参考 → 80BPM の
+    # calm_ambient が選ばれる」現象を機械的に潰す）。近傍が空なら最寄り bpm 1曲へ。
+    # codex-review Medium: bpm 準拠は「直近回避」より優先させる（参考テンポ再現が主目的
+    # なので、bpm 近傍を先に確定してから、その中で直近使用を避ける）。
+    if target_bpm is not None:
+        try:
+            tb = float(target_bpm)
+        except (TypeError, ValueError):
+            tb = None
+        if tb is not None and math.isfinite(tb) and tb > 0:
+            with_bpm = [e for e in candidates if _bpm_of(e) is not None]
+            if with_bpm:
+                within = [e for e in with_bpm if abs(_bpm_of(e) - tb) <= _BPM_MATCH_TOLERANCE]
+                if within:
+                    candidates = within
+                else:
+                    # 近傍ゼロ: 最寄り bpm を選ぶ（同差はファイル名で安定タイブレーク）
+                    best = min(with_bpm, key=lambda e: (abs(_bpm_of(e) - tb), e.get("file", "")))
+                    candidates = [best]
 
     # 直近使用の回避: ただし自プロジェクトの過去エントリは「他人ではなく自分の履歴」
     # なので回避対象から外す（再実行で同曲を維持するため。決定論と回避の衝突回避）

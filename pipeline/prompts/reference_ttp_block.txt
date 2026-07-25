@@ -37,9 +37,16 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp`（または `captions
    （**特に motion_preset は参考動画の光学フロー機械判定に基づくマッピング結果です。
    絶対に変更しないこと。**）
 3. `sfx_plan` / `hook_end_shot_id` / `cta_start_shot_id` もスケルトンの値をそのまま返すこと。
-4. **文言の丸写し禁止**: 参考動画のテロップ・字幕の語句を **15字以上連続して一致させないこと**
-   （著作権侵害）。表現は必ず自分の言葉に言い換える。参考テロップは telop_style_hint
-   （position/color/size_class）のスタイル参考としてのみ扱い、実文言は自分の言葉で書き直すこと。
+4. **文言の複製と言い換えの使い分け（P0-1a・重要）**: 各 shot の `ref_caption_text`
+   （単一テロップ shot）または `caption_slots[].ref_text`（複数テロップ shot）には
+   **参考動画のテロップ実文言**が入っています。これを caption の**初期値**として採用し、
+   次のルールで仕上げること:
+   - **14字以内・数字/記号を含む短文（進捗ゲージ「10%/100%」、「Before」「After」等）は
+     そのまま(verbatim)残す**。特に「10%/100%」のような**進捗ゲージ/数値は1文字も変えず複製**
+     すること（変えると再現度が壊れ、骨検査で不合格になる）。
+   - **15字以上の文章だけ**、自分の言葉・今回のテーマに即して言い換える（15字以上連続一致は
+     著作権侵害になるため）。数字・事実の中身は今回の題材の自然な値に置換する。
+   参考テロップの position/color/size_class（telop_style_hint）のスタイルも踏襲すること。
 5. **数字・事実は自分の題材から**: 参考動画に出てくる数値・期間・価格・体験の事実を流用しないこと
    （他人の実績流用は誤情報になる）。同じ「数字の使い方・置き場所」だけを真似て、
    中身は今回のテーマに即した自然な値にする。
@@ -78,6 +85,13 @@ LLM の役割は各 shot の `narration_jp` / `caption_jp`（または `captions
    `narration_rhythm.chars_per_sec`（参考動画の実測話速）と `narration_rhythm.avg_gap_sec` を
    前提の話速として使う。`avg_gap_sec` が大きい参考動画（0.6秒以上）は「間」を大きく取る
    参考なので、shot境界を跨いだ文長を短めに設計すること。
+
+## ナレーション有無（P0-2・narration_mode）
+- スケルトン top-level の `narration_mode` が **`"absent"`** のときは、**参考動画に
+  ナレーションが無い**（BGM＋テロップだけで語る構成）ことを意味します。この場合は
+  **全 shot の `narration_jp` を空文字 `""`** にし、`narration_script` も `""` にすること。
+  ナレーションを勝手に足さないこと（足すと参考のカット割りより尺が伸びて再現度が壊れる）。
+- `narration_mode` が `"present"`/未指定のときは従来どおり各 shot に `narration_jp` を書く。
 
 ## visual_prompt を書くときの最重要ルール（F10: 参考映像の忠実再現）
 - 各 shot に含まれる `reference_visual`（`desc_en` / `framing` / `location` /
