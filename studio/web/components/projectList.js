@@ -81,10 +81,10 @@ export function renderProjectList(container, state, actions) {
       <div class="field">
         <label for="f-plan">プラン（ワンセット）</label>
         <select class="select" id="f-plan" name="plan_tier">
-          <option value="free" ${(createForm.planTier || "free") === "free" ? "selected" : ""}>むりょうコース（映像mock・声say・0円）</option>
-          <option value="paid" ${createForm.planTier === "paid" ? "selected" : ""}>本番コース（映像higgsfield・声Fish Audio・コイン消費）</option>
+          <option value="free" ${(createForm.planTier || "free") === "free" ? "selected" : ""}>無料コース（映像mock・声say・0円）</option>
+          <option value="paid" ${createForm.planTier === "paid" ? "selected" : ""}>有料コース（映像higgsfield・声Fish Audio・コイン消費）</option>
         </select>
-        <div class="field-hint">迷ったら「むりょうコース」（外部の有料APIを一切使わず0円で動作確認できます）</div>
+        <div class="field-hint">迷ったら「無料コース」（外部の有料APIを一切使わず0円で動作確認できます）</div>
       </div>
       <div class="field">
         <label for="f-style">テロップ・カットのスタイル</label>

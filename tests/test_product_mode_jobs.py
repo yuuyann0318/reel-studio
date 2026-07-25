@@ -120,6 +120,18 @@ def test_product_url_fetches_images_assigns_to_hook_and_cta_shots_and_reaches_ba
 
     monkeypatch.setattr(jobs_mod.product_images, "collect_product_images", _fake_collect)
 
+    # 本テストは「割当プラミング（フック/CTAへの image_path 付与）」を検証する。分類（vision＋
+    # 決定論プレフィルタ）は実 claude/ffmpeg に依存し、かつ fake パスは実在しないため、ここでは
+    # 分類を全採用で固定して割当ロジックだけを純粋に検証する。
+    def _fake_classify(paths, **kwargs):
+        return [
+            {"path": p, "category": "product_solo", "sharpness": "high",
+             "dominant_colors": [], "adopted": True, "reason": None}
+            for p in paths
+        ]
+
+    monkeypatch.setattr(jobs_mod.product_images, "classify_product_images", _fake_classify)
+
     backend = _RecordingBackend()
     monkeypatch.setattr(jobs_mod, "get_backend", lambda name, cfg: backend)
     monkeypatch.setattr(jobs_mod.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})

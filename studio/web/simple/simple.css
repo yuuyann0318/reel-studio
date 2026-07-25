@@ -161,19 +161,37 @@ body.theme-simple {
 
 .s-plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 10px; }
 .s-plan-card {
+  position: relative;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1.5px solid var(--border);
+  /* 枠線は常時 2px の無彩色グレーで明示（カードが「押せる箱」と分かるように）。 */
+  border: 2px solid var(--border-strong);
   border-radius: var(--radius-lg);
   background: #FFFFFF;
   padding: 16px 14px;
   text-align: left;
   cursor: pointer;
   color: var(--text);
-  transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast);
+  transition: border-color var(--transition-fast), background var(--transition-fast), box-shadow var(--transition-fast), transform var(--transition-fast);
 }
-.s-plan-card:hover { box-shadow: var(--shadow-2); }
+/* 非選択カード: hover で枠色プレビュー / active で押下スケール（押せる手応え）。 */
+.s-plan-card:hover { border-color: var(--text-dim); box-shadow: var(--shadow-2); }
+.s-plan-card:active { transform: scale(0.98); }
+/* 「選択中」バッジ（右上・✓付き）。既定は非表示、選択時のみ表示する。 */
+.s-plan-card__sel {
+  display: none;
+  position: absolute;
+  top: -11px; right: 12px;
+  align-items: center; gap: 4px;
+  padding: 3px 10px 3px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 800; color: #FFFFFF;
+  background: var(--accent);
+  box-shadow: var(--shadow-1);
+}
+.s-plan-card__sel svg { width: 13px; height: 13px; }
+.s-plan-card[aria-pressed="true"] .s-plan-card__sel { display: inline-flex; }
 .s-plan-card__head { display: flex; align-items: center; justify-content: space-between; }
 .s-plan-card__icon {
   display: inline-flex; align-items: center; justify-content: center;
@@ -201,9 +219,10 @@ body.theme-simple {
 
 /* free（青）の選択状態 */
 .s-plan-card--free[aria-pressed="true"] {
-  border: 2px solid var(--accent);
+  border: 3px solid var(--accent);
   background: var(--plan-blue-soft);
 }
+.s-plan-card--free[aria-pressed="true"] .s-plan-card__sel { background: var(--accent); }
 .s-plan-card--free[aria-pressed="true"] .s-plan-card__icon,
 .s-plan-card--free[aria-pressed="true"] .s-plan-card__badge { background: var(--accent); color: #FFFFFF; }
 .s-plan-card--free[aria-pressed="true"] .s-plan-card__cost-value,
@@ -212,9 +231,10 @@ body.theme-simple {
 
 /* paid（琥珀）の選択状態 */
 .s-plan-card--paid[aria-pressed="true"] {
-  border: 2px solid var(--plan-amber);
+  border: 3px solid var(--plan-amber);
   background: var(--plan-amber-soft);
 }
+.s-plan-card--paid[aria-pressed="true"] .s-plan-card__sel { background: var(--plan-amber); }
 .s-plan-card--paid[aria-pressed="true"] .s-plan-card__icon,
 .s-plan-card--paid[aria-pressed="true"] .s-plan-card__badge { background: var(--plan-amber); color: #FFFFFF; }
 .s-plan-card--paid[aria-pressed="true"] .s-plan-card__cost-value,
@@ -284,6 +304,13 @@ body.theme-simple {
   border-radius: var(--radius-sm);
   padding: 10px 12px;
   margin-top: 10px;
+}
+/* 環境NG（AI未接続など）の警告バナー: 通常のエラーバナーより一段目立たせる。 */
+.s-health-banner {
+  margin: 4px 0 12px;
+  font-size: 13.5px;
+  border-width: 2px;
+  padding: 12px 14px;
 }
 
 /* ---------- 台本メタ / エラー履歴（続きから生成） ---------- */

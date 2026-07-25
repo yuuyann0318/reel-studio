@@ -19,6 +19,22 @@ if [ -s "${FISH_KEY_FILE}" ]; then
   export FISH_AUDIO_API_KEY
 fi
 
+# 起動前ヘルスチェック（AI=claude 実疎通 / ffmpeg / ffprobe / yt-dlp の3点+）を標準出力へ。
+# NG でも起動は続行する（UI 側の赤バナーでも通知するため）。claude 疎通は極小の課金が発生する。
+echo "--- Reel Studio 起動前チェック ---"
+"${REPO_ROOT}/.venv/bin/python3" - <<'PYCHECK' || echo "（ヘルスチェックの実行に失敗しました。サーバ起動は続行します）"
+import sys
+sys.path.insert(0, ".")
+from studio.server.app import compute_health
+res = compute_health(check_claude=True)
+label = {"claude": "AI(claude)", "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "yt_dlp": "yt-dlp"}
+for k, v in res["checks"].items():
+    mark = "OK " if v.get("ok") else "NG "
+    print("  [{}] {}: {}".format(mark, label.get(k, k), (v.get("detail") or "")[:80]))
+print("  => 総合: {}".format("OK（すべて疎通）" if res["ok"] else "NG（上のNG項目を確認してください）"))
+PYCHECK
+echo "---------------------------------"
+
 exec "${REPO_ROOT}/.venv/bin/python3" -m uvicorn studio.server.app:app \
   --host 127.0.0.1 \
   --port 8787

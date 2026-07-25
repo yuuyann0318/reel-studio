@@ -22,11 +22,13 @@ const state = {
 
   assets: { bgm: [], sfx: [], loaded: false },
 
+  health: null, // { ok, checks } | null（未取得）。ok=false のとき赤バナーを出す
+
   theme: "",
   productUrl: "", // 商品リンク（任意）。貼ると商品アフィリエイト動画モードになる
   referenceUrl: "", // 参考動画リンク（任意）。貼るとその動画の構成・テンポを再現した台本になる
   style: "default", // 'default' | 'vertical_hook'
-  planTier: "free", // 'free'（むりょうコース） | 'paid'（本番コース）。映像/声/文字起こしの課金をまとめて切替
+  planTier: "free", // 'free'（無料コース） | 'paid'（有料コース）。映像/声/文字起こしの課金をまとめて切替
   estimate: { free: { coins: 0, note: "0円" }, paid: null }, // プランごとの費用見積（paidはAPIで動的取得）
   estimateLoading: false,
   submitting: false,
@@ -57,6 +59,16 @@ async function loadProjects() {
     setState({ projectsLoading: false, projects: list });
   } catch (err) {
     setState({ projectsLoading: false, projectsError: err });
+  }
+}
+
+// AI(claude)/ffmpeg/yt-dlp の疎通を確認する。NGなら画面上部に赤バナーを出す（かんたん語）。
+async function loadHealth() {
+  try {
+    const h = await api.health({ claude: 1 });
+    setState({ health: h });
+  } catch (_e) {
+    setState({ health: { ok: false, checks: {} } });
   }
 }
 
@@ -439,11 +451,26 @@ function saveLink() {
 function topbarHtml() {
   return `<div class="s-topbar"><span class="logo-dot" aria-hidden="true"></span><span>Reel Studio かんたんモード</span></div>`;
 }
+// AI未接続などの致命的な環境NGを画面上部に赤バナーで知らせる（専門用語ゼロ）。
+// health.checks.claude.ok===false のときは「AIに接続できていません」を最優先で表示する。
+function healthBannerHtml() {
+  const h = state.health;
+  if (!h || h.ok) return "";
+  const checks = h.checks || {};
+  if (checks.claude && checks.claude.ok === false) {
+    return `<div class="s-error-banner s-health-banner" role="alert">
+      <strong>AIに接続できていません。</strong>アプリを一度終了して、もう一度起動してください。
+    </div>`;
+  }
+  return `<div class="s-error-banner s-health-banner" role="alert">
+    <strong>動画を作るための準備ができていません。</strong>アプリを一度終了して、もう一度起動してください。
+  </div>`;
+}
 // コース＋消費コインの小さなバッジ。plan_tier と billing（サーバ/モック記録）から作る。
 // tier 未保存の旧プロジェクトは backend から後方互換で推定する。
 function courseChipHtml(tier, coinsActual, coinsEstimated) {
   const isFree = tier !== "paid";
-  const label = isFree ? "むりょうコース" : "本番コース";
+  const label = isFree ? "無料コース" : "有料コース";
   let coinText;
   if (isFree) coinText = "0円（無料）";
   else if (coinsActual != null) coinText = `${coinsActual} コイン消費`;
@@ -459,7 +486,7 @@ function courseChipForProject(project) {
   const billing = project.billing || {};
   // 明示の plan_tier / billing.plan_tier が最優先。無い旧プロジェクトは生成バックエンドから推定する
   // （mock→free / higgsfield・cloudapi→paid）。import 等コース概念の無いプロジェクトは表示しない
-  // （アップロードしただけの動画を「本番コース(有料)」と誤表示しないため）。
+  // （アップロードしただけの動画を「有料コース」と誤表示しないため）。
   const BACKEND_TIER = { mock: "free", higgsfield: "paid", cloudapi: "paid" };
   const tier = project.plan_tier || billing.plan_tier || BACKEND_TIER[project.backend || ""];
   if (!tier) return "";
@@ -540,7 +567,8 @@ function productThumbsHtml(project) {
 // 参考動画リンクの解析結果の小さな表示。project["reference"] は
 // {"url","ok":true,"source","cached","duration_sec","beats_count","warnings"} または
 // {"url","ok":false,"error"} または null（参考動画リンク未指定）。
-// 解析に失敗していても生成自体は通常の台本で続行済み（fail-open）のため、注意表示に留める。
+// TTP v2 移行後は解析失敗＝生成そのものが失敗する（fail-open は撤去済み）。旧 fail-open 時代の
+// 「通常の台本で作成しました」文言は実挙動と乖離するため撤去し、失敗として案内する。
 function referenceInfoHtml(project) {
   const reference = project && project.reference;
   if (!reference) return "";
@@ -549,7 +577,7 @@ function referenceInfoHtml(project) {
     return `<div class="s-director-note">参考動画: ${escapeHtml(reference.url)}（${escapeHtml(note)}）</div>`;
   }
   return `<div class="s-director-note s-director-note--warn">
-    <strong>注意:</strong> 参考動画を解析できなかったため、通常の台本で作成しました（${escapeHtml(reference.error || "")}）
+    <strong>注意:</strong> 参考動画を解析できませんでした。もう一度お試しください（${escapeHtml(reference.error || "")}）
   </div>`;
 }
 
@@ -606,7 +634,7 @@ function styleCardHtml(value, title, desc) {
     </button>`;
 }
 // ---------- プラン（ワンセット）2択カード ----------
-// free=むりょうコース（青）/ paid=本番コース（琥珀）。1枚に「費用・何ができるか」を近接配置。
+// free=無料コース（青）/ paid=有料コース（琥珀）。1枚に「費用・何ができるか」を近接配置。
 const ICON_FLASK = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3h6"/><path d="M10 3v5.3L4.9 17a2 2 0 0 0 1.7 3h10.8a2 2 0 0 0 1.7-3L14 8.3V3"/><path d="M7.6 14h8.8"/></svg>`;
 const ICON_GEM = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12l4 6-10 12L2 9z"/><path d="M2 9h20M9 3 6 9l6 12 6-12-3-6M9 3l3 6 3-6"/></svg>`;
 const ICON_CHECK = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.2 11.7 13 4.5"/></svg>`;
@@ -637,6 +665,7 @@ function planCardHtml(tier, iconSvg, badge, title, sub, features) {
   const pressed = state.planTier === tier;
   return `
     <button type="button" class="s-plan-card s-plan-card--${tier}" data-plan="${tier}" aria-pressed="${pressed}">
+      <span class="s-plan-card__sel" aria-hidden="true">${ICON_CHECK}選択中</span>
       <div class="s-plan-card__head">
         <span class="s-plan-card__icon" aria-hidden="true">${iconSvg}</span>
         <span class="s-plan-card__badge">${escapeHtml(badge)}</span>
@@ -656,9 +685,9 @@ function planCardHtml(tier, iconSvg, badge, title, sub, features) {
 function planCardsHtml() {
   return `
     <div class="s-plan-grid" role="group" aria-label="プランを選ぶ">
-      ${planCardHtml("free", ICON_FLASK, "むりょう", "おためしコース", "まずは無料でお試し",
+      ${planCardHtml("free", ICON_FLASK, "無料", "無料コース", "まずは0円でお試し",
         ["映像: 練習用の仮映像", "声: パソコン内蔵の音声", "料金: ずっと0円"])}
-      ${planCardHtml("paid", ICON_GEM, "本番", "本番コース", "AI映像と自然な声で仕上げる",
+      ${planCardHtml("paid", ICON_GEM, "有料", "有料コース", "実映像と自然な声で本番品質",
         ["映像: AIが生成する本物の映像", "声: 自然なAIナレーション", "料金: コインを消費（下に表示）"])}
     </div>`;
 }
@@ -669,6 +698,7 @@ function renderHome() {
   const chips = ["朝5分のストレッチ習慣", "スマホ副業のはじめかた", "毎日続く片付け術"];
   el.innerHTML = `
     ${topbarHtml()}
+    ${healthBannerHtml()}
     <div class="s-hero">
       <h1>ショート動画を自動作成</h1>
       <p>テーマを入力するだけで、台本と映像をAIが自動生成します。</p>
@@ -702,7 +732,7 @@ function renderHome() {
 
       <div class="s-section-title" style="margin-top:16px;">プランを選ぶ</div>
       ${planCardsHtml()}
-      <div class="s-hint">「むりょう」はずっと0円でお試しできます。「本番」はAIが本物の映像と声を作り、コインを消費します（かかるコイン数は上に表示されます）。</div>
+      <div class="s-hint">「無料」はずっと0円でお試しできます。「有料」はAIが本物の映像と声を作り、コインを消費します（かかるコイン数は上に表示されます）。</div>
 
       ${state.submitError ? `<div class="s-error-banner" role="alert">${escapeHtml(state.submitError.message)}</div>` : ""}
 
@@ -1008,7 +1038,7 @@ function render() {
 // ---------- 初期化（?open=<id> でQA時の状態を固定） ----------
 async function init() {
   render();
-  await Promise.all([loadProjects(), loadAssets()]);
+  await Promise.all([loadProjects(), loadAssets(), loadHealth()]);
 
   const openId = qsParams.get("open");
   if (openId) await openPast(openId);

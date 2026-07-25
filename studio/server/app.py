@@ -400,6 +400,76 @@ async def premiere_export(project_id: str):
 
 
 # ---------------------------------------------------------------------------
+# ヘルスチェック（claude 実疎通 / ffmpeg / ffprobe / yt-dlp）
+# ---------------------------------------------------------------------------
+
+def _resolve_bin(raw, default_name):
+    """config の bin 指定を絶対パスへ解決する（相対パス＋区切り有りは project_root 基準）。"""
+    import os as _os
+    if not raw:
+        return default_name
+    raw = str(raw)
+    if _os.path.sep in raw and not _os.path.isabs(raw):
+        return str(project_root() / raw)
+    return raw
+
+
+def _check_cli(bin_path, version_args, timeout_sec=30):
+    """指定バイナリを --version 系で叩き、疎通可否を返す（{"ok","detail"}）。"""
+    try:
+        proc = subprocess.run(
+            [bin_path] + list(version_args),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_sec,
+        )
+    except FileNotFoundError:
+        return {"ok": False, "detail": "見つかりません: {}".format(bin_path)}
+    except Exception as exc:
+        return {"ok": False, "detail": "起動に失敗: {}".format(str(exc)[:150])}
+    if proc.returncode != 0:
+        return {"ok": False, "detail": "exit {}: {}".format(proc.returncode, proc.stderr.decode("utf-8", "replace")[:150])}
+    first = (proc.stdout.decode("utf-8", "replace").strip().splitlines() or [""])[0]
+    return {"ok": True, "detail": first[:120]}
+
+
+def compute_health(check_claude=True):
+    """claude 実疎通 + ffmpeg/ffprobe/yt-dlp の3点を検査して結果 dict を返す。
+
+    check_claude=False のときは claude 疎通をスキップ（api_error 分類のみ・課金ゼロ）。
+    """
+    cfg = load_config()
+    checks = {}
+    checks["ffmpeg"] = _check_cli(cfg.get("ffmpeg_bin") or "ffmpeg", ["-version"])
+    checks["ffprobe"] = _check_cli(cfg.get("ffprobe_bin") or "ffprobe", ["-version"])
+    ytdlp_bin = _resolve_bin((cfg.get("reference") or {}).get("yt_dlp_bin"), "yt-dlp")
+    checks["yt_dlp"] = _check_cli(ytdlp_bin, ["--version"])
+    if check_claude:
+        try:
+            from pipeline import claude_runner
+            checks["claude"] = claude_runner.probe_claude()
+        except Exception as exc:
+            checks["claude"] = {"ok": False, "detail": "疎通確認に失敗: {}".format(str(exc)[:150])}
+    ok = all(c.get("ok") for c in checks.values())
+    return {"ok": ok, "checks": checks}
+
+
+@app.get("/api/health")
+def health(claude: int = 1):
+    """AI(claude)/ffmpeg/ffprobe/yt-dlp の疎通を検査する。
+
+    `?claude=0` で claude 実疎通をスキップ（軽量チェック・課金ゼロ）。NG時は ok=false。
+
+    ★codex-review P1（2026-07-26）対策: `def`（同期）で宣言する。compute_health() は
+    複数の subprocess（ffmpeg/ffprobe/yt-dlp/claude、claude は最大45秒）を同期に叩くため、
+    `async def` だと Uvicorn のイベントループスレッド上で最大45秒ブロックし、他のAPI/SSE
+    ストリームがフリーズする（依存が落ちているまさにその時にアプリごと固まる）。同期 def
+    にすると Starlette は自動で threadpool へディスパッチする。
+    """
+    result = compute_health(check_claude=bool(claude))
+    status = 200 if result["ok"] else 503
+    return JSONResponse(status_code=status, content=result)
+
+
+# ---------------------------------------------------------------------------
 # ジョブ進捗（SSE）
 # ---------------------------------------------------------------------------
 

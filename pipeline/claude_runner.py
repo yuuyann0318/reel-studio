@@ -13,6 +13,7 @@ modelUsage キーも "claude-opus-4-8" になることを確認済み（自己�
 from __future__ import annotations
 
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -22,6 +23,58 @@ from pipeline.config import load_config
 
 _KILL_GRACE_SEC = 5
 _MODEL_FALLBACK_CHAIN = ["claude-opus-4-8", "claude-fable-5", None]
+
+_LOGGER = logging.getLogger("reel_studio.claude_runner")
+
+# ★入れ子 claude 起動の除染（本丸）:
+# サーバが Claude Code のサブセッション内（env に CLAUDECODE=1 / CLAUDE_CODE_CHILD_SESSION=1 等）
+# で起動されると、そこから `claude -p` を子プロセスとして起こしたとき「子セッションの子セッション」
+# として扱われ、認証/課金コンテキストの引き継ぎに失敗して all_models_failed になりうる。
+# subprocess へ渡す env から「入れ子マーカー」だけを除去し、どの環境から起動されたサーバでも
+# claude CLI を「独立した親セッション」として実行させる（HOME/PATH/認証情報は維持）。
+#
+# ★codex-review P1（2026-07-26）対策: CLAUDE_CODE_* を prefix で一括除去すると
+# CLAUDE_CODE_OAUTH_TOKEN（正規のOAuth認証情報を env で渡す構成）まで消し、
+# 認証成立している環境でも claude 呼び出しが認証エラーで落ちる。
+# 「入れ子セッションを示すマーカーだけを列挙して除去」する allowlist 方式へ変更する
+# （将来 SDK 追加で新しいマーカーが出たら、ここに明示的に追記する）。
+_STRIP_ENV_EXACT = frozenset({
+    "CLAUDECODE",                    # Claude Code CLI が子プロセスに立てる主マーカー
+    "CLAUDE_CODE_CHILD_SESSION",     # 子セッション判定用
+    "CLAUDE_CODE_ENTRYPOINT",        # 起動経路（cli 等）
+    "CLAUDE_CODE_EXECPATH",          # 実行パス（parent claude bin）
+    "CLAUDE_CODE_SESSION_ID",        # 親セッションID
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",  # 子セッションでの負担軽減フラグ
+})
+
+
+def _clean_subprocess_env(base=None):
+    """入れ子セッションマーカー（_STRIP_ENV_EXACT）だけを除いた subprocess 用 env を返す。
+
+    HOME/PATH や CLAUDE_CODE_OAUTH_TOKEN 等の認証情報は必ず維持する。
+    """
+    src = os.environ if base is None else base
+    cleaned = {}
+    for k, v in src.items():
+        if k in _STRIP_ENV_EXACT:
+            continue
+        cleaned[k] = v
+    return cleaned
+
+
+def _classify_failure(returncode, stdout, stderr):
+    """claude CLI 失敗を種別分類し、(category, brief) を返す。ログ/report 記録用。
+
+    category: "not_found" | "auth" | "rate_limit" | "timeout" | "unknown"
+    """
+    text = "{}\n{}".format(stderr or "", stdout or "").lower()
+    if returncode == 127 or "command not found" in text or "no such file" in text:
+        return "not_found", "claude CLI が見つかりません（インストール/パスを確認してください）"
+    if "401" in text or "unauthorized" in text or "not logged in" in text or "authentication" in text or "please run" in text and "login" in text:
+        return "auth", "claude の認証に失敗しました（`claude login` が必要な可能性があります）"
+    if "429" in text or "rate limit" in text or "overloaded" in text or "usage limit" in text:
+        return "rate_limit", "claude の利用上限/混雑により失敗しました（時間をおいて再試行してください）"
+    return "unknown", _brief_failure_reason(stdout, stderr)
 
 
 def _kill_tree(proc):
@@ -77,14 +130,21 @@ def _run_claude(
         text=True,
         shell=False,
         start_new_session=True,
+        env=_clean_subprocess_env(),
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout_sec)
     except subprocess.TimeoutExpired:
         _kill_tree(proc)
+        _LOGGER.warning("claude timeout: model=%s timeout=%ss", model, timeout_sec)
         raise RuntimeError("claude実行タイムアウト(%s秒超過)" % timeout_sec)
     if proc.returncode != 0:
-        raise RuntimeError("claude実行エラー(exit %s): %s" % (proc.returncode, _brief_failure_reason(stdout, stderr)))
+        category, brief = _classify_failure(proc.returncode, stdout, stderr)
+        _LOGGER.warning(
+            "claude failed: model=%s exit=%s category=%s detail=%s",
+            model, proc.returncode, category, brief,
+        )
+        raise RuntimeError("claude実行エラー(exit %s/%s): %s" % (proc.returncode, category, brief))
     return stdout
 
 
@@ -168,6 +228,33 @@ def _chain_for(cfg: dict):
         if m not in chain:
             chain.append(m)
     return chain
+
+
+def probe_claude(timeout_sec: int = 45) -> dict:
+    """claude CLI の実疎通を最小プロンプトで確認する（/api/health 用・除染 env で実行）。
+
+    Returns: {"ok": bool, "detail": str, "category": str|None, "model_used": str|None}
+    課金は極小（1トークン応答）。失敗種別は _classify_failure で分類する。
+    """
+    cfg = load_config()
+    claude_bin = cfg.get("claude_bin") or "claude"
+    model = _chain_for(cfg)[0] if _chain_for(cfg) else None
+    try:
+        stdout = _run_claude(claude_bin, "OK とだけ答えてください。", model, timeout_sec)
+    except Exception as exc:
+        return {"ok": False, "detail": str(exc)[:300], "category": "unreachable", "model_used": None}
+    inner, err = _extract_inner(stdout)
+    if inner is None:
+        # 本文が非JSONでも envelope が正常なら疎通自体は成立（分類だけ返す）。
+        try:
+            outer = json.loads((stdout or "").strip())
+            if isinstance(outer, dict) and outer.get("is_error") is False:
+                return {"ok": True, "detail": "ok", "category": None,
+                        "model_used": _actual_model_from_envelope(stdout, model)}
+        except Exception:
+            pass
+        return {"ok": False, "detail": err or "応答を解釈できませんでした", "category": "bad_response", "model_used": None}
+    return {"ok": True, "detail": "ok", "category": None, "model_used": _actual_model_from_envelope(stdout, model)}
 
 
 def call_claude_json(prompt: str, timeout_sec: int = 600, model_override: "Optional[str]" = None) -> dict:

@@ -809,16 +809,42 @@ def classify_product_images(image_paths, vision_call=_VISION_DEFAULT, timeout_se
     vision_results = _classify_via_vision(vision_paths, vision_call=vision_call, timeout_sec=timeout_sec)
     vision_by_path = {r["path"]: r for r in vision_results}
 
+    # ★2026-07-25 堅牢化（診断B/C）: 決定論プレフィルタの色計測が失敗（stats=None＝ffmpeg計測
+    # 不能）した画像は「単色/グラデ装飾背景かどうかを機械判定できていない」状態にある。
+    # この状態でさらに vision も失敗（vision_failed / vision_unavailable / 応答漏れ）すると、
+    # 従来は縮退＝全採用となり、ピンク装飾背景が素通りしてサムネに載る実害があった
+    # （計測が落ちるとvision_failed全採用でピンクが素通り）。両方の分類手段が失敗した画像は
+    # 「誤った画像を使うより、商品画像を使わない方が安全」（参考ベース設計とも整合）へ縮退し、
+    # 採用しない。片方でも成功していれば（vision が product と判定 等）その判断を尊重する。
+    # 「計測失敗」は、決定論プレフィルタが実際に走って color stats が取れなかった
+    # （stats=None＝ffmpeg計測不能）画像だけを指す。prefilter_enabled=False や
+    # プレフィルタ自体が例外で丸ごと落ちた場合（prefilter_map にエントリが無い）は
+    # 「計測を試みていない」ため計測失敗とはみなさない（過剰な不採用縮退を避ける）。
+    measure_failed = {
+        p for p in vision_paths
+        if p in prefilter_map and prefilter_map[p].get("stats") is None
+    }
+    _VISION_DEGRADED_REASONS = {
+        "vision_failed", "vision_unavailable", "vision_missing", "vision_missing_index",
+    }
+
     # 入力順に、前段除外分と vision 分類分をマージして返す。
     merged = []
     for p in paths:
         if p in excluded_entries:
             merged.append(excluded_entries[p])
-        else:
-            merged.append(vision_by_path.get(p) or {
-                "path": p, "category": "product_solo", "sharpness": "high",
-                "dominant_colors": [], "adopted": True, "reason": "vision_missing",
-            })
+            continue
+        entry = vision_by_path.get(p) or {
+            "path": p, "category": "product_solo", "sharpness": "high",
+            "dominant_colors": [], "adopted": True, "reason": "vision_missing",
+        }
+        # 計測失敗 かつ vision も縮退（判定不能）のときだけ、安全側に不採用へ倒す。
+        if entry.get("adopted") and entry.get("reason") in _VISION_DEGRADED_REASONS and p in measure_failed:
+            entry = dict(
+                entry, adopted=False,
+                reason="unclassified_prefilter_and_vision_failed",
+            )
+        merged.append(entry)
     return merged
 
 

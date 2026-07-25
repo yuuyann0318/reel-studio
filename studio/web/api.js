@@ -129,6 +129,20 @@ export const api = {
     return request("/api/assets/sfx");
   },
 
+  // AI(claude)/ffmpeg/ffprobe/yt-dlp の疎通確認。NG時も例外にせず {ok:false,...} を返す。
+  // MOCK モードでは疎通は常にOK扱い（外部CLIを一切使わないため）。
+  async health({ claude = 1 } = {}) {
+    if (MOCK) return { ok: true, checks: {} };
+    try {
+      const res = await fetch(`/api/health?claude=${claude ? 1 : 0}`);
+      const payload = await res.json().catch(() => null);
+      if (payload && typeof payload.ok === "boolean") return payload;
+      return { ok: false, checks: {}, error: "health応答を解釈できませんでした" };
+    } catch (e) {
+      return { ok: false, checks: {}, error: "サーバーに接続できません" };
+    }
+  },
+
   // SSE 購読。 handlers: { onMessage(data), onDone(data), onError(err) }
   // 戻り値: 購読解除関数
   subscribeJobEvents(jobId, handlers) {

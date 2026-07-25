@@ -239,7 +239,7 @@ export async function createProject({ theme, duration, backend, style, planTier 
 
 // サーバ pipeline/plan_tier.estimate_coins と同じ概算（mock: 0円保証の再現）。
 function estimateCoins(planTier, duration) {
-  if (planTier !== "paid") return { plan_tier: "free", coins: 0, approximate: false, note: "むりょうコースは0円です" };
+  if (planTier !== "paid") return { plan_tier: "free", coins: 0, approximate: false, note: "無料コースは0円です" };
   const perShot = 10;
   const shotCount = Math.max(3, Math.min(14, Math.round((Number(duration) || 30) / 4)));
   const coins = shotCount * perShot;

@@ -610,6 +610,18 @@ class JobManager:
                             ", ".join(sorted(str(r) for r in degraded_reasons if r))
                         )
                     )
+                # 計測(ffmpeg)とvisionの両方が失敗し、安全側に不採用へ倒した画像がある場合は
+                # 「誤画像を避けるため商品画像を使わない」ことをユーザーに明示する（診断B/C）。
+                unclassified = [
+                    e for e in manifest_entries
+                    if e.get("reason") == "unclassified_prefilter_and_vision_failed"
+                ]
+                if unclassified:
+                    classify_warnings.append(
+                        "商品画像を分類できなかったため（{}枚）、その画像は使わずに生成します".format(
+                            len(unclassified)
+                        )
+                    )
             classify_warnings = product_images.save_product_manifest(
                 projects.product_dir(project_id), manifest_entries, warnings=classify_warnings,
             )
@@ -1543,7 +1555,13 @@ def _render_project(project_id, plan, cfg):
 
     enabled_shots = sorted([s for s in plan["shots"] if s.get("enabled", True)], key=lambda s: s["order"])
     if not enabled_shots:
-        raise RuntimeError("有効なショットが1つもありません（すべてenabled=falseです）")
+        # ここに来る主因は「台本づくり（参考動画の解析/企画生成）が途中で失敗し、
+        # ショットが1つも作られていない」ケース（＝空plan）。かつては「すべてenabled=false」
+        # という誤解を招く文言だったため、実態に合わせて言い換える。
+        total_shots = len((plan or {}).get("shots") or [])
+        if total_shots == 0:
+            raise RuntimeError("ショットがありません（動画の作成が途中で失敗しています）。最初からやり直してください")
+        raise RuntimeError("すべてのシーンがオフになっています。1つ以上のシーンをオンにしてから仕上げてください")
 
     project_snapshot = projects.get_project(project_id)
     narration_segments_map = (project_snapshot or {}).get("narration_segments") or {}

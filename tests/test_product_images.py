@@ -609,11 +609,20 @@ def test_classify_product_images_categorizes_and_filters_low_or_logo():
     assert entries[4]["reason"] == "low_sharpness"
 
 
+# 決定論プレフィルタの色計測が「成功（＝単色/グラデではない実商品）」した状態を模擬する注入。
+# vision 縮退フォールバックを単独で検証するため、計測は健全（distinct 多・top1 低）にしておく
+# （計測失敗 + vision 失敗の二重失敗＝不採用縮退、は別テストで検証する）。
+_HEALTHY_STATS = {"pixels": 4096, "distinct": 40, "top1": 0.30, "top3": 0.6}
+_HEALTHY_STATS_FN = lambda p: dict(_HEALTHY_STATS)
+_HEALTHY_DIMS_FN = lambda p: (1080, 1080)
+
+
 def test_classify_product_images_falls_back_when_vision_unavailable():
     """vision_call=None（実行不能環境）でも例外を出さず、全採用 + reason=vision_unavailable
-    で返す（縮退動作。パイプライン全体は必ず完成する既存設計を踏襲）。"""
+    で返す（縮退動作。パイプライン全体は必ず完成する既存設計を踏襲）。計測は健全とする。"""
     paths = ["/tmp/a.jpg", "/tmp/b.jpg"]
-    entries = product_images.classify_product_images(paths, vision_call=None)
+    entries = product_images.classify_product_images(
+        paths, vision_call=None, color_stats_fn=_HEALTHY_STATS_FN, dims_fn=_HEALTHY_DIMS_FN)
     assert all(e["adopted"] for e in entries)
     assert all(e["reason"] == "vision_unavailable" for e in entries)
 
@@ -621,7 +630,8 @@ def test_classify_product_images_falls_back_when_vision_unavailable():
 def test_classify_product_images_falls_back_when_vision_call_raises():
     def _boom(prompt, paths, timeout_sec=600):
         raise RuntimeError("network broken")
-    entries = product_images.classify_product_images(["/tmp/a.jpg"], vision_call=_boom)
+    entries = product_images.classify_product_images(
+        ["/tmp/a.jpg"], vision_call=_boom, color_stats_fn=_HEALTHY_STATS_FN, dims_fn=_HEALTHY_DIMS_FN)
     assert entries[0]["adopted"] is True
     assert entries[0]["reason"] == "vision_failed"
 
@@ -633,7 +643,9 @@ def test_classify_product_images_handles_missing_indexes_gracefully():
             {"index": 1, "category": "product_solo", "sharpness": "high", "dominant_colors": []},
             # index 2 の応答が欠落
         ]}
-    entries = product_images.classify_product_images(["/tmp/a.jpg", "/tmp/b.jpg"], vision_call=_partial)
+    entries = product_images.classify_product_images(
+        ["/tmp/a.jpg", "/tmp/b.jpg"], vision_call=_partial,
+        color_stats_fn=_HEALTHY_STATS_FN, dims_fn=_HEALTHY_DIMS_FN)
     assert entries[0]["adopted"] is True and entries[0]["reason"] is None
     assert entries[1]["adopted"] is True and entries[1]["reason"] == "vision_missing_index"
 
