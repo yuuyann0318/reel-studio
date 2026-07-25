@@ -497,6 +497,16 @@ def validate_plan(plan, target_duration_sec=None, target_tolerance_sec=8.0):
         normalized_plan["hook_end_shot_id"] = hook_end_shot_id
     if cta_start_shot_id is not None:
         normalized_plan["cta_start_shot_id"] = cta_start_shot_id
+
+    # TTPS/ステマ規制対応: 動画冒頭〜全編に表示する PR 表記（"#PR" 等）。
+    # 任意フィールド。指定があれば非空文字列である必要がある（Noneや空は付与なしと同義）。
+    pr_disclosure = plan.get("pr_disclosure")
+    if pr_disclosure is not None:
+        if not isinstance(pr_disclosure, str) or not pr_disclosure.strip():
+            # 空・非文字列は静かに落とす（後方互換: 既存 plan が"" を渡しても壊れない）。
+            pr_disclosure = None
+        else:
+            normalized_plan["pr_disclosure"] = pr_disclosure.strip()
     return True, [], normalized_plan
 
 

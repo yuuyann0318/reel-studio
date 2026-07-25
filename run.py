@@ -470,6 +470,17 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 backend=backend_name,
             )
             (run_dir / "plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            # TTPS モードなら台本レポート(Markdown)も同時保存する。
+            # 生成は純関数（LLM 呼び出しなし）。抽象化ラダー等の LLM 節はスケルトンで空欄。
+            try:
+                if compliance.is_ttps_mode(cfg, plan=plan):
+                    report_md = director.build_ttps_script_report(
+                        plan, reference_spec=reference_spec, cfg=cfg,
+                    )
+                    (run_dir / "ttps_script_report.md").write_text(report_md, encoding="utf-8")
+                    report["stages"]["director"]["ttps_script_report"] = str(run_dir / "ttps_script_report.md")
+            except Exception as _e:  # レポート失敗は本流を止めない
+                report["stages"]["director"]["ttps_report_error"] = str(_e)[:300]
             report["stages"]["director"]["source"] = plan.get("meta", {}).get("source")
             report["stages"]["director"]["model_used"] = plan.get("meta", {}).get("model_used")
             report["stages"]["director"]["quality"] = plan.get("meta", {}).get("quality")
@@ -495,7 +506,13 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     try:
         with _timed_stage(report, "compliance"):
             ng_words = resolve_ng_words(cfg)
-            check = compliance.check_plan(plan, ng_words=ng_words)
+            ng_patterns = None
+            # TTPS モードでは薬機法 / 景表法の追加 NG語と正規表現も足して検査する。
+            if compliance.is_ttps_mode(cfg, plan=plan):
+                ng_words = compliance.build_ttps_ng_words(base_ng_words=ng_words)
+                ng_patterns = compliance.build_ttps_ng_patterns()
+                report["stages"]["compliance"]["ttps_mode"] = True
+            check = compliance.check_plan(plan, ng_words=ng_words, ng_patterns=ng_patterns)
             (run_dir / "compliance_report.json").write_text(
                 json.dumps(check, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -671,6 +688,33 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 _scale_shot_for_display(s, shot_display_durations.get(s["id"], s["duration_sec"])) for s in shots
             ]
             telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=hook_shot_id)
+            # TTPS モード: #PR テロップ全編表示 & 効果言及shotへの「※効果には個人差があります」自動注記。
+            # 有効判定は cfg.ttps.enabled / plan.pr_disclosure / plan.meta.product のいずれか
+            # （compliance.is_ttps_mode で集約）。無効時は追加pieceなし＝完全後方互換。
+            ttps_enabled = compliance.is_ttps_mode(cfg, plan=plan)
+            pr_text = plan.get("pr_disclosure")
+            pr_cfg = ((cfg or {}).get("compliance") or {}).get("pr_disclosure") or {}
+            if pr_text is None and ttps_enabled and pr_cfg.get("enabled", True):
+                pr_text = pr_cfg.get("text") or compliance.PR_DISCLOSURE_DEFAULT
+            if pr_text:
+                total_dur = sum(
+                    float(shot_display_durations.get(s["id"], s["duration_sec"]) or 0.0)
+                    for s in shots
+                )
+                pr_piece = subtitles.build_pr_disclosure_piece(total_dur, pr_text=pr_text)
+                if pr_piece:
+                    telop_pieces.append(pr_piece)
+                    report["stages"]["subtitles"]["pr_disclosure"] = pr_text
+            # 効果言及shotへの注記（TTPSモード＋自動注記が config で ON のときのみ）。
+            variance_cfg = ((cfg or {}).get("compliance") or {}).get("variance_note") or {}
+            if ttps_enabled and variance_cfg.get("enabled", True):
+                hit_ids = compliance.detect_effect_mention_shot_ids(plan)
+                if hit_ids:
+                    note_pieces = subtitles.build_variance_note_pieces_for_shots(
+                        telop_shots, hit_ids, note_text=variance_cfg.get("text"),
+                    )
+                    telop_pieces.extend(note_pieces)
+                    report["stages"]["subtitles"]["variance_note_shots"] = hit_ids
             # 動画ごとに決定論的にテロップスタイルを1つ選ぶ（run_idをseedにするので同じ動画は同じスタイル）。
             # CLI経路は現状 vertical_hook プリセットの指定手段がないため preset は None で
             # horizontal_pool(7スタイル)から乱択する。

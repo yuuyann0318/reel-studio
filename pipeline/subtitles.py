@@ -1339,6 +1339,102 @@ def hint_font_px(hint, base_font_px):
     return max(48, int(round(float(base_font_px) * float(scale))))
 
 
+# ---------------------------------------------------------------------------
+# TTPS: ステマ規制(#PR)テロップと「※効果には個人差があります」注記
+#
+# 目的: 美容アフィリ(TTPS)モードでは、動画冒頭〜全編にわたって #PR 等の PR 表記を
+# 小さく常時表示する（景表法/ステマ規制対応）。加えて、compliance.py が「効果に
+# 触れているshot」として検知したshotに対して「※効果には個人差があります」を小さく
+# 添える。ここは "telop piece" の追加だけを行うヘルパ群で、既存の generate_ass /
+# generate_ass_with_style のシグネチャは変えない（呼び出し側で pieces に concat する）。
+# ---------------------------------------------------------------------------
+
+# #PR テロップの位置・サイズ既定（PlayRes 1080x1920 基準）。
+# top-right のセーフゾーン内に小さく置く。右列ボタン群と被らないよう左に寄せる。
+PR_DISCLOSURE_ALIGNMENT = 9  # top-right (\an9)
+PR_DISCLOSURE_FONT_PX = 44
+PR_DISCLOSURE_POS_X = 980
+PR_DISCLOSURE_POS_Y = 120
+
+# 「※効果には個人差があります」注記のフォントサイズ既定。
+VARIANCE_NOTE_FONT_PX = 40
+
+
+def build_pr_disclosure_piece(total_duration_sec, pr_text=None):
+    """動画全編に表示する PR 表記 telop piece を1つ返す（表示できない/pr_text 未指定なら None）。
+
+    ヘルパは単一 piece を返す（呼び出し側で他 pieces に append する）。
+    piece.telop_style_hint に position="top" を入れて build_hint_override_prefix で
+    右上寄せ + font_px_override で小さく描画される。
+    """
+    if pr_text is None or not str(pr_text).strip():
+        return None
+    if not total_duration_sec or float(total_duration_sec) <= 0:
+        return None
+    text = str(pr_text).strip()
+    return {
+        "out_start": 0.0,
+        "out_end": float(total_duration_sec),
+        "lines": [text],
+        "emphasis": [],
+        "style": "base",
+        "caption": text,
+        "font_px_override": PR_DISCLOSURE_FONT_PX,
+        # position=top で右上寄せ、color=white で白ベース（描画側で hint_override_prefix
+        # が \an と \c を発行する）。
+        "telop_style_hint": {"position": "top", "color": "white"},
+        # 明示的な _kind タグ（下流のフィルタ／診断用途。既存経路は無視して問題ない）。
+        "_kind": "pr_disclosure",
+    }
+
+
+def build_variance_note_pieces_for_shots(shots, hit_shot_ids, note_text=None):
+    """compliance.detect_effect_mention_shot_ids() の結果に基づき、該当shotに
+    「※効果には個人差があります」注記の telop piece を追加で組み立てる。
+
+    各shotの表示区間（cursor 積算）末尾 1.2秒（min: shot全域）に小さく載せる。
+    既存の caption と競合しないよう position="top" を既定にする（画面上部）。
+    hit_shot_ids が空なら空リストを返す（呼び出し側で pieces に concat）。
+    """
+    if not hit_shot_ids or not shots:
+        return []
+    text = (note_text or "").strip()
+    if not text:
+        # 遅延インポートで循環参照を避ける
+        from pipeline import compliance as _cmp
+        text = _cmp.INDIVIDUAL_VARIANCE_NOTE
+    hit_set = set(hit_shot_ids)
+    pieces = []
+    cursor = 0.0
+    for shot in shots:
+        dur = float(shot.get("duration_sec") or 0.0)
+        shot_start = cursor
+        shot_end = cursor + dur
+        cursor = shot_end
+        if shot.get("id") not in hit_set:
+            continue
+        # 表示区間: 末尾1.2秒（shot尺が短ければ全域を使う）。
+        note_dur = min(1.2, dur)
+        note_start = max(shot_start, shot_end - note_dur)
+        pieces.append({
+            "out_start": note_start,
+            "out_end": shot_end,
+            "lines": [text],
+            "emphasis": [],
+            "style": "base",
+            "caption": text,
+            "font_px_override": VARIANCE_NOTE_FONT_PX,
+            # codex-review P1 対応: PR piece が position="top"(\an8) を占めるため、
+            # 効果言及shotの最終1.2秒に PR とこの注記が同じ位置で重なって読めなくなる。
+            # 変則的だが「画面中央 (\an5)」に置いて PR(上) / メイン(下) / 注記(中央) を
+            # 3層に分離する。中央は視聴中に一瞬だけ載る補足として自然な位置。
+            "telop_style_hint": {"position": "middle", "color": "white"},
+            "_kind": "variance_note",
+            "_shot_id": shot.get("id"),
+        })
+    return pieces
+
+
 def build_telop_pieces_from_shots(shots, hook_shot_id=None):
     """shots（各ショットにduration_sec/caption_jpを持つ）から、ショット表示区間に
     同期したtelop断片列を組み立てる。

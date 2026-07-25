@@ -97,6 +97,48 @@ BEAUTY_YAKKIHO_NG_PATTERNS = [
     r"(必ず|絶対|100%)(痩せ|効く|治る|若返る)",
 ]
 
+# 景表法(優良誤認・誇大広告)の断定・最上級ワード。
+# TTPS 台本モード（美容アフィリ）で ng_words へ合成して使う。DEFAULT_NG_WORDS には
+# 混ぜない（既定モードの挙動を不変に保つ設計方針を BEAUTY_YAKKIHO_NG_WORDS と揃える）。
+# 単独語では誤爆しやすいため、断定を強める文脈語との複合形で持つ。
+BEAUTY_KEIHYO_NG_WORDS = [
+    "絶対に効く",
+    "絶対効く",
+    "必ず効く",
+    "必ず結果が出る",
+    "100%効く",
+    "100％効く",
+    "誰でも痩せる",
+    "誰でも綺麗になる",
+    "即効で",
+    "永久に",
+    "業界No.1",
+    "業界最高",
+]
+
+# 景表法の断定・最上級を広く拾う正規表現。
+# 「必ず」「絶対」「100%」等の単独出現も検査に含める（美容アフィリではこれらの
+# 単独語がそのまま断定効果訴求として機能してしまうため）。
+BEAUTY_KEIHYO_NG_PATTERNS = [
+    r"(必ず|絶対|100[%％])(効く|治る|痩せ|若返|消え|なくな|きれい|綺麗)",
+    r"(即効|即効性|永久に|一瞬で)(効く|治る|痩せ|美白|美肌|若返)",
+    r"業界(No\.?\s*1|最高|最強|唯一)",
+]
+
+# 「効果に触れているshot」を検知するためのパターン。
+# ヒットしたshotには「※効果には個人差があります」等の注記を自動付与すべき、と
+# 判断する材料になる（判定は detect_effect_mention_shot_ids() で行う）。
+EFFECT_MENTION_PATTERNS = [
+    r"(効果|効いた|効き|変化|結果|実感|改善|マシに|楽に|軽く)",
+    r"[0-9０-９]+(日|日目|日間|週間|ヶ月|か月)で",
+    r"(痩せ|美白|美肌|ハリ|ツヤ|うるおい|保湿|引き締|くすみ抜け)",
+    r"(ビフォー|アフター|before|after)",
+]
+
+# TTPS モードで注記に使う定型文（テロップ / ナレーション両方に流用）。
+INDIVIDUAL_VARIANCE_NOTE = "※効果には個人差があります"
+PR_DISCLOSURE_DEFAULT = "#PR"
+
 
 def _collect_texts(plan):
     """plan中の検査対象テキスト一覧を返す（フィールド名付き）。"""
@@ -166,3 +208,104 @@ def check_plan(plan, ng_words=None, ng_patterns=None):
         )
 
     return {"ok": len(violations) == 0, "violations": violations, "warnings": warnings}
+
+
+# ---------------------------------------------------------------------------
+# TTPS モード（美容アフィリ台本）向けヘルパー
+# ---------------------------------------------------------------------------
+
+def build_ttps_ng_words(base_ng_words=None):
+    """TTPS モード用に、既定NG語 + 薬機法NG語 + 景表法NG語をマージした語リストを返す。
+
+    base_ng_words を渡した場合はそれをベースにする（呼び出し側が resolve_ng_words()
+    で得た「config.local + ローカル辞書」も含めた集合をそのまま拡張したい場面向け）。
+    None の場合は get_effective_ng_words() を起点にする（DEFAULT_NG_WORDS + ローカル辞書）。
+    重複は取り除く（順序は先勝ちで保持）。
+    """
+    base = list(base_ng_words) if base_ng_words is not None else list(get_effective_ng_words())
+    merged = list(base)
+    for w in list(BEAUTY_YAKKIHO_NG_WORDS) + list(BEAUTY_KEIHYO_NG_WORDS):
+        if w and w not in merged:
+            merged.append(w)
+    return merged
+
+
+def build_ttps_ng_patterns():
+    """TTPS モード用の正規表現パターン列を返す。
+
+    美容薬機法 + 景表法 の両パターンをまとめる。呼び出し側は check_plan() の
+    ng_patterns 引数へそのまま渡す。
+    """
+    return list(BEAUTY_YAKKIHO_NG_PATTERNS) + list(BEAUTY_KEIHYO_NG_PATTERNS)
+
+
+def detect_effect_mention_shot_ids(plan):
+    """plan.shots のうち「効果・変化・数字・ビフォーアフター」に触れているshot idを返す。
+
+    caption_jp / narration_jp / captions[].text を対象に EFFECT_MENTION_PATTERNS で
+    走査する。ヒットしたshotには pipeline 側で「※効果には個人差があります」テロップを
+    自動付与するための材料になる（このモジュールは検知のみ・付与は subtitles / run 側）。
+
+    Returns: List[str] — 検知した shot id のリスト（plan.shots 順・重複除去）。
+    """
+    if not isinstance(plan, dict):
+        return []
+    shots = plan.get("shots") or []
+    compiled = [re.compile(p) for p in EFFECT_MENTION_PATTERNS]
+    hit_ids = []
+    seen = set()
+    for shot in shots:
+        if not isinstance(shot, dict):
+            continue
+        sid = shot.get("id")
+        if not sid or sid in seen:
+            continue
+        texts = []
+        if isinstance(shot.get("caption_jp"), str):
+            texts.append(shot["caption_jp"])
+        if isinstance(shot.get("narration_jp"), str):
+            texts.append(shot["narration_jp"])
+        for cap in shot.get("captions") or []:
+            if isinstance(cap, dict):
+                for k in ("text", "caption_jp"):
+                    v = cap.get(k)
+                    if isinstance(v, str):
+                        texts.append(v)
+        joined = "\n".join(texts)
+        if not joined:
+            continue
+        for pat in compiled:
+            if pat.search(joined):
+                hit_ids.append(sid)
+                seen.add(sid)
+                break
+    return hit_ids
+
+
+def is_ttps_mode(cfg, plan=None, product=None):
+    """設定・plan・productから、TTPS美容アフィリ台本モードとして扱うべきかを判定する。
+
+    優先順位:
+      1. cfg.ttps.enabled が明示的に True/False なら従う。
+      2. product 情報（{"name":..., "url":...} 等）が非空なら True。
+      3. plan.meta.product が非空文字列なら True。
+      4. それ以外は False。
+
+    呼び出し側は director / run から判定して、compliance の NG語辞書切り替えや
+    TTPS プロンプト注入・ #PR テロップ自動付与の on/off を決める。
+    """
+    ttps_cfg = (cfg or {}).get("ttps") if isinstance(cfg, dict) else None
+    if isinstance(ttps_cfg, dict) and ttps_cfg.get("enabled") is not None:
+        return bool(ttps_cfg["enabled"])
+    if product:
+        # dict でも str でも「非空」なら product 指定ありとみなす
+        if isinstance(product, dict) and any(product.values()):
+            return True
+        if isinstance(product, str) and product.strip():
+            return True
+    if isinstance(plan, dict):
+        meta = plan.get("meta") or {}
+        p = meta.get("product")
+        if isinstance(p, str) and p.strip():
+            return True
+    return False

@@ -171,6 +171,20 @@ _ANGLES_PROMPT_FILE = "angles_prompt.txt"
 _CRITIQUE_PROMPT_FILE = "critique_prompt.txt"
 _PRODUCT_BLOCK_PROMPT_FILE = "product_block.txt"
 _REFERENCE_TTP_BLOCK_PROMPT_FILE = "reference_ttp_block.txt"
+_TTPS_SCRIPT_PROMPT_FILE = "ttps_script_prompt.txt"
+
+# TTPS 変数のデフォルト（ユーザー原文相当のペルソナ例）。
+# config.ttps.persona で上書き可能。
+_TTPS_DEFAULT_PERSONA = (
+    "28歳・会社員(事務)・一人暮らし・美容予算は月1万円前後。\n"
+    "毛穴/くすみ/乾燥に長年悩み、ドラッグストアとデパコスの間で迷子。\n"
+    "SNSの\"盛れすぎ広告\"に疲れており、「本音レビュー」と「自分と同じ肌悩みの人」だけを信頼する。\n"
+    "高い物より「コスパ×実感×続けやすさ」を重視。飽き性で三日坊主気味。\n"
+    "視聴文脈=寝る前のベッド/通勤中/昼休み/お風呂上がりのスキマ\n"
+    " → 最初の1〜2秒で「これ私のことだ」と刺す強烈フック必須。"
+)
+_TTPS_REFERENCE_TRANSCRIPT_MAX_CHARS = 1200
+_TTPS_REFERENCE_STRUCTURE_MAX_SHOTS = 12
 
 _VERTICAL_HOOK_STYLE_NOTE = "テロップは縦書き・高速カット(1カット約2秒)で見せるスタイル"
 
@@ -1206,6 +1220,97 @@ def _build_reference_block(skeleton, target_duration_sec):
     return "\n" + body
 
 
+def _build_ttps_block(cfg, product, reference_spec, skeleton):
+    """TTPS(美容アフィリ・徹底的にパクって進化) の台本強化ブロックを組み立てる。
+
+    構成: `pipeline/prompts/ttps_script_prompt.txt` テンプレートに以下の変数を差し替える。
+      - {PERSONA}             : cfg.ttps.persona があればそれ、無ければユーザー原文の既定例
+      - {PRODUCT_INFO}        : product dict を「name / url / image_count」で日本語整形
+      - {REFERENCE_TRANSCRIPT}: reference_spec.transcript を先頭 N 字にトリム（丸ごとは載せない）
+      - {REFERENCE_STRUCTURE} : skeleton の shots 概要（id / duration / caption_in_offset / hint）
+
+    骨（構成・尺・タイミング）は既に上位ブロック(REFERENCE_TTP_BLOCK)で固定されており、
+    TTPS ブロックは「文言・口調・訴求の質」を上げる下位ブロックとして機能する。
+    無効なとき（TTPSモード判定 False）は空文字を返す（reference_block の末尾に concat される想定）。
+    """
+    try:
+        from pipeline import compliance as _cmp
+    except Exception:
+        return ""
+    if not _cmp.is_ttps_mode(cfg, product=product):
+        return ""
+
+    ttps_cfg = (cfg or {}).get("ttps") if isinstance(cfg, dict) else None
+    persona = None
+    if isinstance(ttps_cfg, dict):
+        p = ttps_cfg.get("persona")
+        if isinstance(p, str) and p.strip():
+            persona = p.strip()
+    if not persona:
+        persona = _TTPS_DEFAULT_PERSONA
+
+    # 商品情報の整形（未指定なら「(未指定)」で明示）。
+    product_lines = []
+    if isinstance(product, dict):
+        name = (product.get("name") or "").strip()
+        url = (product.get("url") or "").strip()
+        ic = product.get("image_count")
+        if name:
+            product_lines.append("商品名: {}".format(name))
+        if url:
+            product_lines.append("URL: {}".format(url))
+        if isinstance(ic, (int, float)) and ic > 0:
+            product_lines.append("参考画像枚数: {}".format(int(ic)))
+    elif isinstance(product, str) and product.strip():
+        product_lines.append("商品: {}".format(product.strip()))
+    if not product_lines:
+        product_lines.append("(未指定 - config/CLIから product 情報が渡されていません)")
+    product_info = "\n".join(product_lines)
+
+    # 参考文字起こし（長すぎるとコストが跳ねるため頭を切り出す）。
+    transcript = ""
+    if isinstance(reference_spec, dict):
+        t = reference_spec.get("transcript")
+        if isinstance(t, str) and t.strip():
+            transcript = t.strip()
+            if len(transcript) > _TTPS_REFERENCE_TRANSCRIPT_MAX_CHARS:
+                transcript = transcript[:_TTPS_REFERENCE_TRANSCRIPT_MAX_CHARS] + "\n…(省略)"
+    if not transcript:
+        transcript = "(参考動画の文字起こしが取得できていません)"
+
+    # スケルトン構造の要約（先頭 N shot まで。JSON全部は載せない）。
+    structure_lines = []
+    if isinstance(skeleton, dict):
+        shots = skeleton.get("shots") or []
+        for i, s in enumerate(shots[:_TTPS_REFERENCE_STRUCTURE_MAX_SHOTS]):
+            hint = (s.get("telop_style_hint") or {}) if isinstance(s.get("telop_style_hint"), dict) else {}
+            pos = hint.get("position") or "-"
+            col = hint.get("color") or "-"
+            cin = s.get("caption_in_offset_sec")
+            cin_str = "{:.2f}s".format(float(cin)) if isinstance(cin, (int, float)) else "-"
+            structure_lines.append(
+                "- {}: dur={:.2f}s caption_in={} telop_pos={} color={}".format(
+                    s.get("id"), float(s.get("duration_sec") or 0.0), cin_str, pos, col,
+                )
+            )
+        remaining = len(shots) - _TTPS_REFERENCE_STRUCTURE_MAX_SHOTS
+        if remaining > 0:
+            structure_lines.append("- …他 {} shot（骨は上部 REFERENCE_TTP_BLOCK のスケルトンJSONに完全掲載）".format(remaining))
+    if not structure_lines:
+        structure_lines.append("(スケルトンが空です)")
+    reference_structure = "\n".join(structure_lines)
+
+    template = _load_prompt(_TTPS_SCRIPT_PROMPT_FILE)
+    body = (
+        template.replace("{PERSONA}", persona)
+        .replace("{PRODUCT_INFO}", product_info)
+        .replace("{REFERENCE_TRANSCRIPT}", transcript)
+        .replace("{REFERENCE_STRUCTURE}", reference_structure)
+    )
+    # reference_block の末尾に concat される前提で、境界に空行を1つ入れる。
+    return "\n\n" + body
+
+
 def _build_product_block(product):
     if not product:
         return ""
@@ -1766,6 +1871,14 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     if quality_directive:
         reference_block = reference_block + "\n\n# 品質最優先の追加指示（F12: supreme_plus）\n" + quality_directive + "\n"
 
+    # TTPS(美容アフィリ・徹底的にパクって進化) 台本強化ブロック。
+    # 骨はスケルトンで固定されており TTPS は文言のみ担当（下位ブロック）。
+    # 有効判定は pipeline.compliance.is_ttps_mode(cfg, product) が行う（cfg.ttps.enabled
+    # か product 指定があれば有効）。有効時のみ reference_block の末尾に concat する。
+    ttps_block = _build_ttps_block(config, product, reference, skeleton)
+    if ttps_block:
+        reference_block = reference_block + ttps_block
+
     stages = {}
     # TTP モードでは angles(切り口3案生成)はスキップ（切り口=参考動画の構成に固定）。
     if quality in ("supreme", "supreme_plus"):
@@ -1890,6 +2003,124 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
 # ---------------------------------------------------------------------------
 # 旧テスト/コードが director.run_angles_stage を参照する可能性に備えて残す(no-op)。
 # TTP モードでは angles は常にスキップされる。
+
+def build_ttps_script_report(plan, reference_spec=None, skeleton=None, cfg=None, product=None):
+    """TTPS モードの台本レポート(Markdown)を組み立てる（純関数）。
+
+    ユーザー原文の出力フォーマット（1文字起こし / 2完成台本 / 3映像視点 / 4解説）に
+    沿った雛形を返す。中身は plan / reference_spec の実データを埋める。
+    "抽象化ラダー / TTP流れ / 再帰検証" 等の LLM 生成が望ましい節はスケルトン
+    プレースホルダにする（コスト管理のため既定 LLM 呼び出しはしない。上位で
+    supreme_plus 時のみ埋める運用にする）。
+
+    Args:
+        plan: 生成済みの reel_plan（validate 済みが望ましい）。
+        reference_spec: reference_v2.analyze_reference_v2() の spec（あれば文字起こし・
+            構造の実データを流用）。
+        skeleton: build_shot_skeleton の結果（あれば shot 構造要約に使う）。
+        cfg: config dict（ttps.persona 参照）。
+        product: 商品情報 dict（あれば商品名を反映）。
+
+    Returns:
+        Markdown 文字列。
+    """
+    from pipeline import compliance as _cmp
+    if not isinstance(plan, dict):
+        return "(plan が空のため TTPS レポートを生成できません)\n"
+
+    lines = ["# TTPS 台本レポート", ""]
+    lines.append("生成モード: TTPS（美容アフィリ・徹底的にパクって進化）")
+    if isinstance(product, dict) and product.get("name"):
+        lines.append("訴求商品: {}".format(product["name"]))
+    lines.append("")
+
+    # 1. 参考動画の文字起こし
+    lines.append("## 1. 参考動画の文字起こし")
+    transcript = None
+    if isinstance(reference_spec, dict):
+        transcript = reference_spec.get("transcript")
+    if isinstance(transcript, str) and transcript.strip():
+        # 長すぎる場合は先頭 2000 字までに丸める（レポート閲覧性のため）
+        t = transcript.strip()
+        if len(t) > 2000:
+            t = t[:2000] + "\n…(以下省略)"
+        lines.append("```")
+        lines.append(t)
+        lines.append("```")
+    else:
+        lines.append("_(参考動画の文字起こしが取得できていません)_")
+    lines.append("")
+
+    # 2. 完成台本（ナレーション本文のみ・タイムスタンプ入り）
+    lines.append("## 2. 完成台本（ナレーション本文のみ）")
+    shots = plan.get("shots") or []
+    cursor = 0.0
+    for s in shots:
+        dur = float(s.get("duration_sec") or 0.0)
+        start = cursor
+        end = cursor + dur
+        cursor = end
+        nj = (s.get("narration_jp") or "").strip()
+        if not nj:
+            continue
+        lines.append("[{:.1f}s → {:.1f}s] ({}) {}".format(start, end, s.get("id"), nj))
+    lines.append("")
+
+    # 3. 映像視点（テロップ・カット割り・PR表記・尺・CTA）
+    lines.append("## 3. 映像視点（テロップ / カット割り / PR表記 / 尺 / CTA）")
+    lines.append("- 参考の総ショット数: {} shot".format(len(shots)))
+    total = sum(float(s.get("duration_sec") or 0.0) for s in shots)
+    lines.append("- 生成尺合計: {:.1f} 秒".format(total))
+    lines.append("- BGMムード: {}".format(plan.get("bgm_mood") or "-"))
+    lines.append("- PR/広告表記: `{}`（動画冒頭〜全編に自動テロップ表示）".format(
+        plan.get("pr_disclosure") or _cmp.PR_DISCLOSURE_DEFAULT
+    ))
+    hook_id = plan.get("hook_end_shot_id")
+    cta_id = plan.get("cta_start_shot_id")
+    if hook_id:
+        lines.append("- フック終端: {}".format(hook_id))
+    if cta_id:
+        lines.append("- CTA開始: {}".format(cta_id))
+    # 各shotのテロップ・視覚方針の一覧（要約）
+    lines.append("- shotごとのテロップ / 視覚:")
+    for s in shots:
+        cap = (s.get("caption_jp") or "").strip()
+        if not cap and isinstance(s.get("captions"), list) and s["captions"]:
+            cap = "、".join((c.get("text") or "").strip() for c in s["captions"] if isinstance(c, dict))
+        motion = s.get("motion_preset") or "-"
+        lines.append("  - {}: caption=「{}」 motion={} dur={:.2f}s".format(
+            s.get("id"), cap, motion, float(s.get("duration_sec") or 0.0),
+        ))
+    lines.append("")
+
+    # 4. 解説（抽象化ラダー・ワードTOP10・TTP流れ・再帰検証・コンプラチェック）
+    lines.append("## 4. その他解説（抽象化ラダー / ワードTOP10 / TTP流れ / 再帰検証 / コンプラチェック）")
+    # コンプラチェック（機械的に実行できる部分）
+    ttps_ng_words = _cmp.build_ttps_ng_words()
+    ttps_ng_patterns = _cmp.build_ttps_ng_patterns()
+    check = _cmp.check_plan(plan, ng_words=ttps_ng_words, ng_patterns=ttps_ng_patterns)
+    hit_shots = _cmp.detect_effect_mention_shot_ids(plan)
+    lines.append("### コンプラチェック（薬機法・景表法・ステマ規制）")
+    if check["ok"]:
+        lines.append("- OK: 薬機法・景表法NG語 / パターンにヒットなし。")
+    else:
+        lines.append("- NG: 以下の違反を検出しました。修正が必要です。")
+        for v in check["violations"][:20]:
+            lines.append("  - {}: word=`{}`".format(v.get("field"), v.get("word")))
+    for w in check.get("warnings") or []:
+        lines.append("- WARN: {}".format(w.get("reason")))
+    if hit_shots:
+        lines.append("- 効果言及shot（`※効果には個人差があります`を自動注記）: {}".format(", ".join(hit_shots)))
+    else:
+        lines.append("- 効果言及shotは検知されませんでした（個人差注記の自動付与なし）。")
+    lines.append("")
+    lines.append("### 抽象化ラダー / ワードTOP10 / TTP流れ / 再帰検証")
+    lines.append("_(このセクションは supreme_plus + LLM 呼び出しで埋める想定のプレースホルダです。"
+                 "コスト管理のため既定では空欄。ユーザーが必要と判断したら supreme_plus + "
+                 "TTPS リポート LLM 生成を有効化してください。)_")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
 
 def run_angles_stage(theme, config, target_duration_sec, style="default"):
     """後方互換のダミー実装。TTP v2 移行後、angles は常にスキップされる。"""
