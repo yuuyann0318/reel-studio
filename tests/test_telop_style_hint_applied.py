@@ -96,17 +96,20 @@ def test_generate_ass_does_not_break_when_hint_absent():
 
 def test_xmeml_generatoritem_reflects_telop_style_hint():
     hint = {"position": "top", "color": "yellow", "size_class": "large"}
-    size, position, color_hex = export_xmeml._resolve_hint_for_xmeml(hint, base_size=60, base_position="bottom_safe")
+    # F-STYLE: 返り値は (size, position, color_hex, font) の4-tuple（style_detail 対応で font 追加）。
+    size, position, color_hex, font = export_xmeml._resolve_hint_for_xmeml(hint, base_size=60, base_position="bottom_safe")
     assert size == 78  # large -> 78
     assert position == "top_safe"
     assert color_hex == "#FFF04D"
+    assert font == export_xmeml.CAPTION_FONT_DEFAULT  # legacy hint はデフォルトフォント
 
 
 def test_xmeml_hint_resolver_falls_back_when_no_hint():
-    size, position, color_hex = export_xmeml._resolve_hint_for_xmeml(None, base_size=60, base_position="bottom_safe")
+    size, position, color_hex, font = export_xmeml._resolve_hint_for_xmeml(None, base_size=60, base_position="bottom_safe")
     assert size == 60
     assert position == "bottom_safe"
     assert color_hex is None
+    assert font == export_xmeml.CAPTION_FONT_DEFAULT
 
 
 def test_hint_color_survives_auto_accent_reset():

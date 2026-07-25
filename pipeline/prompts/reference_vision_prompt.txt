@@ -39,6 +39,21 @@
     "neon" / "warm indoor" / "cool fluorescent" / "backlit" / "low key" / "high key" / ""。
 18. color_palette_hex: 画面を支配する主要な色を **2〜3個の hex カラー**（"#RRGGBB" 小文字）で配列に。
     例: ["#f4e6d0", "#3b2a1a"]（背景ベージュ+濃茶のツートン）。読み取れなければ空配列 []。
+19. telop_style_detail: テロップの見た目を **見えるものだけ** 精密に写し取ったオブジェクト。
+    テロップが無ければ null。各キー（判別できなければ font_class/weight/stroke_width/bg/pos_x は
+    "unknown"、pos_y_pct/size_pct/line_count は null にすること。創作禁止）:
+    - font_class: 書体の系統。"gothic"(角ゴシック・サンセリフ) / "mincho"(明朝・セリフ) /
+      "rounded"(丸ゴシック) / "pop"(太くて可愛いポップ体) / "handwriting"(手書き・筆記体) / "unknown"。
+    - weight: 太さ。"normal" / "bold" / "heavy"(極太) / "unknown"。
+    - fill_color_hex: 文字の塗り色 "#RRGGBB"(小文字)。読めなければ ""。
+    - stroke_color_hex: 縁取りの色 "#RRGGBB"。縁が無い/読めなければ ""。
+    - stroke_width: 縁の太さ。"none"(縁なし) / "thin"(細い縁・影) / "thick"(太い縁) / "unknown"。
+    - bg: 文字背景。"none"(背景なし) / "box"(文字幅の色付き箱) / "band"(横帯) / "unknown"。
+    - bg_color_hex: 背景箱/帯の色 "#RRGGBB"。背景が無い/読めなければ ""。
+    - pos_x: 水平位置。"left" / "center" / "right" / "unknown"。
+    - pos_y_pct: テロップ中心の縦位置を **画面上端から下端を 0〜100 とした%** の数値で概算（上=小、下=大）。
+    - size_pct: 文字の高さを **画面高さに対する%** の数値で概算（例: 1行が画面高の約7%なら 7）。
+    - line_count: テロップの行数（整数）。
 
 # 出力スキーマ（必ずこのJSON配列のみを返す。最初の文字は [ 最後の文字は ] ）
 [
@@ -62,7 +77,20 @@
     "framing": "product_on_hand",
     "location": "bathroom",
     "lighting": "soft daylight",
-    "color_palette_hex": ["#f4e6d0", "#3b2a1a"]
+    "color_palette_hex": ["#f4e6d0", "#3b2a1a"],
+    "telop_style_detail": {
+      "font_class": "gothic",
+      "weight": "heavy",
+      "fill_color_hex": "#ffffff",
+      "stroke_color_hex": "#111111",
+      "stroke_width": "thick",
+      "bg": "none",
+      "bg_color_hex": "",
+      "pos_x": "center",
+      "pos_y_pct": 18.0,
+      "size_pct": 7.0,
+      "line_count": 2
+    }
   }
 ]
 

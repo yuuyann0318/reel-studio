@@ -38,6 +38,11 @@ except Exception:  # pragma: no cover - claude CLI周りが未整備でもimport
 from pipeline import plan_schema
 
 try:
+    from pipeline import telop_style as _telop_style_mod
+except Exception:  # pragma: no cover
+    _telop_style_mod = None
+
+try:
     from pipeline.reference import find_verbatim_overlap
 except Exception:  # pragma: no cover - reference.py周りが未整備でもimportを壊さない
     find_verbatim_overlap = None
@@ -721,6 +726,16 @@ def _map_telops_to_shots(telops, boundaries, shot_ids, scaled_durations, ref_dur
             "size_class": (style.get("size_class") or "") if isinstance(style, dict) else "",
             "emphasis_words": tel.get("emphasis_words") or [],
         }
+        # 高解像度スタイル: style_detail(font/色/縁/背景/位置/サイズ)を hint に埋め込む。
+        # 参考 telop に style_detail があればそれを、無ければ旧3属性から派生する
+        # （derive_style_detail が後方互換を担保）。subtitles/premiere/fidelity が読む。
+        if _telop_style_mod is not None:
+            try:
+                sd = _telop_style_mod.derive_style_detail(tel)
+                if _telop_style_mod.is_effective(sd):
+                    hint["style_detail"] = sd
+            except Exception:
+                pass
         try:
             conf = float(tel.get("confidence") or 0.0)
         except (TypeError, ValueError):

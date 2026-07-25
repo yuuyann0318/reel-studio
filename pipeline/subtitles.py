@@ -23,6 +23,18 @@ try:
 except Exception:  # pragma: no cover - Windows等
     fcntl = None
 
+# style_detail(テロップ見た目の高解像度モデル) と font_class->実フォント解決。
+# 循環参照は無い（telop_style/font_map は config のみに依存）。import 失敗時は
+# 従来の粗い telop_style_hint 経路にフォールバックする（後方互換）。
+try:
+    from pipeline import telop_style as _telop_style_mod
+except Exception:  # pragma: no cover
+    _telop_style_mod = None
+try:
+    from pipeline import font_map as _font_map_mod
+except Exception:  # pragma: no cover
+    _font_map_mod = None
+
 PLAY_RES_X = 1080
 PLAY_RES_Y = 1920
 
@@ -762,14 +774,7 @@ def generate_ass_with_style(telop_pieces, subtitle_style=None, product_name=None
             spans = extract_accent_spans(joined, product_name=product_name)
             if spans:
                 color_map = _color_map_from_spans(len(joined), spans, accent_bgr)
-        lines_out.append(
-            build_dialogue_line(
-                piece["out_start"], piece["out_end"], lines, emphasis, piece_style, color_map=color_map,
-                animation_enabled=animation_enabled,
-                font_px_override=piece.get("font_px_override"),
-                telop_style_hint=piece.get("telop_style_hint"),
-            )
-        )
+        _append_piece_lines(lines_out, piece, animation_enabled=animation_enabled, color_map=color_map)
     return "\n".join(lines_out) + "\n"
 
 
@@ -1062,15 +1067,34 @@ def generate_ass(telop_pieces, animation_enabled=True, telop_style=None):
     """
     lines_out = [build_ass_header(telop_style=telop_style).rstrip("\n")]
     for piece in sorted(telop_pieces, key=lambda p: p["out_start"]):
-        lines_out.append(
-            build_dialogue_line(
-                piece["out_start"], piece["out_end"], piece["lines"], piece.get("emphasis"), piece.get("style", "base"),
-                animation_enabled=animation_enabled,
-                font_px_override=piece.get("font_px_override"),
-                telop_style_hint=piece.get("telop_style_hint"),
-            )
-        )
+        _append_piece_lines(lines_out, piece, animation_enabled=animation_enabled)
     return "\n".join(lines_out) + "\n"
+
+
+def _piece_font_px(piece):
+    """piece の実効 font_px（font_px_override 優先、無ければ style に応じた既定）。"""
+    if piece.get("font_px_override") is not None:
+        return int(piece["font_px_override"])
+    return STYLE_BIG_FONTSIZE if piece.get("style") == "big" else STYLE_BASE_FONTSIZE
+
+
+def _append_piece_lines(lines_out, piece, animation_enabled=True, color_map=None):
+    """style_detail.bg があれば背景矩形を先に、続けてテキスト Dialogue を append する。"""
+    hint = piece.get("telop_style_hint")
+    bg_line = build_bg_rect_dialogue(
+        piece["out_start"], piece["out_end"], piece.get("lines"), hint, _piece_font_px(piece)
+    )
+    if bg_line:
+        lines_out.append(bg_line)
+    lines_out.append(
+        build_dialogue_line(
+            piece["out_start"], piece["out_end"], piece["lines"], piece.get("emphasis"),
+            piece.get("style", "base"), color_map=color_map,
+            animation_enabled=animation_enabled,
+            font_px_override=piece.get("font_px_override"),
+            telop_style_hint=hint,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1288,10 +1312,37 @@ def _resolve_hint_position(hint):
     return _HINT_POSITION_ALIGNMENT.get(pos)
 
 
+def _hint_style_detail(hint):
+    """telop_style_hint に載る style_detail(高解像度モデル)を正規化して返す。
+
+    有効(何かしら描画に効く)な style_detail が無ければ None（→ 従来の粗い経路）。
+    """
+    if not isinstance(hint, dict) or _telop_style_mod is None:
+        return None
+    sd = hint.get("style_detail")
+    if not isinstance(sd, dict):
+        return None
+    try:
+        nsd = _telop_style_mod.normalize_style_detail(sd)
+    except Exception:
+        return None
+    return nsd if _telop_style_mod.is_effective(nsd) else None
+
+
 def _resolve_hint_color_bgr(hint):
-    """telop_style_hint.color → &HBBGGRR& の PrimaryColour override。"""
+    """telop_style_hint → &HBBGGRR& の PrimaryColour override。
+
+    style_detail.fill_color_hex があればそれを最優先（高解像度）。無ければ従来の
+    粗い color 語(white/yellow/...)から解決する。
+    """
     if not isinstance(hint, dict):
         return None
+    sd = _hint_style_detail(hint)
+    if sd and sd.get("fill_color_hex"):
+        try:
+            return hex_to_ass_bgr(sd["fill_color_hex"])
+        except Exception:
+            pass
     color = (hint.get("color") or "").strip().lower()
     hex_c = _HINT_COLOR_HEX.get(color)
     if not hex_c:
@@ -1310,17 +1361,87 @@ def _resolve_hint_size_scale(hint):
     return _HINT_SIZE_SCALE.get(sc)
 
 
+# stroke_width(none/thin/thick) → ASS \bord 太さ(px, PlayRes 1080x1920 基準)。
+_STROKE_WIDTH_BORD = {"none": 0.0, "thin": 3.0, "thick": 9.0}
+
+
+def _sd_position_override(sd):
+    """style_detail の pos_x/pos_y_pct → `\\an5\\pos(x,y)`（絶対座標）。
+
+    pos_y_pct があれば \\pos で正確な縦位置に置く（\\an5=中央アンカー）。無ければ ""。
+    x は pos_x(left/center/right)から。pos_x 不明なら画面中央。
+    """
+    if _telop_style_mod is None:
+        return ""
+    y = _telop_style_mod.pos_y_pct_to_y(sd.get("pos_y_pct"), PLAY_RES_Y)
+    if y is None:
+        return ""
+    x = _telop_style_mod.pos_x_to_x(sd.get("pos_x"), PLAY_RES_X)
+    if x is None:
+        x = PLAY_RES_X // 2
+    return "\\an5\\pos({},{})".format(int(x), int(y))
+
+
+def build_style_detail_override(sd, alignment_default=ALIGNMENT):
+    """style_detail(高解像度) → Dialogue 行に前置する ASS inline override 文字列。
+
+    font(\\fn)+weight(\\b)+fill(\\1c)+stroke(\\3c+\\bord)+position(\\an5\\pos) を焼き込む。
+    BorderStyle(帯/箱)は inline 不可のため別レイヤ矩形(build_bg_rect_dialogue)で描く。
+    """
+    parts = []
+    # フォント（font_class → 実在フォント名。実測で libass が \fn で拾えるファミリのみ）。
+    fc = sd.get("font_class")
+    if fc and fc != "unknown" and _font_map_mod is not None:
+        family, bold_flag, _warns = _font_map_mod.resolve_font(fc, sd.get("weight"))
+        parts.append("\\fn{}".format(family))
+        parts.append("\\b1" if bold_flag else "\\b0")
+    else:
+        w = sd.get("weight")
+        if w in ("bold", "heavy"):
+            parts.append("\\b1")
+        elif w == "normal":
+            parts.append("\\b0")
+    # 塗り色。
+    fill = sd.get("fill_color_hex")
+    if fill:
+        try:
+            parts.append("\\1c{}".format(hex_to_ass_bgr(fill)))
+        except Exception:
+            pass
+    # 縁取り（太さ + 色）。
+    sw = sd.get("stroke_width")
+    if sw in _STROKE_WIDTH_BORD:
+        parts.append("\\bord{:g}".format(_STROKE_WIDTH_BORD[sw]))
+        if sw != "none":
+            sc = sd.get("stroke_color_hex")
+            if sc:
+                try:
+                    parts.append("\\3c{}".format(hex_to_ass_bgr(sc)))
+                except Exception:
+                    pass
+    # 位置（pos_y_pct があれば \pos で正確に）。
+    pos = _sd_position_override(sd)
+    if pos:
+        parts.append(pos)
+    return "".join(parts) if parts else None
+
+
 def build_hint_override_prefix(hint, alignment_default=ALIGNMENT):
-    """telop_style_hint から Dialogue 行に前置する ASS override（`{\\anN\\cX\\fsN}`）を組み立てる。
+    """telop_style_hint から Dialogue 行に前置する ASS override を組み立てる。
 
-    None を返す場合は「hint 由来の上書きなし」（既定 Style がそのまま使われる）。
-    生成 override は Dialogue の `{}` オーバライドブロックの先頭に置き、続く既存
-    `{\\fad(...)\\fscxN\\fscyN\\t(...)}` などと連結して1つの override に統合する。
+    style_detail(高解像度)があればフォント/塗り/縁/位置まで焼き込む。無ければ従来の
+    粗い position/color から `\\anN\\cX` を出す（後方互換）。
 
-    Returns: str（例 "\\an8\\c&H4DF0FF&\\fs99"）or None
+    Returns: str or None（None=上書きなし＝既定 Style のまま）
     """
     if not isinstance(hint, dict):
         return None
+    sd = _hint_style_detail(hint)
+    if sd is not None:
+        rich = build_style_detail_override(sd, alignment_default=alignment_default)
+        if rich:
+            return rich
+        # style_detail が有効でも override 文字列が空になるケースは従来経路へ落とす。
     parts = []
     align = _resolve_hint_position(hint)
     if align is not None and align != alignment_default:
@@ -1331,8 +1452,71 @@ def build_hint_override_prefix(hint, alignment_default=ALIGNMENT):
     return "".join(parts) if parts else None
 
 
+def build_bg_rect_dialogue(out_start, out_end, lines, hint, font_px):
+    """style_detail.bg(band/box) を Dialogue の描画矩形として1行返す（無ければ None）。
+
+    ASS の BorderStyle(座布団)は inline 上書き不可のため、テキストの背後(同レイヤの
+    直前=先に描画)に \\p1 の塗り矩形を敷く。band は全幅帯、box はテキスト幅+余白の箱。
+    座標は style_detail の pos_x/pos_y_pct（無ければ下寄せ既定）から概算する。
+    """
+    sd = _hint_style_detail(hint)
+    if sd is None:
+        return None
+    bg = sd.get("bg")
+    if bg not in ("band", "box"):
+        return None
+    try:
+        n_lines = max(1, len(lines) if lines else 1)
+        max_chars = max((len(str(ln)) for ln in (lines or [""])), default=1)
+        # 文字ブロックの高さ・幅の概算。
+        line_h = float(font_px) * 1.18
+        block_h = line_h * n_lines + font_px * 0.5  # 上下パディング
+        # 中心座標。
+        if _telop_style_mod is not None:
+            cy = _telop_style_mod.pos_y_pct_to_y(sd.get("pos_y_pct"), PLAY_RES_Y)
+            cx = _telop_style_mod.pos_x_to_x(sd.get("pos_x"), PLAY_RES_X)
+        else:
+            cy, cx = None, None
+        if cy is None:
+            cy = PLAY_RES_Y - MARGIN_V
+        if cx is None:
+            cx = PLAY_RES_X // 2
+        if bg == "band":
+            width = PLAY_RES_X  # 全幅帯
+            x0 = 0
+        else:  # box: テキスト幅（全角想定 ≈ font_px/文字）+ 余白
+            width = int(min(PLAY_RES_X, max_chars * font_px * 0.62 + font_px * 0.9))
+            x0 = int(cx - width / 2.0)
+            # codex-review P2: pos_x=left/right + 長いキャプションで箱が画面外にはみ出し
+            # libass にクリップされるのを防ぐ。箱全体が [0, PLAY_RES_X] に収まるよう x0 を寄せる。
+            x0 = max(0, min(x0, PLAY_RES_X - width))
+        y0 = int(cy - block_h / 2.0)
+        w = int(width)
+        h = int(block_h)
+        bg_hex = sd.get("bg_color_hex") or "#111111"
+        try:
+            bg_bgr = hex_to_ass_bgr(bg_hex)
+        except Exception:
+            bg_bgr = hex_to_ass_bgr("#111111")
+        start = seconds_to_ass_time(out_start)
+        end = seconds_to_ass_time(out_end)
+        draw = "{{\\an7\\pos({x},{y})\\1c{c}\\bord0\\shad0\\p1}}m 0 0 l {w} 0 {w} {h} 0 {h}{{\\p0}}".format(
+            x=int(x0), y=int(y0), c=bg_bgr, w=w, h=h,
+        )
+        return "Dialogue: 0,{},{},Base,,0,0,0,,{}".format(start, end, draw)
+    except Exception:
+        return None
+
+
 def hint_font_px(hint, base_font_px):
-    """size_class を反映した font_px を返す（該当なしは base_font_px をそのまま）。"""
+    """テロップの font_px を返す。
+
+    style_detail.size_pct(画面高さに対する文字高%)があれば size_pct から px を算出（高解像度）。
+    無ければ従来の size_class 倍率。該当なしは base_font_px をそのまま。
+    """
+    sd = _hint_style_detail(hint)
+    if sd is not None and sd.get("size_pct") is not None and _telop_style_mod is not None:
+        return _telop_style_mod.size_pct_to_font_px(sd["size_pct"], PLAY_RES_Y, fallback_px=base_font_px)
     scale = _resolve_hint_size_scale(hint)
     if not scale or scale <= 0:
         return int(base_font_px)
