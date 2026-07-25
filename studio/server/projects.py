@@ -206,6 +206,9 @@ def get_project(project_id):
     project.setdefault("product", None)
     project.setdefault("reference", None)
     project.setdefault("tts", None)
+    # ②検知: 映像内文字/文字化けの疑いを記録する text_artifacts（本機能追加前の
+    # プロジェクトには無いため空配列で補い、UI が常に安全に扱えるようにする）。
+    project.setdefault("text_artifacts", [])
     return project
 
 

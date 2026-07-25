@@ -354,6 +354,44 @@ def _apply_persona_anchor(shot, persona_ref_path):
     return new_shot
 
 
+# ---------------------------------------------------------------------------
+# no_text_in_video: 映像内文字の禁止（①予防層 — AIが描く偽文字/崩れ日本語対策）
+# ---------------------------------------------------------------------------
+#
+# ユーザー報告: Higgsfield実映像の中に文字化け（AIが描いた偽文字・崩れた日本語風の
+# 文字）がちょくちょく出る。設計方針①予防: 生成プロンプトに「映像内へ一切文字を
+# 描かない」旨のnegative指示を常時注入する。参考ショット自体が文字主体（進捗ゲージ等）
+# でも映像には文字を描かせず、テロップ（焼き込み）側でこちらが再現する方針を貫く。
+# config visual.no_text_in_video（既定 True・False で従来動作＝注入しない）。
+_NO_TEXT_IN_VIDEO_PHRASE = (
+    "Do not render any text, letters, words, captions, subtitles, logos, "
+    "or watermarks inside the video. All text will be overlaid separately."
+)
+# idempotent 追記のための一意マーカー（小文字比較。既に含んでいれば二重追記しない）。
+_NO_TEXT_MARKER = "do not render any text"
+
+
+def _append_no_text_directive(prompt, enabled=True):
+    """visual_prompt 末尾へ「映像内文字禁止」の negative 指示を idempotent に追記する（純関数）。
+
+    - enabled=False なら prompt をそのまま返す（従来動作）。
+    - 既に指示句が含まれていれば二重追記しない。
+    - 参考再現の主文・Subject句・persona identity句の全てより後ろ（末尾）に付ける。
+      末尾に置くことで、それらの主文と語順・意味の衝突を起こさない。
+    """
+    if not enabled:
+        return prompt
+    base = prompt if isinstance(prompt, str) else ""
+    if _NO_TEXT_MARKER in base.lower():
+        return base
+    stripped = base.strip()
+    if not stripped:
+        return _NO_TEXT_IN_VIDEO_PHRASE
+    if stripped.endswith("."):
+        return "{} {}".format(stripped, _NO_TEXT_IN_VIDEO_PHRASE)
+    return "{}. {}".format(stripped, _NO_TEXT_IN_VIDEO_PHRASE)
+
+
 def _build_extract_frame_cmd(ffmpeg_bin, video_path, out_image_path, at_sec):
     """生成済みクリップから代表フレーム1枚を抽出する ffmpeg コマンドを構築する（副作用なし・テスト対象）。"""
     return [
@@ -362,7 +400,7 @@ def _build_extract_frame_cmd(ffmpeg_bin, video_path, out_image_path, at_sec):
     ]
 
 
-def _build_create_cmd(cli_bin, model, shot, resolution):
+def _build_create_cmd(cli_bin, model, shot, resolution, no_text_in_video=True):
     """ジョブ投入コマンドを構築する（副作用なし・テスト対象）。
 
     ★generate_audio 等の任意パラメータはCLI側デフォルト（generate_audio=true）に
@@ -373,9 +411,13 @@ def _build_create_cmd(cli_bin, model, shot, resolution):
     R2b F4: shot に reference_visual があれば camera_move / shot_size / color_mood を
     英語句として visual_prompt 末尾に追加する（Higgsfield 実運用でも参考カメラワークを
     伝えるため）。
+
+    ①予防: no_text_in_video（既定 True）が有効なら、参考再現主文・persona句の後ろ
+    （末尾）へ「映像内へ文字を描かない」negative 指示を注入する。
     """
     duration_sec = _resolve_request_duration_sec(shot)
     prompt = _augment_prompt_with_reference_visual(shot.get("visual_prompt", ""), shot)
+    prompt = _append_no_text_directive(prompt, no_text_in_video)
     return [
         cli_bin, "generate", "create", model,
         "--prompt", prompt,
@@ -385,14 +427,16 @@ def _build_create_cmd(cli_bin, model, shot, resolution):
     ] + _build_image_args(shot) + ["--json"]
 
 
-def _build_cost_cmd(cli_bin, model, shot, resolution):
+def _build_cost_cmd(cli_bin, model, shot, resolution, no_text_in_video=True):
     """コスト見積コマンドを構築する（副作用なし・テスト対象）。
 
     課金額の見積とジョブ投入(_build_create_cmd)は、画像フラグを含め同じ入力条件で
     行うべき(見積と実際の課金対象が一致する)ため、_build_image_args を共通利用する。
+    プロンプトも投入時と同一にするため no_text_in_video の注入も揃える。
     """
     duration_sec = _resolve_request_duration_sec(shot)
     prompt = _augment_prompt_with_reference_visual(shot.get("visual_prompt", ""), shot)
+    prompt = _append_no_text_directive(prompt, no_text_in_video)
     return [
         cli_bin, "generate", "cost", model,
         "--prompt", prompt,
@@ -665,13 +709,15 @@ class HiggsfieldBackend(VisualBackend):
         # persona_anchor: 人物 shot の identity 統一（既定 on）。sequential generate を通じて
         # 最初の人物 shot の代表フレームを保持し、以降の人物 shot の参照へ連鎖させる。
         self.persona_consistency = bool((full_cfg.get("visual") or {}).get("persona_consistency", True))
+        # ①予防: 映像内文字の禁止指示を生成プロンプトへ常時注入するか（既定 on）。
+        self.no_text_in_video = bool((full_cfg.get("visual") or {}).get("no_text_in_video", True))
         self.ffmpeg_bin = full_cfg.get("ffmpeg_bin") or str(project_root() / "bin" / "ffmpeg")
         self._persona_ref_path = None
 
     # -- 個別ステップ（テスト容易性のため分割） -----------------------------
 
     def estimate_cost(self, shot: dict) -> int:
-        cmd = _build_cost_cmd(self.cli_bin, self.model, shot, self.resolution)
+        cmd = _build_cost_cmd(self.cli_bin, self.model, shot, self.resolution, self.no_text_in_video)
         stdout = _run_cli(cmd, timeout_sec=60)
         return _parse_cost(stdout)
 
@@ -680,7 +726,7 @@ class HiggsfieldBackend(VisualBackend):
         # 一時的エラーのみをここでリトライする。二重課金防止のため、job_id取得後は
         # このメソッドを呼び直さない（wait側の再試行は wait_for_result 内で完結させる）。
         def _do():
-            cmd = _build_create_cmd(self.cli_bin, self.model, shot, self.resolution)
+            cmd = _build_create_cmd(self.cli_bin, self.model, shot, self.resolution, self.no_text_in_video)
             stdout = _run_cli(cmd, timeout_sec=60)
             return _parse_job_id(stdout)
 

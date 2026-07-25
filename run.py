@@ -568,6 +568,36 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                     _pa_counts[_pa] = _pa_counts.get(_pa, 0) + 1
             if _pa_counts:
                 report["stages"]["visual"]["persona_anchor"] = _pa_counts
+
+            # ②検知（読み取りのみ・best-effort）: 生成した raw クリップ（テロップ焼き込み前）を
+            # vision で検査し、映像内文字/文字化けの疑いを text_artifacts として report に記録する。
+            # 失敗しても visual ステージは成功扱いのまま続行する（作り直しはユーザー判断）。
+            # 対象は実映像を生成する higgsfield backend のみ（mock 等はAIが偽文字を描かないため
+            # 検査不要。無駄な vision 呼び出しも避ける）。
+            if getattr(backend, "name", "") == "higgsfield":
+              try:
+                from qa.clip_text_check import run_clip_text_check
+                _tc_clips = [
+                    {
+                        "shot_id": s["id"],
+                        "clip_path": raw_clip_paths.get(s["id"]),
+                        "duration_sec": s.get("duration_sec"),
+                    }
+                    for s in shots
+                    if raw_clip_paths.get(s["id"])
+                ]
+                _tc = run_clip_text_check(_tc_clips, ffmpeg_bin=str(cfg.get("ffmpeg_bin")), cfg=cfg)
+                report["stages"]["visual"]["text_artifacts"] = _tc.get("text_artifacts", [])
+                report["stages"]["visual"]["text_check"] = {
+                    "ok": _tc.get("ok"),
+                    "enabled": _tc.get("enabled"),
+                    "checked_shot_ids": _tc.get("checked_shot_ids"),
+                    "unchecked_shot_ids": _tc.get("unchecked_shot_ids"),
+                    "calls_used": _tc.get("calls_used"),
+                    "error": _tc.get("error"),
+                }
+              except Exception as _tc_exc:  # noqa: BLE001 — 検知失敗で本編を止めない
+                report["stages"]["visual"]["text_check"] = {"ok": False, "error": str(_tc_exc)[:300]}
     except Exception:
         _write_report(report)
         return report

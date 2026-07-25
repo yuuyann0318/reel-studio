@@ -84,8 +84,11 @@ def test_build_cost_cmd_adds_start_image_when_image_path_present():
 
 
 def test_build_create_cmd_without_image_path_is_unchanged_regression():
-    """画像なしshotのコマンドは従来と完全に同一(--start-image/--image-referencesを含まない)。"""
-    cmd = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p")
+    """画像なしshotのコマンドは従来と完全に同一(--start-image/--image-referencesを含まない)。
+
+    no_text_in_video=False で映像内文字禁止の注入を切り、画像フラグ非付与のみを検証する。
+    """
+    cmd = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p", no_text_in_video=False)
     assert cmd == [
         "higgsfield", "generate", "create", "seedance_2_0_mini",
         "--prompt", _shot()["visual_prompt"],
@@ -99,7 +102,7 @@ def test_build_create_cmd_without_image_path_is_unchanged_regression():
 
 
 def test_build_cost_cmd_without_image_path_is_unchanged_regression():
-    cmd = hb._build_cost_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p")
+    cmd = hb._build_cost_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p", no_text_in_video=False)
     assert cmd == [
         "higgsfield", "generate", "cost", "seedance_2_0_mini",
         "--prompt", _shot()["visual_prompt"],
@@ -735,8 +738,12 @@ def test_generate_retries_with_safety_prompt_after_nsfw_rejection_then_succeeds(
     meta = backend.generate(shot, out_path)
 
     assert len(create_prompts) == 2  # 安全リトライで2回目のcreateが発火した
-    assert create_prompts[0] == shot["visual_prompt"]
-    assert create_prompts[1] == "wholesome, family-friendly, safe-for-work, " + shot["visual_prompt"]
+    # no_text_in_video 既定 ON のため、CLIへ渡るpromptは末尾に映像内文字禁止句が付く。
+    # 安全リトライの言い換え（先頭の接頭辞）はその主文側に効く。
+    assert create_prompts[0].startswith(shot["visual_prompt"])
+    assert hb._NO_TEXT_MARKER in create_prompts[0].lower()
+    assert create_prompts[1].startswith("wholesome, family-friendly, safe-for-work, " + shot["visual_prompt"])
+    assert hb._NO_TEXT_MARKER in create_prompts[1].lower()
     assert meta["status"] == "completed"
     assert meta["job_id"] == "job-attempt-2"
     assert meta["safety_retry_attempt"] == 2
@@ -992,3 +999,61 @@ def test_generate_persona_disabled_by_config(monkeypatch, tmp_path):
     # persona 無効なら person shot でも none
     meta = backend.generate(_shot(id="s1", has_person=True), str(tmp_path / "s1.mp4"))
     assert meta["persona_anchor"] == "none"
+
+
+# --- no_text_in_video（①予防: 映像内文字の禁止指示注入） ---------------------
+
+def test_build_create_cmd_injects_no_text_directive_by_default():
+    cmd = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p")
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert hb._NO_TEXT_MARKER in prompt.lower()
+    assert "overlaid separately" in prompt.lower()
+
+
+def test_build_cost_cmd_injects_no_text_directive_by_default():
+    # 見積と投入でプロンプトが一致すること（課金対象の同一性）。
+    create = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p")
+    cost = hb._build_cost_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p")
+    assert create[create.index("--prompt") + 1] == cost[cost.index("--prompt") + 1]
+
+
+def test_build_create_cmd_no_text_disabled_leaves_prompt_unchanged():
+    off = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", _shot(), "480p", no_text_in_video=False)
+    p = off[off.index("--prompt") + 1]
+    assert hb._NO_TEXT_MARKER not in p.lower()
+    assert p == _shot()["visual_prompt"]
+
+
+def test_append_no_text_directive_is_idempotent():
+    once = hb._append_no_text_directive("a calm ocean", True)
+    twice = hb._append_no_text_directive(once, True)
+    assert once == twice
+    assert once.lower().count(hb._NO_TEXT_MARKER) == 1
+
+
+def test_append_no_text_directive_disabled_is_noop():
+    assert hb._append_no_text_directive("a calm ocean", False) == "a calm ocean"
+
+
+def test_append_no_text_directive_empty_prompt_still_carries_directive():
+    out = hb._append_no_text_directive("", True)
+    assert out == hb._NO_TEXT_IN_VIDEO_PHRASE
+
+
+def test_no_text_appended_after_reference_recreation_main_clause():
+    # 参考再現の主文（Recreate reference shot:）より後ろに no_text 句が来る（末尾注入）。
+    rv = {"desc_en": "a woman applies serum", "framing": "closeup_face", "has_person": True}
+    shot = {"id": "s1", "visual_prompt": "a serum bottle", "duration_sec": 5, "reference_visual": rv}
+    cmd = hb._build_create_cmd("higgsfield", "seedance_2_0_mini", shot, "480p")
+    p = cmd[cmd.index("--prompt") + 1]
+    assert p.startswith("Recreate reference shot:")
+    assert p.lower().rfind(hb._NO_TEXT_MARKER) > p.find("Recreate reference shot:")
+
+
+def test_backend_reads_no_text_flag_from_config(monkeypatch):
+    b_on = hb.HiggsfieldBackend(_cfg())
+    assert b_on.no_text_in_video is True
+    cfg_off = _cfg()
+    cfg_off["visual"] = {"no_text_in_video": False}
+    b_off = hb.HiggsfieldBackend(cfg_off)
+    assert b_off.no_text_in_video is False

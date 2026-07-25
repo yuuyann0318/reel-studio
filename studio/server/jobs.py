@@ -1067,6 +1067,46 @@ class JobManager:
         project["status"] = "rendering"
         projects.save_project(project)
 
+        # ②検知（読み取りのみ・best-effort）: テロップ焼き込み【前】の各ショットクリップ
+        # （clips/<id>.mp4）を vision 検査し、映像内文字/文字化けの疑いを project.json の
+        # text_artifacts に記録する。Higgsfield クレジットは消費しない。失敗しても本編（render）は
+        # 止めない（作り直しは完成画面の案内を見てユーザーが判断する）。
+        # 対象は実映像を生成する higgsfield backend のみ（mock 等はAIが偽文字を描かないため不要）。
+        if getattr(backend, "name", "") == "higgsfield":
+          try:
+            from qa.clip_text_check import run_clip_text_check
+            _tc_clips = []
+            for _ps in planned_shots:
+                if not _ps.get("enabled", True):
+                    continue
+                _cp = clips_dir / "{}.mp4".format(_ps["id"])
+                _tr = _ps.get("trim") or {}
+                try:
+                    _start = float(_tr.get("start", 0) or 0)
+                    _dur = float(_tr.get("end", 0)) - _start
+                except Exception:
+                    _start = 0.0
+                    _dur = _ps.get("source_duration")
+                _tc_clips.append({
+                    "shot_id": _ps["id"], "clip_path": str(_cp),
+                    "duration_sec": _dur, "start_sec": _start,
+                })
+            _tc = run_clip_text_check(_tc_clips, ffmpeg_bin=cfg["ffmpeg_bin"], cfg=cfg)
+            _proj_tc = projects.get_project(project_id)
+            if _proj_tc is not None:
+                _proj_tc["text_artifacts"] = _tc.get("text_artifacts", [])
+                _proj_tc["text_check"] = {
+                    "ok": _tc.get("ok"),
+                    "enabled": _tc.get("enabled"),
+                    "checked_shot_ids": _tc.get("checked_shot_ids"),
+                    "unchecked_shot_ids": _tc.get("unchecked_shot_ids"),
+                    "calls_used": _tc.get("calls_used"),
+                    "error": _tc.get("error"),
+                }
+                projects.save_project(_proj_tc)
+          except Exception:
+            pass
+
         self._emit(job_id, "tts", 75, "ナレーションを生成中…")
         self._emit(job_id, "subtitles", 80, "字幕を生成中…")
         self._emit(job_id, "render", 85, "レンダリング中…")

@@ -123,11 +123,22 @@ class TestHiggsfieldPromptAugmentation:
 
     def test_no_reference_visual_leaves_prompt_untouched(self):
         shot = {"id": "s1", "visual_prompt": "abstract", "duration_sec": 5}
+        # no_text_in_video を無効化すれば、参考再現の augmentation は無く base のまま（従来動作）。
+        cmd = higgsfield_backend._build_create_cmd(
+            "higgsfield", "seedance_2_0_mini", shot, "480p", no_text_in_video=False
+        )
+        prompt = cmd[cmd.index("--prompt") + 1]
+        assert prompt == "abstract"
+
+    def test_no_reference_visual_appends_no_text_directive_by_default(self):
+        # 既定（no_text_in_video=True）では base はそのまま先頭に残り、末尾へ映像内文字禁止句が付く。
+        shot = {"id": "s1", "visual_prompt": "abstract", "duration_sec": 5}
         cmd = higgsfield_backend._build_create_cmd(
             "higgsfield", "seedance_2_0_mini", shot, "480p"
         )
         prompt = cmd[cmd.index("--prompt") + 1]
-        assert prompt == "abstract"
+        assert prompt.startswith("abstract")
+        assert higgsfield_backend._NO_TEXT_MARKER in prompt.lower()
 
     def test_does_not_duplicate_camera_phrase(self):
         # 既に camera pan が prompt にある場合はカメラ句を追加しない（重複防止）

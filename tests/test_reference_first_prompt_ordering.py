@@ -51,7 +51,10 @@ def test_main_clause_is_reference_recreation_when_desc_provided():
 
 def test_backward_compat_no_reference_visual_returns_base_prompt():
     shot = {"id": "s1", "visual_prompt": "abstract geometric", "duration_sec": 5}
-    cmd = higgsfield_backend._build_create_cmd("higgsfield", "seedance_2_0_mini", shot, "480p")
+    # no_text_in_video を無効化すれば、reference_visual が無いとき base prompt はそのまま。
+    cmd = higgsfield_backend._build_create_cmd(
+        "higgsfield", "seedance_2_0_mini", shot, "480p", no_text_in_video=False
+    )
     p = cmd[cmd.index("--prompt") + 1]
     assert p == "abstract geometric"
 

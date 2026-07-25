@@ -22,6 +22,16 @@
       "必ず儲かる"
     ]
   },
+  "visual": {
+    "no_text_in_video": true,
+    "persona_consistency": true,
+    "text_check": {
+      "enabled": true,
+      "max_vision_calls": 3,
+      "vision_batch_size": 10,
+      "vision_timeout_sec": 600
+    }
+  },
   "higgsfield": {
     "cli_bin": "higgsfield",
     "model": "seedance_2_0_mini",

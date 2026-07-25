@@ -584,7 +584,20 @@ body.theme-simple {
   background: #F1F3F8;
 }
 .s-scene-item.is-off { opacity: 0.45; }
+.s-scene-item.has-warn { border-color: var(--warning); }
 .s-scene-item__label { flex: 1; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+
+/* ②検知: 映像内文字/文字化けの疑い（作り直しはユーザー判断） */
+.s-scene-warn {
+  display: flex; flex-direction: column; gap: 2px;
+  margin: -4px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 184, 77, 0.12);
+}
+.s-scene-warn__badge { font-size: 12.5px; font-weight: 700; color: #8A5A00; }
+.s-scene-warn__msg { font-size: 12px; color: var(--text-muted, #666); }
 
 .s-music-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
 .s-music-btn, .s-volume-btn {

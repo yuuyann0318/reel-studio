@@ -1092,13 +1092,26 @@ function captionItemHtml(shot, i) {
       <div class="s-caption-item__text">${shot.caption ? escapeHtml(shot.caption) : "(テロップなし・タップして入力)"}</div>
     </div>`;
 }
+// ②検知: このショットに映像内文字/文字化けの疑い（text_artifacts）があれば返す。
+function textArtifactFor(shotId) {
+  const arts = (state.current && state.current.text_artifacts) || [];
+  return arts.find((a) => a && a.shot_id === shotId) || null;
+}
 function sceneItemHtml(shot, i) {
+  const art = textArtifactFor(shot.id);
+  const warn = art
+    ? `
+      <div class="s-scene-warn" role="note">
+        <span class="s-scene-warn__badge">⚠️ 映像内に文字化けの可能性</span>
+        <span class="s-scene-warn__msg">気になる場合はこのシーンを作り直してください</span>
+      </div>`
+    : "";
   return `
-    <div class="s-scene-item ${shot.enabled ? "" : "is-off"}">
+    <div class="s-scene-item ${shot.enabled ? "" : "is-off"} ${art ? "has-warn" : ""}">
       <div class="s-scene-item__thumb" aria-hidden="true"></div>
       <div class="s-scene-item__label">シーン${i + 1}: ${escapeHtml(shot.caption || "(無題)")}</div>
       <button type="button" class="toggle" role="switch" aria-checked="${!!shot.enabled}" aria-label="シーン${i + 1}を使う" data-scene-toggle="${shot.id}"></button>
-    </div>`;
+    </div>${warn}`;
 }
 function musicMoodBtn(value, label, current) {
   return `<button type="button" class="s-music-btn" data-mood="${value}" aria-pressed="${current === value}">${escapeHtml(label)}</button>`;
