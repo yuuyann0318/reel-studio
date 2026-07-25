@@ -86,6 +86,13 @@ _DEFAULTS = {
         "onset_window_samples": 2048,
         # R2a F5: BPM/beat 抽出（librosa）。False で無効化。
         "music_extract_enabled": True,
+        # 3秒ごと密ストーリーボード解析（診断 P1-6 / ユーザー要求「3秒に1回、1枚1枚を
+        # 忠実に認識」）。None=director_quality が supreme_plus / ttps のとき自動 ON、
+        # それ以外 OFF。明示的に True/False で上書き可。
+        "storyboard_enabled": None,
+        "storyboard_interval_sec": 3.0,     # フレーム抽出の一律間隔（秒）
+        "storyboard_max_vision_calls": 8,   # storyboard 用 vision 呼び出しの上限
+        "storyboard_batch_size": 10,        # 1 vision 呼び出しあたりの画像枚数
     },
 }
 

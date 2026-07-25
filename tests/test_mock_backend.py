@@ -163,3 +163,37 @@ def test_mock_backend_generate_produces_valid_clip(tmp_path):
     out = proc.stdout.decode("utf-8")
     assert "width=1080" in out
     assert "height=1920" in out
+
+
+# --- persona_anchor: mock はメタ記録のみ（実 identity 統一は higgsfield 側） -------
+
+def _fake_ok_run(monkeypatch):
+    class _P:
+        returncode = 0
+        stdout = b""
+        stderr = b""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _P())
+
+
+def test_mock_shot_has_person_detects():
+    assert mock_backend._mock_shot_has_person({"has_person": True}) is True
+    assert mock_backend._mock_shot_has_person({"reference_visual": {"has_person": True}}) is True
+    assert mock_backend._mock_shot_has_person({"id": "s1"}) is False
+
+
+def test_mock_generate_records_persona_meta_chain(monkeypatch, tmp_path):
+    _fake_ok_run(monkeypatch)
+    backend = mock_backend.MockBackend({})
+    m1 = backend.generate(_shot(id="s1", has_person=True), str(tmp_path / "a.mp4"))
+    m2 = backend.generate(_shot(id="s2", has_person=True), str(tmp_path / "b.mp4"))
+    m3 = backend.generate(_shot(id="s3"), str(tmp_path / "c.mp4"))
+    assert m1["persona_anchor"] == "captured"   # 最初の人物 shot
+    assert m2["persona_anchor"] == "applied"     # 2本目以降
+    assert m3["persona_anchor"] == "none"        # 非人物 shot
+
+
+def test_mock_generate_persona_disabled(monkeypatch, tmp_path):
+    _fake_ok_run(monkeypatch)
+    backend = mock_backend.MockBackend({"visual": {"persona_consistency": False}})
+    m = backend.generate(_shot(id="s1", has_person=True), str(tmp_path / "a.mp4"))
+    assert m["persona_anchor"] == "none"

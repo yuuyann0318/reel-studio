@@ -858,3 +858,137 @@ def test_transient_retry_still_works_inside_a_safety_retry_attempt(monkeypatch, 
     assert len(wait_job2_calls) == 2  # job-attempt-2に対してtransientリトライが1回働いた
     assert meta["status"] == "completed"
     assert meta["job_id"] == "job-attempt-2"
+
+
+# --- persona_anchor: 人物 shot の identity 統一（診断 #1/#12） ------------------
+
+def test_shot_has_person_detects_via_reference_visual_and_flag():
+    assert hb._shot_has_person({"reference_visual": {"has_person": True}}) is True
+    assert hb._shot_has_person({"has_person": True}) is True
+    assert hb._shot_has_person({"reference_visual": {"has_person": False}}) is False
+    assert hb._shot_has_person({"id": "s1"}) is False
+    assert hb._shot_has_person(None) is False
+
+
+def test_build_persona_prompt_appends_identity_phrase_idempotently():
+    p = hb._build_persona_prompt("a man applies serum to his cheek")
+    assert hb._PERSONA_IDENTITY_MARKER in p.lower()
+    # 二重追記されない
+    p2 = hb._build_persona_prompt(p)
+    assert p2.lower().count(hb._PERSONA_IDENTITY_MARKER) == 1
+    # 空プロンプトでも固定句だけは載る
+    assert hb._PERSONA_IDENTITY_MARKER in hb._build_persona_prompt("").lower()
+
+
+def test_apply_persona_anchor_prepends_reference_and_augments_prompt():
+    shot = {"id": "s2", "visual_prompt": "a man holds a bottle",
+            "reference_images": ["/tmp/existing.png"]}
+    out = hb._apply_persona_anchor(shot, "/tmp/persona.png")
+    assert out["reference_images"][0] == "/tmp/persona.png"        # persona を前置
+    assert "/tmp/existing.png" in out["reference_images"]
+    assert hb._PERSONA_IDENTITY_MARKER in out["visual_prompt"].lower()
+    # 非破壊（元 shot は不変）
+    assert shot["reference_images"] == ["/tmp/existing.png"]
+
+
+def test_apply_persona_anchor_caps_reference_images_at_9():
+    existing = ["/tmp/r{}.png".format(i) for i in range(9)]
+    out = hb._apply_persona_anchor({"visual_prompt": "x", "reference_images": existing}, "/tmp/persona.png")
+    assert len(out["reference_images"]) == hb._MAX_REFERENCE_IMAGES == 9
+    assert out["reference_images"][0] == "/tmp/persona.png"
+
+
+def test_build_extract_frame_cmd_shape():
+    cmd = hb._build_extract_frame_cmd("/bin/ffmpeg", "/tmp/out.mp4", "/tmp/out.mp4.persona.png", 1.5)
+    assert cmd[0] == "/bin/ffmpeg"
+    assert "-frames:v" in cmd and cmd[cmd.index("-frames:v") + 1] == "1"
+    assert cmd[-1] == "/tmp/out.mp4.persona.png"
+    assert "1.500" in cmd  # -ss の秒
+
+
+def test_generate_persona_anchor_chain_captures_then_applies(monkeypatch, tmp_path):
+    """KR2: 人物 shot が連続すると、1本目で persona 参照を捕捉→2本目でそれを参照に前置し
+    プロンプトへ identity 固定句を機械追記することを機械検証する。"""
+    backend = hb.HiggsfieldBackend(_cfg())
+    create_cmds = []
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        # ffmpeg 代表フレーム抽出（persona 捕捉）: 出力ファイルを書いて成功扱い
+        if "-frames:v" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"\x89PNG")
+            return _FakeProc(returncode=0)
+        # 以降は higgsfield CLI
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            create_cmds.append(cmd)
+            return _FakeProc(returncode=0, stdout=json.dumps(["job-{}".format(len(create_cmds))]).encode())
+        if cmd[2] == "wait":
+            return _FakeProc(returncode=0, stdout=b'{"status":"completed","result_url":"https://x/a.mp4"}')
+        raise AssertionError("想定外: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    # _download_url は out_path を実ファイルとして書く（persona 捕捉の前提）
+    def fake_dl(url, path, curl_bin=None, timeout_sec=120):
+        with open(path, "wb") as f:
+            f.write(b"mp4")
+    monkeypatch.setattr(hb, "_download_url", fake_dl)
+
+    shot1 = _shot(id="s1", visual_prompt="a man applies serum", has_person=True)
+    out1 = str(tmp_path / "s1.mp4")
+    meta1 = backend.generate(shot1, out1)
+    assert meta1["persona_anchor"] == "captured"
+    assert backend._persona_ref_path == out1 + ".persona.png"
+
+    shot2 = _shot(id="s2", visual_prompt="a man holds a bottle", has_person=True)
+    out2 = str(tmp_path / "s2.mp4")
+    meta2 = backend.generate(shot2, out2)
+    assert meta2["persona_anchor"] == "applied"
+    # 2本目の create コマンドに persona 参照が --image-references として入り、
+    # プロンプトへ identity 固定句が追記されている
+    cmd2 = create_cmds[1]
+    assert "--image-references" in cmd2
+    assert out1 + ".persona.png" in cmd2
+    prompt_idx = cmd2.index("--prompt") + 1
+    assert hb._PERSONA_IDENTITY_MARKER in cmd2[prompt_idx].lower()
+
+
+def test_generate_persona_none_for_non_person_shot(monkeypatch, tmp_path):
+    backend = hb.HiggsfieldBackend(_cfg())
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            return _FakeProc(returncode=0, stdout=json.dumps(["job-x"]).encode())
+        if cmd[2] == "wait":
+            return _FakeProc(returncode=0, stdout=b'{"status":"completed","result_url":"https://x/a.mp4"}')
+        raise AssertionError("想定外: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb, "_download_url", lambda url, path, curl_bin=None, timeout_sec=120: None)
+    meta = backend.generate(_shot(id="s1"), str(tmp_path / "s1.mp4"))
+    assert meta["persona_anchor"] == "none"
+
+
+def test_generate_persona_disabled_by_config(monkeypatch, tmp_path):
+    cfg = _cfg()
+    cfg["visual"] = {"persona_consistency": False}
+    backend = hb.HiggsfieldBackend(cfg)
+    assert backend.persona_consistency is False
+
+    def fake_run(cmd, stdout, stderr, shell, timeout):
+        if cmd[2] == "cost":
+            return _FakeProc(returncode=0, stdout=b'{"credits": 5}')
+        if cmd[2] == "create":
+            return _FakeProc(returncode=0, stdout=json.dumps(["job-x"]).encode())
+        if cmd[2] == "wait":
+            return _FakeProc(returncode=0, stdout=b'{"status":"completed","result_url":"https://x/a.mp4"}')
+        raise AssertionError("想定外: {}".format(cmd))
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(hb, "_download_url", lambda url, path, curl_bin=None, timeout_sec=120: None)
+    # persona 無効なら person shot でも none
+    meta = backend.generate(_shot(id="s1", has_person=True), str(tmp_path / "s1.mp4"))
+    assert meta["persona_anchor"] == "none"

@@ -37,7 +37,7 @@ import subprocess
 import time
 from typing import List, Optional  # noqa: F401 — _augment_prompt_with_reference_visual で使用
 
-from pipeline.config import load_config
+from pipeline.config import load_config, project_root
 from pipeline.visual.base import VisualBackend, VisualBackendError
 
 # `higgsfield` バイナリが PATH に無い環境向けの明示フォールバック（node同梱パス）。
@@ -290,6 +290,76 @@ def _augment_prompt_with_reference_visual(base_prompt, shot):
 
 # Optional 型ヒントを遅延解決するため、モジュール末尾で import する必要はない
 # （関数内では文字列としてのみ扱っている）。
+
+
+# ---------------------------------------------------------------------------
+# persona_anchor: 人物 shot の identity 統一（診断 #1/#12 — 話者identity崩壊対策）
+# ---------------------------------------------------------------------------
+#
+# 診断（/tmp/ttp_gap_diagnosis.md）: shot 毎に別 seed 画像を i2v に食わせた結果、
+# 前半=男A→後半=男B→女性の手 と話者が別人に切り替わっていた。参考が単一人物の
+# リールなら、人物が出る全 shot で「同一人物」を維持すべき。
+# 対策（backend 内で完結・sequential generate を前提）:
+#   - 最初の人物 shot で生成した動画の代表フレームを抽出し persona 参照画像として保持。
+#   - 以降の人物 shot では、その persona 参照を --image-references に前置し、
+#     プロンプトへ「same person as the previous shot, consistent identity」を機械追記する。
+# 設定 visual.persona_consistency（既定 on）で無効化可能。
+
+# persona 一貫性のためにプロンプト末尾へ機械追記する identity 固定句。
+_PERSONA_IDENTITY_PHRASE = (
+    "same person as the previous shot, consistent identity, same face, hair and outfit"
+)
+# 追記済みか判定するための一意マーカー（idempotent 追記のため）。
+_PERSONA_IDENTITY_MARKER = "same person as the previous shot"
+
+
+def _shot_has_person(shot):
+    """shot が人物を含むか判定する（reference_visual.has_person もしくは shot.has_person）。"""
+    if not isinstance(shot, dict):
+        return False
+    rv = shot.get("reference_visual")
+    if isinstance(rv, dict) and rv.get("has_person") is True:
+        return True
+    return shot.get("has_person") is True
+
+
+def _build_persona_prompt(prompt):
+    """visual_prompt に identity 固定句を idempotent に追記する（純関数）。
+
+    既に固定句が含まれていれば二重追記しない。空プロンプトでも固定句だけは載せる。
+    """
+    base = prompt if isinstance(prompt, str) else ""
+    if _PERSONA_IDENTITY_MARKER in base.lower():
+        return base
+    stripped = base.strip().rstrip(". ")
+    if not stripped:
+        return _PERSONA_IDENTITY_PHRASE + "."
+    return "{}. {}.".format(stripped, _PERSONA_IDENTITY_PHRASE)
+
+
+def _apply_persona_anchor(shot, persona_ref_path):
+    """人物 shot に persona 参照画像とidentity固定句を適用した新しい shot dict を返す（純関数・非破壊）。
+
+    - reference_images の先頭に persona_ref_path を前置（重複除去・最大 _MAX_REFERENCE_IMAGES）。
+    - visual_prompt に identity 固定句を機械追記。
+    persona_ref_path が空なら shot をそのまま返す。
+    """
+    if not persona_ref_path or not isinstance(shot, dict):
+        return shot
+    new_shot = dict(shot)
+    existing = list(new_shot.get("reference_images") or [])
+    merged = [persona_ref_path] + [p for p in existing if p and p != persona_ref_path]
+    new_shot["reference_images"] = merged[:_MAX_REFERENCE_IMAGES]
+    new_shot["visual_prompt"] = _build_persona_prompt(new_shot.get("visual_prompt", ""))
+    return new_shot
+
+
+def _build_extract_frame_cmd(ffmpeg_bin, video_path, out_image_path, at_sec):
+    """生成済みクリップから代表フレーム1枚を抽出する ffmpeg コマンドを構築する（副作用なし・テスト対象）。"""
+    return [
+        str(ffmpeg_bin), "-y", "-ss", "{:.3f}".format(max(0.0, float(at_sec))),
+        "-i", str(video_path), "-frames:v", "1", "-q:v", "3", str(out_image_path),
+    ]
 
 
 def _build_create_cmd(cli_bin, model, shot, resolution):
@@ -592,6 +662,11 @@ class HiggsfieldBackend(VisualBackend):
         self.max_credits_per_shot = self.hf_cfg.get("max_credits_per_shot", _DEFAULT_MAX_CREDITS_PER_SHOT)
         self.poll_interval_sec = self.hf_cfg.get("poll_interval_sec", 5)
         self.poll_timeout_sec = self.hf_cfg.get("poll_timeout_sec", 600)
+        # persona_anchor: 人物 shot の identity 統一（既定 on）。sequential generate を通じて
+        # 最初の人物 shot の代表フレームを保持し、以降の人物 shot の参照へ連鎖させる。
+        self.persona_consistency = bool((full_cfg.get("visual") or {}).get("persona_consistency", True))
+        self.ffmpeg_bin = full_cfg.get("ffmpeg_bin") or str(project_root() / "bin" / "ffmpeg")
+        self._persona_ref_path = None
 
     # -- 個別ステップ（テスト容易性のため分割） -----------------------------
 
@@ -699,7 +774,38 @@ class HiggsfieldBackend(VisualBackend):
             "result_url": result.get("result_url"),
         }
 
+    def _capture_persona_anchor(self, shot, out_path):
+        """生成済みクリップ(out_path)から代表フレームを抽出し persona 参照として保持する。
+
+        best-effort（失敗しても例外は投げず False を返す）。成功時 self._persona_ref_path を
+        セットして以降の人物 shot の連鎖に使う。
+        """
+        try:
+            if not out_path or not os.path.isfile(out_path):
+                return False
+            anchor_path = out_path + ".persona.png"
+            duration = float(shot.get("duration_sec", 5) or 5)
+            at_sec = max(0.3, min(duration / 2.0, 2.0))
+            cmd = _build_extract_frame_cmd(self.ffmpeg_bin, out_path, anchor_path, at_sec)
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, timeout=30)
+            if proc.returncode == 0 and os.path.isfile(anchor_path):
+                self._persona_ref_path = anchor_path
+                return True
+        except Exception:
+            pass
+        return False
+
     def generate(self, shot: dict, out_path: str) -> dict:
+        # persona_anchor: 人物 shot なら identity 統一を試みる。既に persona 参照が確立して
+        # いれば（＝前の人物 shot で代表フレームを抽出済み）、それを参照へ前置しプロンプトへ
+        # identity 固定句を追記する。まだ無い（最初の人物 shot）なら、生成成功後に代表フレームを
+        # 抽出して以降の連鎖の起点にする。
+        person_shot = bool(self.persona_consistency) and _shot_has_person(shot)
+        persona_applied = False
+        if person_shot and self._persona_ref_path and os.path.isfile(self._persona_ref_path):
+            shot = _apply_persona_anchor(shot, self._persona_ref_path)
+            persona_applied = True
+
         # ★image_pathの実在チェックは全リトライ試行に共通の前提条件のため、安全リトライ
         # ループに入る前に1回だけ行う(image_pathは全試行を通じて不変=attempt_shotでも
         # dict(shot)によりそのまま維持される。差し替わるのはvisual_promptのみ)。
@@ -732,6 +838,16 @@ class HiggsfieldBackend(VisualBackend):
                 )
             meta["safety_retry_attempt"] = attempt
             meta["prompt_used"] = attempt_shot["visual_prompt"]
+            # persona_anchor の記録・連鎖起点の確立。
+            if person_shot:
+                if persona_applied:
+                    meta["persona_anchor"] = "applied"
+                    meta["persona_ref"] = self._persona_ref_path
+                else:
+                    captured = self._capture_persona_anchor(attempt_shot, out_path)
+                    meta["persona_anchor"] = "captured" if captured else "capture_failed"
+            else:
+                meta["persona_anchor"] = "none"
             return meta
         # 理論上到達しない(ループは必ずreturnかraiseで抜ける)。
         raise VisualBackendError("higgsfield: 安全リトライ処理で予期しない状態になりました。")

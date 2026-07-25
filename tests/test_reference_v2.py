@@ -422,3 +422,224 @@ def test_analyze_reference_v2_synth_cuts_when_no_cuts(tmp_path):
     )
     assert result["ok"] is True
     assert any("擬似カット" in w for w in result["spec"].get("warnings") or [])
+
+
+# ---------------------------------------------------------------------------
+# (m) 3秒ごと密ストーリーボード解析（診断 P1-6 / 「3秒に1回、1枚1枚を忠実再現」）
+# ---------------------------------------------------------------------------
+
+def test_select_storyboard_times_uniform_interval():
+    times = v2.select_storyboard_times(18.9, interval=3.0)
+    # 中央狙い: 1.5, 4.5, 7.5, 10.5, 13.5, 16.5 → 6枚（≈3秒に1枚）
+    assert times == [1.5, 4.5, 7.5, 10.5, 13.5, 16.5]
+
+
+def test_select_storyboard_times_short_duration_single_center_frame():
+    assert v2.select_storyboard_times(2.0, interval=3.0) == [1.0]
+    assert v2.select_storyboard_times(0.0, interval=3.0) == []
+
+
+def test_select_storyboard_times_caps_at_max_frames():
+    times = v2.select_storyboard_times(600.0, interval=3.0, max_frames=10)
+    assert len(times) == 10
+
+
+def test_resolve_storyboard_enabled_rules():
+    assert v2._resolve_storyboard_enabled({"reference": {"storyboard_enabled": True}}) is True
+    assert v2._resolve_storyboard_enabled({"reference": {"storyboard_enabled": False},
+                                           "director_quality": "supreme_plus"}) is False  # 明示優先
+    assert v2._resolve_storyboard_enabled({"director_quality": "supreme_plus"}) is True
+    assert v2._resolve_storyboard_enabled({"director_quality": "ttps"}) is True
+    assert v2._resolve_storyboard_enabled({"director_quality": "supreme"}) is False
+    assert v2._resolve_storyboard_enabled({}) is False
+
+
+def test_analyze_storyboard_builds_entries_from_vision():
+    frames = [
+        {"index": 1, "time": 1.5, "path": "/f/1.png"},
+        {"index": 2, "time": 4.5, "path": "/f/2.png"},
+    ]
+
+    def fake_vision(prompt, paths, timeout_sec=600):
+        return {"ok": True, "data": [
+            {"index": 1, "description_ja": "男性が頬に指を当てている", "on_screen_text": "10%/100%",
+             "has_person": True, "person_desc": "髭のある成人男性", "objects": ["指", "顔"]},
+            {"index": 2, "description_ja": "白背景に商品ボトル", "on_screen_text": "100%/100%",
+             "has_person": False, "person_desc": "", "objects": ["ボトル", "箱", "余分", "多", "すぎ", "る7", "cut"]},
+        ]}
+
+    results, warns = v2.analyze_storyboard(frames, cfg={"reference": {}}, vision_call=fake_vision)
+    assert len(results) == 2
+    assert results[0]["t"] == 1.5
+    assert results[0]["on_screen_text"] == "10%/100%"
+    assert results[0]["has_person"] is True
+    assert results[0]["person_desc"] == "髭のある成人男性"
+    # objects は最大6件に切り詰め
+    assert len(results[1]["objects"]) == 6
+    assert warns == []
+
+
+def test_analyze_storyboard_respects_max_vision_calls():
+    frames = [{"index": i + 1, "time": float(i), "path": "/f/{}.png".format(i)} for i in range(30)]
+    calls = {"n": 0}
+
+    def fake_vision(prompt, paths, timeout_sec=600):
+        calls["n"] += 1
+        return {"ok": True, "data": [
+            {"index": j + 1, "description_ja": "x", "on_screen_text": "", "has_person": False,
+             "person_desc": "", "objects": []} for j in range(len(paths))
+        ]}
+
+    cfg = {"reference": {"storyboard_batch_size": 5, "storyboard_max_vision_calls": 2}}
+    results, warns = v2.analyze_storyboard(frames, cfg=cfg, vision_call=fake_vision)
+    assert calls["n"] == 2              # 上限で打ち切り
+    assert len(results) == 10           # 5枚×2バッチ
+    assert any("上限" in w for w in warns)
+
+
+def test_analyze_storyboard_vision_unavailable_degrades(monkeypatch):
+    # vision_call=None は「既定 CLI を解決」の意味なので、CLI 自体が無い状況を再現する
+    monkeypatch.setattr(v2, "call_claude_vision_json", None)
+    frames = [{"index": 1, "time": 1.5, "path": "/f/1.png"}]
+    results, warns = v2.analyze_storyboard(frames, cfg={"reference": {}}, vision_call=None)
+    assert results == []
+    assert any("vision" in w for w in warns)
+
+
+def test_validate_v2_accepts_optional_storyboard():
+    spec = _minimal_valid_v2()
+    spec["storyboard"] = [
+        {"t": 1.5, "description_ja": "男性", "on_screen_text": "10%", "has_person": True,
+         "person_desc": "男", "objects": ["指"]},
+        {"t": 4.5, "description_ja": "商品", "on_screen_text": "", "has_person": False,
+         "person_desc": "", "objects": []},
+    ]
+    ok, errors, norm = v2.validate_reference_spec_v2(spec)
+    assert ok is True, errors
+    assert len(norm["storyboard"]) == 2
+
+
+def test_validate_v2_rejects_malformed_storyboard():
+    spec = _minimal_valid_v2()
+    spec["storyboard"] = [{"t": "notnum", "on_screen_text": 123}]
+    ok, errors, _ = v2.validate_reference_spec_v2(spec)
+    assert ok is False
+    assert any("storyboard" in e for e in errors)
+
+
+def test_analyze_reference_v2_attaches_storyboard_when_supreme_plus(tmp_path):
+    """storyboard が supreme_plus で自動 ON になり、spec に付与されることを stub 経由で検証。"""
+    cfg = {
+        "director_quality": "supreme_plus",
+        "reference": {"cache_dir": str(tmp_path), "storyboard_interval_sec": 3.0,
+                      "max_vision_calls": 2, "max_frames": 20, "vision_batch_size": 5},
+        "ffmpeg_bin": "/bin/echo",
+    }
+    url = "https://x.com/sb"
+
+    def fake_fetch(u, c):
+        vp = str(tmp_path / "video.mp4"); ap = str(tmp_path / "audio.m4a")
+        for p in (vp, ap):
+            with open(p, "wb") as f:
+                f.write(b"stub")
+        return {"video_path": vp, "audio_path": ap, "duration_sec": 12.0, "tmp_dir": None}
+
+    def fake_cuts(video_path, threshold):
+        return [4.0, 8.0]
+
+    def fake_extract(video_path, times, out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        out = []
+        for i, t in enumerate(times):
+            p = os.path.join(out_dir, "f_{:03d}.png".format(i + 1))
+            with open(p, "wb") as f:
+                f.write(b"\x89PNG")
+            out.append({"index": i + 1, "time": float(t), "path": p})
+        return out
+
+    def fake_vision(prompt, paths, timeout_sec=600):
+        # storyboard プロンプトなら storyboard スキーマ、通常なら vision スキーマを返す
+        if "description_ja" in prompt:
+            return {"ok": True, "data": [
+                {"index": i + 1, "description_ja": "説明{}".format(i + 1),
+                 "on_screen_text": "{}%".format((i + 1) * 10), "has_person": True,
+                 "person_desc": "男性", "objects": ["物"]} for i in range(len(paths))
+            ]}
+        return {"ok": True, "data": [
+            {"index": i + 1, "path": p, "telop_text": "t{}".format(i + 1), "telop_position": "top",
+             "telop_color": "white", "telop_stroke": "", "emphasis_words": [], "size_class": "large",
+             "visual_desc_en": "A person talks", "motion": "static", "has_person": True,
+             "has_product_logo": False} for i, p in enumerate(paths)
+        ]}
+
+    def fake_ametadata(*a, **k):
+        return ""
+
+    def fake_asr(path, c):
+        return {"ok": True, "text": "て" * 20, "duration": 12.0, "segments": []}
+
+    def fake_claude(prompt, timeout_sec=600):
+        return {"ok": True, "data": {"beats": [], "rhythm": None}}
+
+    def fake_fusion(prompt, timeout_sec=600):
+        return {"ok": True, "data": {
+            "version": 2, "url": url, "duration_sec": 12.0, "transcript": "て" * 20,
+            "segments": [], "beats": [], "rhythm": None,
+            "cuts": [{"t": 4.0, "confidence": 0.9}], "shots_ref": [],
+            "telops": [], "sfx_events": [], "bgm": {"present": False, "mood_guess": ""}, "warnings": [],
+        }}
+
+    result = v2.analyze_reference_v2(
+        url, cfg=cfg, fetch_video=fake_fetch, detect_cuts=fake_cuts, extract_frames=fake_extract,
+        vision_call=fake_vision, ffmpeg_run_ametadata=fake_ametadata, asr_post=fake_asr,
+        claude_call=fake_claude, fusion_call=fake_fusion,
+    )
+    assert result["ok"] is True, result
+    spec = result["spec"]
+    # duration 12s / interval 3s → 中央狙い 4枚（1.5,4.5,7.5,10.5）
+    assert "storyboard" in spec
+    assert len(spec["storyboard"]) == 4
+    assert spec["storyboard"][0]["on_screen_text"] == "10%"
+    assert result["meta"]["storyboard_entries"] == 4
+
+
+def test_analyze_reference_v2_cache_bypassed_when_storyboard_requested_but_absent(tmp_path):
+    """codex-review P2: storyboard 要求時、storyboard を持たない旧 cache は再解析される。"""
+    cfg_base = {"reference": {"cache_dir": str(tmp_path)}}
+    url = "https://x.com/p2"
+    cache_path = v2._cache_path_for_v2(ref_v1.normalize_url(url), cfg_base)
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    # storyboard キーを持たない旧 cache を用意
+    old_spec = {"version": 2, "url": url, "duration_sec": 12.0, "cuts": []}
+    with open(cache_path, "w", encoding="utf-8") as f:
+        import json as _j
+        _j.dump(old_spec, f)
+
+    # storyboard 無効なら cache をそのまま返す
+    res_off = v2.analyze_reference_v2(url, cfg={"reference": {"cache_dir": str(tmp_path)}})
+    assert res_off["cached"] is True and res_off["source"] == "cache"
+
+    # storyboard 有効（supreme_plus）だと storyboard を持たない cache は使わず再解析へ進む
+    # （ここでは fetch を失敗させ、cache を返さず解析経路に入ったことを error で確認する）。
+    def boom_fetch(u, c):
+        raise RuntimeError("re-analyze path reached")
+    res_on = v2.analyze_reference_v2(
+        url, cfg={"director_quality": "supreme_plus", "reference": {"cache_dir": str(tmp_path)}},
+        fetch_video=boom_fetch,
+    )
+    assert res_on["cached"] is False
+    assert "re-analyze path reached" in (res_on["error"] or "")
+
+
+def test_analyze_reference_v2_cache_used_when_storyboard_key_present(tmp_path):
+    """storyboard キーを既に持つ cache は storyboard 有効でもそのまま再利用する（再解析しない）。"""
+    cfg = {"director_quality": "supreme_plus", "reference": {"cache_dir": str(tmp_path)}}
+    url = "https://x.com/p2b"
+    cache_path = v2._cache_path_for_v2(ref_v1.normalize_url(url), cfg)
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    spec = {"version": 2, "url": url, "duration_sec": 12.0, "cuts": [], "storyboard": []}
+    with open(cache_path, "w", encoding="utf-8") as f:
+        import json as _j
+        _j.dump(spec, f)
+    res = v2.analyze_reference_v2(url, cfg=cfg)
+    assert res["cached"] is True and res["source"] == "cache"

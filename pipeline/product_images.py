@@ -539,6 +539,173 @@ def collect_product_images(url, dest_dir, cfg=None, local_dir=None, fetcher=None
 
 
 # ---------------------------------------------------------------------------
+# 決定論フィルタ（vision分類の前段。単色/グラデ装飾背景・極端アスペクトを機械除外）
+# ---------------------------------------------------------------------------
+#
+# 診断（/tmp/ttp_gap_diagnosis.md P1-5, #4/#11）で判明した実害:
+#   商品LPの「純ピンクグラデーション装飾背景」 001.png が商品画像として採用され、
+#   i2v の s1 起点シードに食われて冒頭にピンク薄膜が載った。vision分類だけに頼ると
+#   稀に取りこぼす（LLMが装飾背景を product_solo と誤答しうる）ため、vision の前段に
+#   決定論的なフィルタを1枚噛ませる:
+#     (a) 色ヒストグラム集中度 = 画面が少数の量子化色に潰れている（単色/緩いグラデ）
+#     (b) 極端なアスペクト比 = バナー形状（横長/縦長すぎる帯）
+#   実測（projects/p_20260724153643_b436cf49/product/*.png, grid=64, quant_bits=3）:
+#     001(ピンクグラデ背景): distinct=3, top1=0.717  → (a)で除外
+#     002〜006(実商品LP画像): distinct=29〜68, top1<=0.651 → 通過
+#   distinct（量子化後の色種数）が単色/グラデと実写商品を最も明瞭に分離する（3 vs >=29）。
+
+DEFAULT_PREFILTER_GRID = 64          # 色ヒストグラム計測用の縮小グリッド（64x64=4096px）
+DEFAULT_PREFILTER_QUANT_BITS = 3     # 1chあたり3bit=8階調へ量子化（最大512バケット）
+DEFAULT_PREFILTER_MIN_DISTINCT = 9   # 量子化色種数がこれ未満なら単色/グラデ扱い（001=3を除外）
+DEFAULT_PREFILTER_SOLID_TOP1 = 0.85  # 単一量子化色が画面の85%以上なら near-solid 候補
+DEFAULT_PREFILTER_SOLID_MAX_DISTINCT = 16  # near-solid はこの色種数未満のときだけ除外（下記参照）
+DEFAULT_PREFILTER_ASPECT_MAX = 3.0   # max(w/h, h/w) がこれ以上ならバナー形状として除外
+
+
+def _resolve_default_ffmpeg_bin():
+    """既定 ffmpeg バイナリ（bin/ffmpeg）を project_root 基準で解決する（遅延import）。"""
+    try:
+        from pipeline.config import project_root
+        return str(project_root() / "bin" / "ffmpeg")
+    except Exception:
+        return "ffmpeg"
+
+
+def measure_color_stats(image_path, ffmpeg_bin=None, grid=DEFAULT_PREFILTER_GRID,
+                        quant_bits=DEFAULT_PREFILTER_QUANT_BITS, timeout_sec=15):
+    """画像を grid×grid の raw RGB へ縮小し、量子化色ヒストグラムの集中度を計測する。
+
+    ffmpeg で rawvideo(rgb24) を stdout に吐かせ、純Python(stdlib)で量子化・集計する。
+    PIL/numpy 等の外部依存は追加しない（本モジュールは stdlib のみの方針）。
+
+    Returns: {"pixels":int, "distinct":int, "top1":float, "top3":float} または
+        計測不能時（ファイル不在・ffmpeg失敗・空出力）は None（=判定不能＝除外しない）。
+    """
+    ffmpeg_bin = ffmpeg_bin or _resolve_default_ffmpeg_bin()
+    g = max(8, int(grid))
+    cmd = [
+        str(ffmpeg_bin), "-v", "error", "-i", str(image_path),
+        "-vf", "scale={g}:{g}".format(g=g), "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+    ]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout_sec)
+    except Exception:
+        return None
+    data = proc.stdout or b""
+    n = len(data) // 3
+    if n <= 0:
+        return None
+    shift = 8 - max(1, min(8, int(quant_bits)))
+    buckets = {}
+    for i in range(0, n * 3, 3):
+        key = ((data[i] >> shift), (data[i + 1] >> shift), (data[i + 2] >> shift))
+        buckets[key] = buckets.get(key, 0) + 1
+    counts_desc = sorted(buckets.values(), reverse=True)
+    top1 = counts_desc[0] / float(n)
+    top3 = sum(counts_desc[:3]) / float(n)
+    return {"pixels": n, "distinct": len(buckets), "top1": round(top1, 4), "top3": round(top3, 4)}
+
+
+def is_monochrome_or_gradient(stats, min_distinct=DEFAULT_PREFILTER_MIN_DISTINCT,
+                              solid_top1_threshold=DEFAULT_PREFILTER_SOLID_TOP1,
+                              solid_max_distinct=DEFAULT_PREFILTER_SOLID_MAX_DISTINCT):
+    """color stats（measure_color_stats の戻り）から単色/グラデ装飾背景かを判定する（純関数）。
+
+    除外条件（いずれか成立で True）:
+      1. distinct（量子化色種数） < min_distinct … 少数色に潰れている=単色/緩いグラデ
+         （実測: 001ピンクグラデ背景=3 に対し実商品画像は 29〜68。極めて明瞭に分離する）
+      2. top1（最頻量子化色の占有率） >= solid_top1_threshold **かつ** distinct < solid_max_distinct
+         … ほぼ単一色の面で、色数も乏しい＝ベタ/グラデ板。
+         ★codex-review P1 対策: top1 だけで除外すると、白/無地スタジオ背景に小さく写る
+         正規の product_solo（product が画面の15%未満だと top1>0.85 になりうる）まで
+         誤って落としてしまう。実際の商品は輪郭・陰影・文字で色種が増える（distinct が高い）ため、
+         「単一色が支配的 かつ 色種も乏しい」ときに限って near-solid とみなす。
+    stats が None（計測不能）なら False（判定不能＝除外しない・保守側）。
+    """
+    if not isinstance(stats, dict):
+        return False
+    distinct = stats.get("distinct")
+    top1 = stats.get("top1")
+    if isinstance(distinct, int) and distinct < int(min_distinct):
+        return True
+    if (
+        isinstance(top1, (int, float)) and float(top1) >= float(solid_top1_threshold)
+        and isinstance(distinct, int) and distinct < int(solid_max_distinct)
+    ):
+        return True
+    return False
+
+
+def is_extreme_aspect(width, height, max_ratio=DEFAULT_PREFILTER_ASPECT_MAX):
+    """バナー形状（横長/縦長すぎ）かを判定する（純関数）。
+
+    max(w/h, h/w) >= max_ratio で True。width/height が不正なら False（判定不能）。
+    """
+    try:
+        w = float(width)
+        h = float(height)
+    except (TypeError, ValueError):
+        return False
+    if w <= 0 or h <= 0:
+        return False
+    ratio = max(w / h, h / w)
+    return ratio >= float(max_ratio)
+
+
+def deterministic_prefilter(
+    image_paths, ffmpeg_bin=None, color_stats_fn=None, dims_fn=None, cfg=None,
+):
+    """vision分類の前段。単色/グラデ装飾背景・極端アスペクト比を決定論的に除外判定する。
+
+    color_stats_fn / dims_fn は DI（テストで注入）。未指定時は実 ffmpeg/ffprobe を使う。
+    計測不能（None）の画像は除外しない（保守側＝vision へ委ねる）。
+
+    Returns: dict[path] -> {"excluded":bool, "reason":str|None, "stats":dict|None,
+        "width":int|None, "height":int|None}
+    """
+    pf_cfg = {}
+    if isinstance(cfg, dict):
+        pf_cfg = (cfg.get("product_images") or {}).get("prefilter") or {}
+    min_distinct = pf_cfg.get("min_distinct", DEFAULT_PREFILTER_MIN_DISTINCT)
+    solid_top1 = pf_cfg.get("solid_top1", DEFAULT_PREFILTER_SOLID_TOP1)
+    solid_max_distinct = pf_cfg.get("solid_max_distinct", DEFAULT_PREFILTER_SOLID_MAX_DISTINCT)
+    aspect_max = pf_cfg.get("aspect_max_ratio", DEFAULT_PREFILTER_ASPECT_MAX)
+    ffprobe_bin = (cfg.get("ffprobe_bin") if isinstance(cfg, dict) else None) or "ffprobe"
+
+    stats_fn = color_stats_fn or (lambda p: measure_color_stats(p, ffmpeg_bin=ffmpeg_bin))
+    dims_fn = dims_fn or (lambda p: _default_prober(p, ffprobe_bin))
+
+    out = {}
+    for p in image_paths or []:
+        if not p:
+            continue
+        try:
+            stats = stats_fn(p)
+        except Exception:
+            stats = None
+        try:
+            dims = dims_fn(p)
+        except Exception:
+            dims = None
+        width = dims[0] if dims else None
+        height = dims[1] if dims else None
+        reason = None
+        if is_monochrome_or_gradient(stats, min_distinct=min_distinct, solid_top1_threshold=solid_top1,
+                                     solid_max_distinct=solid_max_distinct):
+            reason = "monochrome_or_gradient"
+        elif width is not None and height is not None and is_extreme_aspect(width, height, max_ratio=aspect_max):
+            reason = "extreme_aspect"
+        out[str(p)] = {
+            "excluded": reason is not None,
+            "reason": reason,
+            "stats": stats,
+            "width": width,
+            "height": height,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
 # 商品画像の分類（vision）
 # ---------------------------------------------------------------------------
 
@@ -555,8 +722,12 @@ _CLASSIFY_PROMPT = (
     " product_solo=商品パッケージ単体の物撮り、product_in_use=商品が実際に使われている/"
     "手に持たれている/シーンに置かれている、logo_banner=ロゴ・バナー・広告テキスト・"
     "before/after 比較画像・成分表・受賞歴の様な図版、unrelated=商品と無関係。"
+    "★重要: 商品そのものが写っていない画像——純粋な装飾背景・単色やグラデーションの色面・"
+    "模様やテクスチャだけ・被写体不在の背景板——は必ず unrelated に分類すること"
+    "（商品LPの飾り背景を商品と誤認しないこと）。"
     "sharpness は 'high'（ボケが少ない）/'low'（ボケ・低画質）の2択。"
     "dominant_colors は画面を占める代表色2〜3件を '#RRGGBB' 形式のリストで（無理なら空配列）。"
+    "見えるものだけで判定し、推測で商品を補わないこと。"
     "出力はJSON配列のみ。要素は {index:int(1始まり), category:str, sharpness:str, "
     "dominant_colors:[str,...]} だけを含めること。コードフェンス禁止。"
 )
@@ -581,10 +752,17 @@ def _normalize_hex(color):
 _VISION_DEFAULT = object()  # 「引数未指定＝デフォルトを解決」を明示するためのセンチネル
 
 
-def classify_product_images(image_paths, vision_call=_VISION_DEFAULT, timeout_sec=600):
-    """画像リストを vision に投げ、各画像の分類 dict を返す。
+def classify_product_images(image_paths, vision_call=_VISION_DEFAULT, timeout_sec=600,
+                            prefilter_enabled=True, ffmpeg_bin=None,
+                            color_stats_fn=None, dims_fn=None, cfg=None):
+    """画像リストを（決定論フィルタ→vision）で分類し、各画像の分類 dict を返す。
 
-    Returns: list[dict] — 入力 image_paths と 1:1 対応。各要素は
+    ★2026-07-25 追加（診断 P1-5）: vision の前段に決定論フィルタ（deterministic_prefilter）を
+    噛ませ、単色/グラデ装飾背景（例: LPの純ピンク背景 001.png）・極端アスペクト（バナー形状）を
+    vision へ回す前に確実に落とす。除外された画像は adopted=False・category="unrelated"・
+    reason="monochrome_or_gradient"|"extreme_aspect" とし、vision コストも消費しない。
+
+    Returns: list[dict] — 入力 image_paths と 1:1・同順対応。各要素は
         {"path": str, "category": str, "sharpness": str, "dominant_colors": [hex,...],
          "adopted": bool, "reason": str|None}
         - adopted=True: category が product_solo / product_in_use かつ sharpness=high
@@ -592,6 +770,60 @@ def classify_product_images(image_paths, vision_call=_VISION_DEFAULT, timeout_se
         vision呼び出しに失敗した場合は縮退モード=全採用（adopted=True・reason="vision_failed"）
         で返し、警告メッセージは呼び出し側の warnings に追記される想定（本関数は例外を送出
         しない）。
+
+    vision_call: 差し込み可能な call_claude_vision_json 互換関数。テストで注入する
+        （既定は claude_runner.call_claude_vision_json）。
+    prefilter_enabled / color_stats_fn / dims_fn / ffmpeg_bin / cfg: 決定論フィルタの制御・DI。
+    """
+    paths = [str(p) for p in (image_paths or []) if p]
+    if not paths:
+        return []
+
+    # --- 前段: 決定論フィルタ（単色/グラデ背景・極端アスペクトを機械除外） ---
+    prefilter_map = {}
+    if prefilter_enabled:
+        try:
+            prefilter_map = deterministic_prefilter(
+                paths, ffmpeg_bin=ffmpeg_bin, color_stats_fn=color_stats_fn,
+                dims_fn=dims_fn, cfg=cfg,
+            )
+        except Exception:
+            prefilter_map = {}
+    excluded_entries = {}
+    vision_paths = []
+    for p in paths:
+        info = prefilter_map.get(p)
+        if info and info.get("excluded"):
+            excluded_entries[p] = {
+                "path": p, "category": "unrelated", "sharpness": "",
+                "dominant_colors": [], "adopted": False,
+                "reason": info.get("reason") or "prefiltered",
+            }
+        else:
+            vision_paths.append(p)
+
+    # 全て前段除外なら vision を呼ばずに返す（コスト節約）。
+    if not vision_paths:
+        return [excluded_entries[p] for p in paths]
+
+    vision_results = _classify_via_vision(vision_paths, vision_call=vision_call, timeout_sec=timeout_sec)
+    vision_by_path = {r["path"]: r for r in vision_results}
+
+    # 入力順に、前段除外分と vision 分類分をマージして返す。
+    merged = []
+    for p in paths:
+        if p in excluded_entries:
+            merged.append(excluded_entries[p])
+        else:
+            merged.append(vision_by_path.get(p) or {
+                "path": p, "category": "product_solo", "sharpness": "high",
+                "dominant_colors": [], "adopted": True, "reason": "vision_missing",
+            })
+    return merged
+
+
+def _classify_via_vision(image_paths, vision_call=_VISION_DEFAULT, timeout_sec=600):
+    """画像リストを vision に投げ、各画像の分類 dict を返す（前段フィルタ通過後の本体）。
 
     vision_call: 差し込み可能な call_claude_vision_json 互換関数。テストで注入する
         （既定は claude_runner.call_claude_vision_json）。

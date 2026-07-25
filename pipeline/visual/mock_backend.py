@@ -33,6 +33,16 @@ from pipeline.visual.base import VisualBackend, VisualBackendError
 FPS = 30
 OUT_W, OUT_H = 1080, 1920
 
+
+def _mock_shot_has_person(shot):
+    """shot が人物を含むか（reference_visual.has_person もしくは shot.has_person）。純関数。"""
+    if not isinstance(shot, dict):
+        return False
+    rv = shot.get("reference_visual")
+    if isinstance(rv, dict) and rv.get("has_person") is True:
+        return True
+    return shot.get("has_person") is True
+
 # ショットごとに見た目を変えるためのグラデーション配色パレット（循環使用）。
 _PALETTE = [
     ("0x1a2a6c", "0xfdbb2d"),  # 藍→金
@@ -222,6 +232,14 @@ def build_mock_cmd(ffmpeg_bin, shot, out_path, fonts_dir=None):
 class MockBackend(VisualBackend):
     name = "mock"
 
+    def __init__(self, cfg=None):
+        super().__init__(cfg)
+        # persona_anchor は mock では実フレーム抽出をせず「メタ記録のみ」（診断対策の
+        # 動作確認用）。sequential generate を通じて最初の人物 shot を捕捉扱いにし、以降の
+        # 人物 shot を適用扱いとして meta に記す。実際の identity 統一は higgsfield_backend 側。
+        self.persona_consistency = bool((self.cfg.get("visual") or {}).get("persona_consistency", True))
+        self._persona_seen = False
+
     def generate(self, shot: dict, out_path: str) -> dict:
         cfg = self.cfg or load_config()
         ffmpeg_bin = cfg.get("ffmpeg_bin") or str(project_root() / "bin" / "ffmpeg")
@@ -234,4 +252,14 @@ class MockBackend(VisualBackend):
                     shot.get("id"), proc.stderr.decode("utf-8", "replace")[:500]
                 )
             )
-        return {"backend": self.name, "shot_id": shot.get("id"), "out_path": out_path}
+        meta = {"backend": self.name, "shot_id": shot.get("id"), "out_path": out_path}
+        person_shot = bool(self.persona_consistency) and _mock_shot_has_person(shot)
+        if person_shot:
+            if self._persona_seen:
+                meta["persona_anchor"] = "applied"
+            else:
+                meta["persona_anchor"] = "captured"
+                self._persona_seen = True
+        else:
+            meta["persona_anchor"] = "none"
+        return meta

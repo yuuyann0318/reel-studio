@@ -799,6 +799,158 @@ def analyze_frames_with_vision(
 
 
 # ---------------------------------------------------------------------------
+# 3秒ごと密ストーリーボード解析（診断 P1-6 / ユーザー要求「3秒に1回、1枚1枚を忠実再現」）
+# ---------------------------------------------------------------------------
+#
+# カット境界に依らず一律 interval 秒でフレームを抽出し、1枚ずつ vision で「見えるものだけ」を
+# 詳細記述する。カット内でも刻むため、長回しのショットでも進捗ゲージ等の画面内テキスト変化を
+# 逃さない。結果は spec v2 に storyboard: [{t, description_ja, on_screen_text, has_person,
+# person_desc, objects[]}] として付与する。ハルシネーション対策としてプロンプトで
+# 「推測禁止・不明は unknown・見えないものは書かない」を明示する。
+
+_STORYBOARD_VISION_PROMPT = (
+    "あなたはショート動画のフレーム解析専門家です。以下に列挙する画像フレームを"
+    "それぞれ Read ツールで読み、1枚ずつ画面の内容を記述してください。\n\n"
+    "# 入力: 分析対象のフレーム画像パス一覧\n"
+    "{IMAGE_LIST_BLOCK}\n\n"
+    "# タスク（各画像について次を判定。前置き禁止・コードフェンス禁止・純粋なJSON配列のみ）\n"
+    "1. description_ja: 画面全体を日本語で1〜2文。人物の性別・服装・動作、映っている物、"
+    "構図、主要な色を、断定的な名詞・動詞で述べる。\n"
+    "2. on_screen_text: 画面内に表示されている文字・テロップ・数字・記号を全文そのまま"
+    "（例: 進捗ゲージ『10%』『100%』、価格、ロゴ文字）。複数行は \\n で連結。無ければ空文字列。\n"
+    "3. has_person: 画面に人物が写っているか true/false。\n"
+    "4. person_desc: 人物の性別・年齢感・服装・動作を日本語で。人物が居なければ空文字列。\n"
+    "5. objects: 画面内の主要な物の名詞リスト（日本語・最大6件）。無ければ []。\n\n"
+    "# 制約（ハルシネーション厳禁）\n"
+    "- 実際に画面に見えるものだけを記述すること。推測・想像で補わないこと。\n"
+    "- 判別できない項目は description_ja/person_desc では \"unknown\" と書き、"
+    "on_screen_text は見えない文字を創作せず空文字列にすること。\n"
+    "- 各要素の index は入力リストの順番と一致させること（1始まり）。\n"
+    "- 出力の最初の文字は [ 、最後の文字は ] 。それ以外の文字（説明・前置き）を一切含めないこと。\n\n"
+    "# 出力スキーマ（このJSON配列のみ）\n"
+    "[{\"index\":1,\"description_ja\":\"…\",\"on_screen_text\":\"…\",\"has_person\":true,"
+    "\"person_desc\":\"…\",\"objects\":[\"…\"]}]"
+)
+
+
+def _resolve_storyboard_enabled(cfg: Optional[Dict[str, Any]]) -> bool:
+    """storyboard 解析を有効化するか決める。
+
+    優先順位:
+      1. reference.storyboard_enabled が bool ならその値。
+      2. director_quality が supreme_plus / ttps なら True（自動 ON）。
+      3. それ以外は False。
+    """
+    cfg = cfg or {}
+    ref_cfg = cfg.get("reference") or {}
+    explicit = ref_cfg.get("storyboard_enabled")
+    if isinstance(explicit, bool):
+        return explicit
+    quality = (cfg.get("director_quality") or "").strip().lower()
+    return quality in ("supreme_plus", "ttps")
+
+
+def select_storyboard_times(duration_sec: float, interval: float = 3.0, max_frames: int = 80) -> List[float]:
+    """一律 interval 秒間隔のフレーム秒列を返す（各 interval 窓の中央を狙う）。
+
+    先頭は interval/2、以降 interval ごと。duration を超えない範囲。max_frames で頭打ち。
+    duration が interval 未満なら中央1枚のみ。
+    """
+    d = float(duration_sec or 0.0)
+    iv = max(0.5, float(interval or 3.0))
+    if d <= 0:
+        return []
+    if d <= iv:
+        return [round(d / 2.0, 3)]
+    times: List[float] = []
+    t = iv / 2.0
+    while t < d - 0.05 and len(times) < max_frames:
+        times.append(round(t, 3))
+        t += iv
+    return times
+
+
+def build_storyboard_prompt(frames_batch: List[Dict[str, Any]]) -> str:
+    """storyboard 用 vision プロンプトを、フレームパス一覧を埋めて組み立てる。"""
+    lines = []
+    for i, fr in enumerate(frames_batch, start=1):
+        lines.append("- 画像{} (index={}, t={:.2f}s): {}".format(
+            i, fr.get("index"), fr.get("time", 0.0), fr.get("path")))
+    return _STORYBOARD_VISION_PROMPT.replace("{IMAGE_LIST_BLOCK}", "\n".join(lines))
+
+
+def analyze_storyboard(
+    frames: List[Dict[str, Any]],
+    cfg: Optional[dict] = None,
+    vision_call=None,
+    progress_cb=None,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """storyboard フレーム群をバッチで vision に投げ、1枚ごとの詳細記述リストと warnings を返す。
+
+    各要素: {t, description_ja, on_screen_text, has_person, person_desc, objects[]}。
+    index/time は入力フレーム側で埋め直す（LLM が取り違えても回復する）。
+    vision 呼び出しは storyboard_max_vision_calls / storyboard_batch_size でガードする。
+    """
+    cfg = cfg or {}
+    ref_cfg = cfg.get("reference") or {}
+    batch = int(ref_cfg.get("storyboard_batch_size", 10))
+    max_calls = int(ref_cfg.get("storyboard_max_vision_calls", 8))
+    timeout_sec = int(ref_cfg.get("vision_timeout_sec", 600))
+    vision_call = vision_call if vision_call is not None else call_claude_vision_json
+    warnings: List[str] = []
+    results: List[Dict[str, Any]] = []
+    if vision_call is None:
+        warnings.append("storyboard: vision呼び出しが利用できませんでした")
+        return results, warnings
+    if not frames:
+        return results, warnings
+
+    calls_used = 0
+    for i in range(0, len(frames), max(1, batch)):
+        if calls_used >= max_calls:
+            warnings.append("storyboard: vision呼び出し上限({})に達したため残りフレームをスキップ".format(max_calls))
+            break
+        batch_frames = frames[i:i + batch]
+        prompt = build_storyboard_prompt(batch_frames)
+        try:
+            paths = [f["path"] for f in batch_frames if f.get("path")]
+            result = vision_call(prompt, paths, timeout_sec=timeout_sec)
+        except Exception as exc:
+            warnings.append("storyboard: vision例外: {}".format(str(exc)[:200]))
+            calls_used += 1
+            continue
+        calls_used += 1
+        if progress_cb:
+            try:
+                progress_cb("storyboard_batch", {"call": calls_used, "frames": len(batch_frames)})
+            except Exception:
+                pass
+        if not result or not result.get("ok"):
+            warnings.append("storyboard: バッチ失敗(call={}): {}".format(calls_used, (result or {}).get("error")))
+            continue
+        data = result.get("data")
+        if not isinstance(data, list):
+            warnings.append("storyboard: レスポンスがJSON配列ではない(call={})".format(calls_used))
+            continue
+        for j, item in enumerate(data):
+            if not isinstance(item, dict):
+                continue
+            fr = batch_frames[j] if j < len(batch_frames) else {}
+            objs = item.get("objects")
+            objs_list = [str(o).strip() for o in objs if str(o).strip()][:6] if isinstance(objs, list) else []
+            results.append({
+                "t": float(fr.get("time", 0.0)),
+                "description_ja": (item.get("description_ja") or "").strip(),
+                "on_screen_text": (item.get("on_screen_text") or "").strip(),
+                "has_person": bool(item.get("has_person")),
+                "person_desc": (item.get("person_desc") or "").strip(),
+                "objects": objs_list,
+            })
+    results.sort(key=lambda r: r.get("t", 0.0))
+    return results, warnings
+
+
+# ---------------------------------------------------------------------------
 # 融合プロンプト
 # ---------------------------------------------------------------------------
 
@@ -948,6 +1100,32 @@ def validate_reference_spec_v2(spec: Any) -> Tuple[bool, List[str], Optional[Dic
             if conf is not None and not _is_number(conf):
                 errors.append("music.confidence は数値である必要があります(got: {!r})".format(conf))
 
+    # storyboard は任意フィールド。list なら各要素の t / 必須キーの型のみゆるく確認する。
+    storyboard = spec.get("storyboard")
+    if storyboard is not None:
+        if not isinstance(storyboard, list):
+            errors.append("storyboard はリストである必要があります")
+        else:
+            prev_t = -1.0
+            for i, sb in enumerate(storyboard):
+                if not isinstance(sb, dict):
+                    errors.append("storyboard[{}] はオブジェクトではありません".format(i))
+                    continue
+                t = sb.get("t")
+                if not _is_number(t):
+                    errors.append("storyboard[{}].t が数値ではありません".format(i))
+                    continue
+                tf = float(t)
+                if duration_f and (tf < -0.1 or tf > duration_f + 0.5):
+                    errors.append("storyboard[{}].t が [0, duration] を超えています(t={})".format(i, tf))
+                if tf < prev_t - 1e-3:
+                    errors.append("storyboard[{}].t は単調非減少である必要があります".format(i))
+                prev_t = tf
+                if "on_screen_text" in sb and not isinstance(sb.get("on_screen_text"), str):
+                    errors.append("storyboard[{}].on_screen_text は文字列である必要があります".format(i))
+                if "objects" in sb and not isinstance(sb.get("objects"), list):
+                    errors.append("storyboard[{}].objects はリストである必要があります".format(i))
+
     if errors:
         return False, errors, None
     # 正常化(コピー)
@@ -1062,7 +1240,15 @@ def analyze_reference_v2(
     _progress("cache_check")
     cached = _load_cache(cache_path)
     if cached is not None:
-        return {"ok": True, "spec": cached, "source": "cache", "cached": True, "warnings": [], "error": None, "meta": meta}
+        # ★codex-review P2 対策: cache キーは URL のみ＝解析モードを含まない。storyboard を
+        # 後から有効化（supreme_plus/ttps 切替や reference.storyboard_enabled=True）しても、
+        # storyboard を持たない旧 cache がそのまま返ると新機能が握り潰される。storyboard が
+        # 要求されているのに cache に storyboard キーが無いときは cache を使わず再解析する。
+        cache_has_storyboard = isinstance(cached, dict) and ("storyboard" in cached)
+        if _resolve_storyboard_enabled(cfg) and not cache_has_storyboard:
+            _progress("cache_stale_storyboard")  # 再解析へフォールスルー
+        else:
+            return {"ok": True, "spec": cached, "source": "cache", "cached": True, "warnings": [], "error": None, "meta": meta}
 
     fetch_video_fn = fetch_video or default_fetch_video
     detect_cuts_fn = detect_cuts  # 実行時は ffmpeg_bin と閾値も引き回す
@@ -1165,6 +1351,37 @@ def analyze_reference_v2(
         )
         warnings.extend(vision_warnings)
         meta["vision_results"] = len(vision_results)
+
+        # -----------------------------------------------------------------
+        # 3秒ごと密ストーリーボード解析（P1-6・supreme_plus/ttps で自動 ON）
+        # カット境界に依らず一律 interval 秒でフレームを刻み、1枚ずつ vision で詳細記述する。
+        # -----------------------------------------------------------------
+        storyboard_results: List[Dict[str, Any]] = []
+        if _resolve_storyboard_enabled(cfg):
+            _progress("storyboard")
+            sb_interval = float(ref_cfg.get("storyboard_interval_sec", 3.0))
+            sb_times = select_storyboard_times(duration_sec, interval=sb_interval)
+            sb_dir = os.path.join(tmp_dir or tempfile.gettempdir(), "storyboard_frames")
+            try:
+                if extract_frames_fn is extract_frames_at_times:
+                    sb_frames = extract_frames_fn(ffmpeg_bin, video_path, sb_times, sb_dir)
+                else:
+                    sb_frames = extract_frames_fn(video_path, sb_times, sb_dir)
+            except Exception as exc:
+                warnings.append("storyboard: フレーム抽出失敗: {}".format(str(exc)[:200]))
+                sb_frames = []
+            meta["storyboard_frames"] = len(sb_frames)
+            storyboard_results, sb_warnings = analyze_storyboard(
+                sb_frames, cfg=cfg, vision_call=vision_call, progress_cb=progress_cb,
+            )
+            warnings.extend(sb_warnings)
+            meta["storyboard_entries"] = len(storyboard_results)
+            for f in sb_frames:
+                try:
+                    os.remove(f["path"])
+                except OSError:
+                    pass
+            shutil.rmtree(sb_dir, ignore_errors=True)
 
         # フレームPNGは以後不要 → 即削除
         for f in frames:
@@ -1318,6 +1535,13 @@ def analyze_reference_v2(
             meta["shots_ref_enrich"] = enrich_stats
         except Exception as exc:
             warnings.append("shots_ref_enrich 失敗: {}".format(str(exc)[:200]))
+
+        # 3秒ごと storyboard を spec に付与（P1-6）。validate 済み normalized_spec に後付けする
+        # （storyboard は任意フィールドで validate はゆるく通す）。
+        # storyboard が有効なら結果が空でもキーを付ける（下記 cache 判定を「キーの有無」で
+        # 行うため。vision不能等で空になっても毎回再解析しないようにする）。
+        if _resolve_storyboard_enabled(cfg):
+            normalized_spec["storyboard"] = storyboard_results
 
         # -----------------------------------------------------------------
         # R2b F2/F8/F7/F6: 決定論的な後段整形（LLM 融合結果を機械観測で補正）

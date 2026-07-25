@@ -818,3 +818,150 @@ def test_reference_ttp_block_declares_top_priority():
     from pipeline.config import project_root
     text = (project_root() / "pipeline" / "prompts" / "reference_ttp_block.txt").read_text(encoding="utf-8")
     assert "最上位" in text
+
+
+# ---------------------------------------------------------------------------
+# (j) 決定論プレフィルタ: 単色/グラデ装飾背景・極端アスペクトを vision 前段で除外
+#     （診断 P1-5 / #4/#11 — LPの純ピンク背景 001.png が i2v seed を汚染した対策）
+# ---------------------------------------------------------------------------
+
+def test_is_monochrome_or_gradient_flags_low_distinct():
+    # 001.png 実測相当（distinct=3 は極端に少数色＝単色/緩いグラデ）
+    stats = {"pixels": 4096, "distinct": 3, "top1": 0.717, "top3": 1.0}
+    assert product_images.is_monochrome_or_gradient(stats) is True
+
+
+def test_is_monochrome_or_gradient_flags_near_solid_flat_plate():
+    # 単一色が画面の大半（>=0.85）を占め、かつ色種も乏しい（distinct<16）ならベタ/グラデ板
+    stats = {"pixels": 4096, "distinct": 10, "top1": 0.90, "top3": 0.96}
+    assert product_images.is_monochrome_or_gradient(stats) is True
+
+
+def test_is_monochrome_or_gradient_keeps_small_product_on_plain_background():
+    # codex-review P1: 白/無地スタジオ背景に小さく写る正規商品は top1 が高くても
+    # 色種が豊富（distinct>=16）なので除外しない（商品の輪郭・陰影・文字で色数が増える）。
+    stats = {"pixels": 4096, "distinct": 40, "top1": 0.90, "top3": 0.94}
+    assert product_images.is_monochrome_or_gradient(stats) is False
+
+
+def test_is_monochrome_or_gradient_keeps_rich_product_image():
+    # 002〜006 実測相当（distinct>=29, top1<=0.65）は商品画像として通過させる
+    for stats in (
+        {"distinct": 29, "top1": 0.567},
+        {"distinct": 68, "top1": 0.651},
+        {"distinct": 48, "top1": 0.271},
+    ):
+        assert product_images.is_monochrome_or_gradient(stats) is False
+
+
+def test_is_monochrome_or_gradient_none_stats_is_conservative_keep():
+    # 計測不能（None）は判定不能＝除外しない（保守側でvisionへ委ねる）
+    assert product_images.is_monochrome_or_gradient(None) is False
+
+
+def test_is_extreme_aspect_flags_banner_shapes():
+    assert product_images.is_extreme_aspect(1200, 300) is True   # 4:1 横長バナー
+    assert product_images.is_extreme_aspect(300, 1200) is True   # 1:4 縦長帯
+    assert product_images.is_extreme_aspect(2000, 600) is True   # 3.33:1
+
+
+def test_is_extreme_aspect_keeps_normal_portrait_and_landscape():
+    assert product_images.is_extreme_aspect(800, 1000) is False  # 001 実寸(0.8)
+    assert product_images.is_extreme_aspect(750, 1230) is False  # 002 実寸
+    assert product_images.is_extreme_aspect(1080, 1920) is False # 9:16
+    assert product_images.is_extreme_aspect(0, 100) is False     # 不正は除外しない
+
+
+def test_deterministic_prefilter_with_injected_measures():
+    stats_map = {
+        "/p/pink.png": {"distinct": 3, "top1": 0.72},   # 単色/グラデ → 除外
+        "/p/banner.png": {"distinct": 40, "top1": 0.4}, # 色は豊富だがアスペクト極端 → 除外
+        "/p/product.png": {"distinct": 50, "top1": 0.5},# 通過
+    }
+    dims_map = {
+        "/p/pink.png": (800, 1000),
+        "/p/banner.png": (1600, 400),
+        "/p/product.png": (750, 1200),
+    }
+    out = product_images.deterministic_prefilter(
+        list(stats_map.keys()),
+        color_stats_fn=lambda p: stats_map[p],
+        dims_fn=lambda p: dims_map[p],
+    )
+    assert out["/p/pink.png"]["excluded"] is True
+    assert out["/p/pink.png"]["reason"] == "monochrome_or_gradient"
+    assert out["/p/banner.png"]["excluded"] is True
+    assert out["/p/banner.png"]["reason"] == "extreme_aspect"
+    assert out["/p/product.png"]["excluded"] is False
+
+
+def test_classify_product_images_prefilter_excludes_and_skips_vision():
+    """前段で除外された画像は adopted=False + 決定論 reason で、visionには回さない。"""
+    vision_seen = {"paths": None, "calls": 0}
+
+    def _fake_vision(prompt, paths, timeout_sec=600):
+        vision_seen["paths"] = list(paths)
+        vision_seen["calls"] += 1
+        return {"ok": True, "data": [
+            {"index": i + 1, "category": "product_solo", "sharpness": "high", "dominant_colors": []}
+            for i in range(len(paths))
+        ]}
+
+    paths = ["/p/pink.png", "/p/prod.png"]
+    stats_map = {"/p/pink.png": {"distinct": 3, "top1": 0.72}, "/p/prod.png": {"distinct": 50, "top1": 0.5}}
+    entries = product_images.classify_product_images(
+        paths, vision_call=_fake_vision,
+        color_stats_fn=lambda p: stats_map[p], dims_fn=lambda p: (800, 1000),
+    )
+    # 入力順は保たれる
+    assert [e["path"] for e in entries] == paths
+    assert entries[0]["adopted"] is False
+    assert entries[0]["reason"] == "monochrome_or_gradient"
+    assert entries[1]["adopted"] is True
+    # visionには除外画像を渡していない（コスト節約）
+    assert vision_seen["paths"] == ["/p/prod.png"]
+    assert vision_seen["calls"] == 1
+
+
+def test_classify_product_images_all_prefiltered_skips_vision_entirely():
+    def _boom_vision(prompt, paths, timeout_sec=600):
+        raise AssertionError("visionは呼ばれてはならない")
+
+    entries = product_images.classify_product_images(
+        ["/p/a.png", "/p/b.png"], vision_call=_boom_vision,
+        color_stats_fn=lambda p: {"distinct": 2, "top1": 0.99}, dims_fn=lambda p: (900, 1000),
+    )
+    assert all(e["adopted"] is False for e in entries)
+    assert all(e["reason"] == "monochrome_or_gradient" for e in entries)
+
+
+def test_classify_product_images_prefilter_disabled_is_backward_compat():
+    """prefilter_enabled=False なら従来どおり全て vision に回る。"""
+    def _fake_vision(prompt, paths, timeout_sec=600):
+        return {"ok": True, "data": [
+            {"index": i + 1, "category": "product_solo", "sharpness": "high", "dominant_colors": []}
+            for i in range(len(paths))
+        ]}
+    entries = product_images.classify_product_images(
+        ["/p/pink.png"], vision_call=_fake_vision, prefilter_enabled=False,
+        color_stats_fn=lambda p: {"distinct": 2, "top1": 0.99},
+    )
+    assert entries[0]["adopted"] is True
+
+
+def test_measure_color_stats_real_pink_lp_background_is_excluded():
+    """KR1 実測: 実物 001.png（LP純ピンクグラデ背景）が実 ffmpeg 計測で除外される。
+
+    bin/ffmpeg と実ファイルが無い環境ではスキップ（CI hermetic 環境保護）。"""
+    from pipeline.config import project_root
+    root = project_root()
+    ffmpeg = root / "bin" / "ffmpeg"
+    pink = root / "projects" / "p_20260724153643_b436cf49" / "product" / "001.png"
+    product = root / "projects" / "p_20260724153643_b436cf49" / "product" / "006.png"
+    if not ffmpeg.exists() or not pink.exists() or not product.exists():
+        pytest.skip("bin/ffmpeg または実物商品画像が無い環境")
+    pink_stats = product_images.measure_color_stats(str(pink), ffmpeg_bin=str(ffmpeg))
+    prod_stats = product_images.measure_color_stats(str(product), ffmpeg_bin=str(ffmpeg))
+    assert pink_stats is not None and prod_stats is not None
+    assert product_images.is_monochrome_or_gradient(pink_stats) is True
+    assert product_images.is_monochrome_or_gradient(prod_stats) is False
