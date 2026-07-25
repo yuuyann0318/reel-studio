@@ -121,7 +121,7 @@ function seed() {
   });
 }
 
-function startGenerateJob(projectId, theme, durationSec, style) {
+function startGenerateJob(projectId, theme, durationSec, style, voice) {
   const stages = [
     { stage: "queued", message: "キューに登録しました", pct: 0 },
     { stage: "script", message: "台本を生成しています…", pct: 18 },
@@ -153,6 +153,15 @@ function startGenerateJob(projectId, theme, durationSec, style) {
       sfx: [{ file: "whoosh_01.wav", at_sec: 2.0, gain_db: -8 }],
       subtitle_style: defaultSubtitleStyle(style),
     };
+    // 声UIのQA用: 参考にナレーションが有る前提で voice_used を確定する（実サーバの
+    // render 記録と同じ形）。theme に「ナレなし」を含めるとナレ無し(absent)を再現できる。
+    if (/ナレなし|ナレ無し|no-?narration/i.test(theme)) {
+      project.narration_mode = "absent";
+      project.voice_used = null;
+    } else {
+      project.narration_mode = "present";
+      project.voice_used = _voiceLabelFor(voice);
+    }
   };
   DB.jobs.set(job.id, job);
   return job;
@@ -212,7 +221,7 @@ function backendForPlanTier(planTier, backend) {
   return backend || "mock";
 }
 
-export async function createProject({ theme, duration, backend, style, planTier }) {
+export async function createProject({ theme, duration, backend, style, planTier, voice }) {
   await delay(150);
   if (!theme || !theme.trim()) {
     throw new ApiError("VALIDATION_ERROR", "テーマを入力してください", 422);
@@ -232,9 +241,31 @@ export async function createProject({ theme, duration, backend, style, planTier 
     plan_tier: tier,
     billing: { plan_tier: tier, coins_estimated: est.coins, coins_actual: resolvedBackend === "mock" ? 0 : null },
     style: style || "default",
+    voice: voice || "auto",
+    voice_used: null,
   });
-  startGenerateJob(id, theme.trim(), duration || 30, style || "default");
+  startGenerateJob(id, theme.trim(), duration || 30, style || "default", voice || "auto");
   return { id };
+}
+
+// 声カタログ（mock）: 実サーバ /api/voices と同じ形。free=say相当 / paid=fish相当。
+const MOCK_VOICES = [
+  { key: "say_kyoko", tier: "free", label: "落ち着いた女性（定番）", gender: "female", engine: "say", engine_voice_id: "Kyoko", pitch: "mid" },
+  { key: "say_otoya", tier: "free", label: "落ち着いた男性（定番）", gender: "male", engine: "say", engine_voice_id: "Otoya", pitch: "low" },
+  { key: "say_sandy", tier: "free", label: "明るい女性", gender: "female", engine: "say", engine_voice_id: "Sandy", pitch: null },
+  { key: "say_rocko", tier: "free", label: "力強い男性", gender: "male", engine: "say", engine_voice_id: "Rocko", pitch: null },
+  { key: "fish_demo0001", tier: "paid", label: "自然な女性（AI音声）", gender: "female", engine: "fish", engine_voice_id: "demo0001aaaa", pitch: "mid" },
+];
+export async function getVoices({ tier } = {}) {
+  await delay(60);
+  return (tier === "free" || tier === "paid")
+    ? MOCK_VOICES.filter((v) => v.tier === tier)
+    : MOCK_VOICES.slice();
+}
+function _voiceLabelFor(key) {
+  if (!key || key === "auto") return { key: "say_kyoko", label: "落ち着いた女性（定番）" };
+  const v = MOCK_VOICES.find((x) => x.key === key);
+  return v ? { key: v.key, label: v.label } : { key: "say_kyoko", label: "落ち着いた女性（定番）" };
 }
 
 // サーバ pipeline/plan_tier.estimate_coins と同じ概算（mock: 0円保証の再現）。

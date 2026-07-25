@@ -59,8 +59,8 @@ export const api = {
     return request(`/api/projects/${encodeURIComponent(id)}`);
   },
 
-  async createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier }) {
-    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier });
+  async createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier, voice }) {
+    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier, voice });
     const body = { theme, duration, style };
     // plan_tier（"free"|"paid"）を1変数で送る。指定時はサーバ側で backend を強制解決するため、
     // backend は送らない（後方互換のため未指定時のみ backend を尊重）。
@@ -68,11 +68,22 @@ export const api = {
     else if (backend) body.backend = backend;
     if (productUrl) body.product_url = productUrl; // 空/未指定なら送らない（通常モードのまま）
     if (referenceUrl) body.reference_url = referenceUrl; // 空/未指定なら送らない（通常の台本生成のまま）
+    // voice（"auto" | カタログkey）。未指定/"auto" は送らず、サーバ既定(auto)に任せる。
+    if (voice && voice !== "auto") body.voice = voice;
     return request("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+  },
+
+  // 選べる声のカタログ（読み取り専用・クレジット消費なし）。tier で free/paid を絞れる。
+  // 戻り値: [{key,tier,label,gender,engine,engine_voice_id,pitch}, ...]
+  async getVoices({ tier } = {}) {
+    if (MOCK) return mock.getVoices ? mock.getVoices({ tier }) : [];
+    const q = tier ? `?tier=${encodeURIComponent(tier)}` : "";
+    const payload = await request(`/api/voices${q}`);
+    return (payload && payload.voices) || [];
   },
 
   // 開始前の費用見積（実生成はしない・クレジット消費なし）。free は常に coins=0。

@@ -888,6 +888,12 @@ class JobManager:
         if project is not None:
             project["plan"] = studio_plan
             project["narration_segments"] = narration_segments
+            # 声UI/ナレ無し文言用: 参考動画にナレーションが有る(present)/無い(absent)かを
+            # project 直下へ保存する（plan.validate_plan で剥がれない位置に置く）。UI は
+            # absent のとき「お手本にナレーションが無いため、声は使われませんでした」を出す。
+            _nmode = plan.get("narration_mode")
+            if _nmode:
+                project["narration_mode"] = _nmode
             if bgm_file:
                 project["bgm_selected"] = bgm_file
             # 編集レシピ選択の入力として bgm_mood を残す（studio_plan には mood が

@@ -24,6 +24,25 @@ def test_list_projects_returns_list():
     assert isinstance(resp.json(), list)
 
 
+def test_list_voices_returns_catalog_shape():
+    resp = client.get("/api/voices")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert isinstance(body.get("voices"), list)
+    # 各エントリは声カタログのスキーマ（key/tier/label/engine）を持つ。
+    for v in body["voices"]:
+        assert set(["key", "tier", "label", "engine"]).issubset(v.keys())
+        assert v["tier"] in ("free", "paid")
+
+
+def test_list_voices_tier_filter_free_excludes_paid():
+    resp = client.get("/api/voices?tier=free")
+    assert resp.status_code == 200
+    voices = resp.json()["voices"]
+    # 0円保証: tier=free で絞ると有料(paid)声は一切含まれない。
+    assert all(v["tier"] == "free" for v in voices)
+
+
 def test_get_unknown_project_returns_404_with_error_shape():
     resp = client.get("/api/projects/p_does_not_exist_xyz")
     assert resp.status_code == 404

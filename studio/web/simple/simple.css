@@ -252,6 +252,53 @@ body.theme-simple {
 .s-course-chip__coins { font-weight: 600; color: var(--text-dim); }
 .s-course-chip--free { background: var(--plan-blue-soft); border-color: var(--accent); color: var(--accent); }
 .s-course-chip--paid { background: var(--plan-amber-soft); border-color: var(--plan-amber); color: var(--plan-amber); }
+
+/* ---------- 声えらび（🎙️）: 縦積みのラジオ選択カード。プランカードと同じ作法
+   （枠線明示・選択状態はアクセント枠）。無料=青(--accent) / 有料(fish)=琥珀(--plan-amber）。 */
+.s-voice-grid { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.s-voice-card {
+  display: flex; align-items: center; gap: 12px;
+  width: 100%; text-align: left;
+  padding: 12px 14px;
+  background: var(--surface, #fff);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color .12s, box-shadow .12s, transform .06s;
+}
+.s-voice-card:hover { border-color: var(--text-dim); box-shadow: var(--shadow-2); }
+.s-voice-card:active { transform: scale(0.99); }
+.s-voice-card__icon {
+  flex: none; width: 34px; height: 34px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 999px; background: #F5F6FA; color: var(--text-dim);
+}
+.s-voice-card__body { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.s-voice-card__title { font-weight: 700; font-size: 14px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+.s-voice-card__sub { font-size: 12px; color: var(--text-dim); line-height: 1.45; }
+.s-voice-card__paidtag {
+  flex: none; font-size: 10.5px; font-weight: 800; letter-spacing: .02em;
+  padding: 1px 7px; border-radius: 999px;
+  background: var(--plan-amber-soft); color: var(--plan-amber); border: 1px solid var(--plan-amber);
+}
+.s-voice-card__radio {
+  flex: none; width: 20px; height: 20px; border-radius: 999px;
+  border: 2px solid var(--border-strong); position: relative; background: #fff;
+}
+/* 選択中: アクセント枠＋ラジオ中央ドット（プランカードと同じアクセント表現）。 */
+.s-voice-card[aria-checked="true"] { border: 2px solid var(--accent); background: var(--plan-blue-soft); }
+.s-voice-card[aria-checked="true"] .s-voice-card__icon { background: var(--accent); color: #fff; }
+.s-voice-card[aria-checked="true"] .s-voice-card__radio { border-color: var(--accent); }
+.s-voice-card[aria-checked="true"] .s-voice-card__radio::after {
+  content: ""; position: absolute; inset: 3px; border-radius: 999px; background: var(--accent);
+}
+/* 有料(fish)声を選択中は琥珀アクセントへ切替（0円/課金の色分けを維持）。 */
+.s-voice-card--paid[aria-checked="true"] { border-color: var(--plan-amber); background: var(--plan-amber-soft); }
+.s-voice-card--paid[aria-checked="true"] .s-voice-card__icon { background: var(--plan-amber); }
+.s-voice-card--paid[aria-checked="true"] .s-voice-card__radio { border-color: var(--plan-amber); }
+.s-voice-card--paid[aria-checked="true"] .s-voice-card__radio::after { background: var(--plan-amber); }
+.s-voice-loading { font-size: 12.5px; color: var(--text-dim); padding: 6px 2px; }
+
 .s-hint {
   font-size: 12.5px;
   color: var(--text-dim);

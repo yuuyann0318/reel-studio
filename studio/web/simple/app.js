@@ -29,6 +29,10 @@ const state = {
   referenceUrl: "", // 参考動画リンク（任意）。貼るとその動画の構成・テンポを再現した台本になる
   style: "default", // 'default' | 'vertical_hook'
   planTier: "free", // 'free'（無料コース） | 'paid'（有料コース）。映像/声/文字起こしの課金をまとめて切替
+  voice: "auto",   // 'auto'（お手本に合わせる）| カタログkey（"say_kyoko" / "fish_xxxx"）
+  voices: [],      // GET /api/voices のカタログ（全tier）。planTierで表示を絞る
+  voicesLoaded: false,
+  voicesLoading: false,
   estimate: { free: { coins: 0, note: "0円" }, paid: null }, // プランごとの費用見積（paidはAPIで動的取得）
   estimateLoading: false,
   submitting: false,
@@ -258,6 +262,7 @@ async function submitCreate() {
       theme, duration: 30, planTier: state.planTier, style: state.style,
       productUrl: productUrl || undefined, // 空なら送らない（通常モードのまま）
       referenceUrl, // TTP v2: 必須
+      voice: state.voice, // "auto" | カタログkey（api.js側で auto は送らない）
     });
     setState({ submitting: false });
     await beginGenerate(id);
@@ -662,6 +667,22 @@ function ttsMetaHtml(project) {
   return "";
 }
 
+// 使った声 / ナレ無し文言。参考動画にナレーションが無い(narration_mode="absent")ときは
+// 「声は使われなかった」旨を出す。ある場合は project.voice_used.label を「使った声」として出す。
+// narration_mode / voice_used を持たない旧プロジェクトは、どちらとも断定できないため何も出さない
+// （"absent" を欠落から推測すると、ナレ有りの旧作を誤ってナレ無し表示してしまうため。codex-review P2）。
+function voiceUsedMetaHtml(project) {
+  if (!project) return "";
+  if (project.narration_mode === "absent") {
+    return `<div class="s-director-note">🎙️ お手本にナレーションが無いため、声は使われませんでした</div>`;
+  }
+  const used = project.voice_used;
+  if (used && used.label) {
+    return `<div class="s-director-note">🎙️ 使った声: ${escapeHtml(used.label)}</div>`;
+  }
+  return "";
+}
+
 // 商品アフィリエイト動画モードで取得した商品画像のサムネイル行。
 // project["product"] は {"name","url","images":[{"path","source","width","height"}],"warnings"}。
 function productThumbsHtml(project) {
@@ -811,6 +832,67 @@ function planCardsHtml() {
     </div>`;
 }
 
+// ---------- 声えらび（🎙️） ----------
+// 声カタログを一度だけ取得する（読み取り専用・クレジット消費なし）。free/paid 両方を保持し、
+// 表示時に planTier で絞る。取得失敗しても致命ではない（「おまかせ」だけで作成できる）。
+const ICON_MIC = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8"/></svg>`;
+const ICON_AUTO = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/><circle cx="12" cy="12" r="3.2"/></svg>`;
+const ICON_VOICE_F = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M12 12v7M9 19h6"/></svg>`;
+const ICON_VOICE_M = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="14" r="5"/><path d="M15 9l5-5M15 4h5v5"/></svg>`;
+
+async function ensureVoices() {
+  if (state.voicesLoaded || state.voicesLoading) return;
+  setState({ voicesLoading: true });
+  try {
+    const voices = await api.getVoices(); // 全tier取得（表示時にplanTierで絞る）
+    setState({ voicesLoading: false, voicesLoaded: true, voices: Array.isArray(voices) ? voices : [] });
+  } catch (_e) {
+    setState({ voicesLoading: false, voicesLoaded: true, voices: [] }); // 失敗時は「おまかせ」のみ
+  }
+}
+
+// 現在の planTier で選べる声。free コースは有料(fish)声を絶対に出さない（0円保証をUIでも担保）。
+function voicesForCurrentTier() {
+  if (state.planTier === "free") return state.voices.filter((v) => v.tier === "free");
+  return state.voices.slice(); // paid コースは free+paid どちらも選べる
+}
+
+function voiceIcon(v) {
+  if (v.gender === "female") return ICON_VOICE_F;
+  if (v.gender === "male") return ICON_VOICE_M;
+  return ICON_MIC;
+}
+
+function voiceCardHtml(key, iconSvg, title, sub, paidTag) {
+  const pressed = state.voice === key;
+  return `
+    <button type="button" class="s-voice-card ${paidTag ? "s-voice-card--paid" : ""}" data-voice="${escapeHtml(key)}" role="radio" aria-checked="${pressed}">
+      <span class="s-voice-card__icon" aria-hidden="true">${iconSvg}</span>
+      <span class="s-voice-card__body">
+        <span class="s-voice-card__title">${escapeHtml(title)}${paidTag ? `<span class="s-voice-card__paidtag">有料</span>` : ""}</span>
+        ${sub ? `<span class="s-voice-card__sub">${escapeHtml(sub)}</span>` : ""}
+      </span>
+      <span class="s-voice-card__radio" aria-hidden="true"></span>
+    </button>`;
+}
+
+function voiceSectionHtml() {
+  const list = voicesForCurrentTier();
+  const rows = [voiceCardHtml("auto", ICON_AUTO, "おまかせ（お手本に合わせる）", "参考動画の話し手に近い声を自動で選びます")];
+  for (const v of list) {
+    rows.push(voiceCardHtml(v.key, voiceIcon(v), v.label, "", v.tier === "paid"));
+  }
+  const loading = state.voicesLoading && !state.voicesLoaded
+    ? `<div class="s-voice-loading">声の一覧を読み込んでいます…</div>` : "";
+  return `
+    <div class="s-section-title" style="margin-top:16px;">🎙️ 声をえらぶ</div>
+    <div class="s-voice-grid" role="radiogroup" aria-label="声をえらぶ">
+      ${rows.join("")}
+    </div>
+    ${loading}
+    <div class="s-hint">「おまかせ」なら参考動画の話し手に近い声を自動で選びます。${state.planTier === "free" ? "無料コースの声はすべて0円です。" : "「有料」タグの声はAIナレーション（コース: 有料）です。"}</div>`;
+}
+
 // ---------- 画面: ホーム ----------
 function renderHome() {
   const el = document.getElementById("simple-app");
@@ -853,6 +935,8 @@ function renderHome() {
       ${planCardsHtml()}
       <div class="s-hint">「無料」はずっと0円でお試しできます。「有料」はAIが本物の映像と声を作り、コインを消費します（かかるコイン数は上に表示されます）。</div>
 
+      ${voiceSectionHtml()}
+
       ${state.submitError ? `<div class="s-error-banner" role="alert">${escapeHtml(state.submitError.message)}</div>` : ""}
 
       <button type="button" class="s-cta" id="s-submit" style="margin-top:18px;" ${(!state.theme.trim() || !_isReferenceUrlValid(state.referenceUrl) || state.submitting) ? "disabled" : ""}>
@@ -878,11 +962,19 @@ function renderHome() {
   el.querySelectorAll("[data-style]").forEach((btn) => btn.addEventListener("click", () => setState({ style: btn.dataset.style })));
   el.querySelectorAll("[data-plan]").forEach((btn) => btn.addEventListener("click", () => {
     const tier = btn.dataset.plan;
-    setState({ planTier: tier });
+    // 0円保証: 無料コースへ切替えたとき、選択中の声が有料(fish)なら「おまかせ」へ自動で外す。
+    let nextVoice = state.voice;
+    if (tier === "free" && nextVoice !== "auto") {
+      const sel = state.voices.find((v) => v.key === nextVoice);
+      if (!sel || sel.tier === "paid") nextVoice = "auto";
+    }
+    setState({ planTier: tier, voice: nextVoice });
     if (tier === "paid") ensurePaidEstimate(); // 選んだ瞬間に見積を取得して費用を動的表示
   }));
+  el.querySelectorAll("[data-voice]").forEach((btn) => btn.addEventListener("click", () => setState({ voice: btn.dataset.voice })));
   el.querySelector("#s-submit").addEventListener("click", submitCreate);
   el.querySelectorAll("[data-open-project]").forEach((c) => c.addEventListener("click", () => openPast(c.dataset.openProject)));
+  ensureVoices(); // 声カタログを取得（未取得のときだけ・読み取り専用）
 }
 
 // ---------- 画面: 作成中 ----------
@@ -981,6 +1073,7 @@ function renderCreating() {
       <h2>作成しています</h2>
       <div class="s-creating__theme">「${escapeHtml(theme || "")}」</div>
       ${state.current ? courseChipForProject(state.current) : courseChipHtml(state.planTier, null, state.planTier === "paid" && state.estimate.paid ? state.estimate.paid.coins : (state.planTier === "free" ? 0 : null))}
+      ${state.current && state.current.narration_mode === "absent" ? voiceUsedMetaHtml(state.current) : ""}
       <div class="s-steps">
         ${steps.map((s, i) => `
           <div class="s-step ${i < activeIdx ? "is-done" : ""} ${i === activeIdx ? "is-active" : ""}">
@@ -1041,6 +1134,7 @@ function renderResult() {
     ${topbarHtml()}
     ${directorMetaHtml(project)}
     ${ttsMetaHtml(project)}
+    ${voiceUsedMetaHtml(project)}
     ${referenceInfoHtml(project)}
     ${productThumbsHtml(project)}
     <div class="s-card">

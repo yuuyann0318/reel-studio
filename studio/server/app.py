@@ -32,6 +32,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from pipeline import render
 from pipeline import plan_tier as plan_tier_mod
+from pipeline import voice_catalog
 from pipeline.config import load_config, project_root, output_dir
 from studio.server import projects
 from studio.server.jobs import (
@@ -212,6 +213,22 @@ async def estimate_cost(request: Request):
     except (TypeError, ValueError):
         duration_sec = cfg.get("target_duration_sec", 30)
     return plan_tier_mod.estimate_coins(cfg, plan_tier, duration_sec=duration_sec)
+
+
+@app.get("/api/voices")
+async def list_voices(tier: str = None):
+    """選べる声のカタログを返す（読み取り専用・クレジット消費なし）。
+
+    Query: tier="free"|"paid"（任意）。指定時はその tier の声だけへ絞り込む。
+    Returns: {"voices": [{"key","tier","label","gender","engine","engine_voice_id","pitch"}, ...]}
+    free = macOS `say` の日本語ボイス（課金ゼロ）、paid = config.voices.fish の登録声。
+    UI の「声をえらぶ」はこの一覧＋先頭の「おまかせ(auto)」で構成する。
+    """
+    cfg = load_config()
+    catalog = voice_catalog.build_catalog(cfg)
+    if tier in ("free", "paid"):
+        catalog = [e for e in catalog if e.get("tier") == tier]
+    return {"voices": catalog}
 
 
 def _probe_duration(ffprobe_bin, path):
