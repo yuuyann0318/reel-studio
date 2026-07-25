@@ -49,9 +49,28 @@ _DEFAULTS = {
         "poll_interval_sec": 5,
         "poll_timeout_sec": 600,
     },
+    # visual: 映像生成の横断オプション。
+    #   no_text_in_video: ①予防 — 生成プロンプトに「映像内へ文字を描かない」negative 指示を
+    #     常時注入する（既定 True・False で従来動作）。AIが描く偽文字/崩れ日本語の予防。
+    #   persona_consistency: 人物 shot の identity 統一（既定 True）。
+    #   text_check: ②検知 — 生成クリップ（テロップ焼き込み前）の代表フレームを vision で検査し、
+    #     映像内文字/文字化けの疑いを report / project.json に記録する（作り直しはユーザー判断）。
+    "visual": {
+        "no_text_in_video": True,
+        "persona_consistency": True,
+        "text_check": {
+            "enabled": True,
+            "max_vision_calls": 3,     # vision 呼び出しの上限回数
+            "vision_batch_size": 10,   # 1 呼び出しあたりのフレーム枚数
+            "vision_timeout_sec": 600,
+        },
+    },
     "cloudapi": {"base_url": "", "api_key_env": "HIGGSFIELD_API_KEY"},
     "tts": {
         "engine": "fish_audio",
+        # 声の選び方: "auto" = 参考動画の話者推定(narrator_voice)に近い声を自動選択。
+        # カタログの key（例 "say_kyoko" / "fish_xxxxxxxx"）を書けばその声で固定する。
+        "voice_mode": "auto",
         "fish_audio": {
             "api_key_env": "FISH_AUDIO_API_KEY",
             "model": "s2.1-pro-free",
@@ -60,6 +79,13 @@ _DEFAULTS = {
             "timeout_sec": 60,
         },
     },
+    # 声カタログ（有料 tier = Fish Audio）の登録制リスト。実在する voice(reference)ID のみ
+    # 登録すること（存在しないIDを書くと Fish 側で無効になり say へフォールバックする）。
+    # 各要素: {"id": <Fish reference_id>, "label": <平易な日本語>, "gender": male|female,
+    #          "style": <任意>, "pitch": low|mid|high(任意)}。空なら auto/paid は
+    #          config.json tts.fish_audio.reference_id（単一声）へ実質フォールバックする。
+    # 無料 tier（say）は実機の `say -v ?` から自動列挙するため登録不要。
+    "voices": {"fish": []},
     "product_images": {
         "max_images": 6,
         "min_short_side": 400,
@@ -84,6 +110,9 @@ _DEFAULTS = {
         "vision_timeout_sec": 600,
         "onset_jump_db": 6.0,
         "onset_window_samples": 2048,
+        # 声TTP: 発話区間から話者の f0 中央値・話速を推定し spec.narrator_voice を付与する
+        # （ASR 成功 かつ segments 非空のときのみ・librosa 任意依存）。False で無効化。
+        "narrator_voice_enabled": True,
         # R2a F5: BPM/beat 抽出（librosa）。False で無効化。
         "music_extract_enabled": True,
         # 3秒ごと密ストーリーボード解析（診断 P1-6 / ユーザー要求「3秒に1回、1枚1枚を

@@ -41,6 +41,7 @@ from pipeline import edit_profile
 from pipeline import product_images
 from pipeline import render
 from pipeline import scenes as scenes_mod
+from pipeline import sfx_planner as _sfx_planner_mod
 from pipeline import subtitles
 from pipeline import tts as tts_mod
 from pipeline.config import load_config, project_root
@@ -748,6 +749,11 @@ class JobManager:
                     "duration_sec": (reference_spec or {}).get("duration_sec"),
                     "beats_count": len((reference_spec or {}).get("beats") or []),
                     "warnings": ref_result.get("warnings") or [],
+                    # 声TTP: 話者推定を保存し、render 段の声auto選択（voice_mode="auto"）が参照する。
+                    "narrator_voice": (reference_spec or {}).get("narrator_voice"),
+                    # R4 SFX厳格ゲート: 参考にSE（顕著オンセット）が無いかを保存し、render 段が
+                    # 参照する（Studio は full spec を持ち越さないため、判定結果だけ渡す）。
+                    "sfx_absent": bool(_sfx_planner_mod.reference_sfx_is_absent(reference_spec)),
                 }
             else:
                 reason = ref_result.get("error") or "不明なエラー"
@@ -1604,6 +1610,23 @@ def _render_project(project_id, plan, cfg):
         raise RuntimeError("すべてのシーンがオフになっています。1つ以上のシーンをオンにしてから仕上げてください")
 
     project_snapshot = projects.get_project(project_id)
+    # 声TTP: 使う声を確定する（voice_mode = project.voice、既定 "auto"）。auto のときは
+    # project.reference.narrator_voice（話者推定）に近い声を現在の tier から選ぶ。
+    from pipeline import voice_catalog as _voice_catalog
+    _voice_cfg = dict(cfg)
+    _voice_cfg["tts"] = dict(cfg.get("tts") or {})
+    _voice_cfg["tts"]["voice_mode"] = (project_snapshot or {}).get("voice") or "auto"
+    _narrator_voice = ((project_snapshot or {}).get("reference") or {}).get("narrator_voice")
+    _voice_used = _voice_catalog.resolve_voice(_voice_cfg, _narrator_voice)
+    _tts_engine = _voice_used.get("engine")
+    _tts_evid = _voice_used.get("engine_voice_id")
+    _say_voice = _tts_evid if _tts_engine == "say" else cfg.get("voice", "Kyoko")
+    _fish_ref = _tts_evid if _tts_engine == "fish" else None
+    if project_snapshot is not None:
+        _proj_v = projects.get_project(project_id)
+        if _proj_v is not None:
+            _proj_v["voice_used"] = {"key": _voice_used.get("key"), "label": _voice_used.get("label")}
+            projects.save_project(_proj_v)
     narration_segments_map = (project_snapshot or {}).get("narration_segments") or {}
     sync_enabled = bool(narration_segments_map) and all(
         isinstance(narration_segments_map.get(s["id"]), str) and narration_segments_map.get(s["id"]).strip()
@@ -1615,7 +1638,10 @@ def _render_project(project_id, plan, cfg):
     if sync_enabled:
         seg_texts = [narration_segments_map[s["id"]] for s in enabled_shots]
         seg_dir = work_dir / "narration_segments"
-        sync_result = tts_mod.synthesize_segments(seg_texts, str(seg_dir), cfg, voice=cfg.get("voice", "Kyoko"))
+        sync_result = tts_mod.synthesize_segments(
+            seg_texts, str(seg_dir), cfg,
+            voice=_say_voice, engine=_tts_engine, fish_reference_id=_fish_ref,
+        )
         if not sync_result.get("ok"):
             sync_enabled = False
         else:
@@ -1721,7 +1747,9 @@ def _render_project(project_id, plan, cfg):
                 "max_tempo": render.TEMPO_GUARD_MAX_TEMPO,
             }
     else:
-        tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
+        tts_backend = tts_mod.get_tts_backend(
+            voice=_say_voice, cfg=cfg, engine=_tts_engine, fish_reference_id=_fish_ref,
+        )
         tts_meta = dict(tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg))
         tts_meta["mode"] = "full"
 
@@ -1807,8 +1835,14 @@ def _render_project(project_id, plan, cfg):
     if edit_prof is not None:
         try:
             durations = [s["duration_sec"] for s in telop_shots]
+            # R4 SFX厳格ゲート: 生成時に保存した sfx_absent フラグを render 段へ渡す。
+            # Studio は full spec を持ち越さないので、ゲート判定用の最小 spec（sfx_events 空）を
+            # 合成して渡す（absent のとき cut SFX / first_shot_impact を発火させない）。
+            _sfx_absent = bool(((project_snapshot or {}).get("reference") or {}).get("sfx_absent"))
+            _gate_ref = {"sfx_events": []} if _sfx_absent else None
             enhancement = render.compute_edit_enhancement_kwargs(
                 durations, edit_prof, project_seed=project_id, plan=plan,
+                reference_spec=_gate_ref,
             )
             sfx_specs = sfx_specs + enhancement["sfx_extra"]
             bgm_curve = enhancement["bgm_curve"]

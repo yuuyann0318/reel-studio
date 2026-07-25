@@ -139,6 +139,10 @@ def test_run_generate_reference_success_saves_meta_overrides_duration_and_passes
         assert saved["reference"] == {
             "url": reference_url, "ok": True, "source": "fish_asr",
             "cached": False, "duration_sec": 22.0, "beats_count": 2, "warnings": [],
+            # 声TTP: spec に narrator_voice が無ければ None（この spec には narration 推定なし）
+            "narrator_voice": None,
+            # R4 SFXゲート: この spec は sfx_events を持たない → SE無し判定 True
+            "sfx_absent": True,
         }
         # 15<=22<=60なのでclampされず、そのままdirectorのtarget_duration_secへ反映される
         assert capture["target_duration_sec"] == 22.0

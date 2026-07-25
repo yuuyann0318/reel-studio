@@ -862,6 +862,136 @@ def compute_reference_narration_mode(spec: Dict[str, Any], asr_ok: bool) -> str:
     return "unknown"
 
 
+def _try_import_librosa_np():
+    """librosa + numpy を遅延 import（任意依存）。無ければ (None, None)。"""
+    try:
+        import librosa  # type: ignore
+        import numpy as np  # type: ignore
+        return librosa, np
+    except Exception:
+        return None, None
+
+
+# 話者性別のしきい値（f0 中央値 Hz）。一般的な成人の基本周波数帯:
+#   男性 ~85-155Hz / 女性 ~165-255Hz。あいまい帯(150-180)は unknown（confidence を下げる）。
+_F0_FEMALE_HZ = 180.0
+_F0_MALE_HZ = 150.0
+# pitch ラベルのしきい値（絶対 Hz）。声カタログの pitch と突き合わせる粗い3段階。
+_PITCH_LOW_HZ = 150.0
+_PITCH_HIGH_HZ = 230.0
+# 解析する発話音声の上限秒（pyin は重いので先頭からこの尺だけ見る）。
+_NARRATOR_MAX_ANALYZE_SEC = 30.0
+
+
+def _classify_narrator_gender(f0_median: float) -> Tuple[str, float]:
+    """f0 中央値 [Hz] から (gender_guess, base_confidence) を返す。"""
+    if f0_median >= _F0_FEMALE_HZ:
+        # 帯の中心(210)から離れるほど自信あり（0.6〜0.9）
+        conf = min(0.9, 0.6 + (f0_median - _F0_FEMALE_HZ) / 200.0)
+        return "female", conf
+    if f0_median <= _F0_MALE_HZ:
+        conf = min(0.9, 0.6 + (_F0_MALE_HZ - f0_median) / 200.0)
+        return "male", conf
+    # あいまい帯
+    return "unknown", 0.35
+
+
+def _classify_pitch(f0_median: float) -> str:
+    if f0_median < _PITCH_LOW_HZ:
+        return "low"
+    if f0_median > _PITCH_HIGH_HZ:
+        return "high"
+    return "mid"
+
+
+def estimate_narrator_voice(
+    audio_path: str,
+    segments: Optional[List[Dict[str, Any]]],
+    duration_sec: float,
+    cfg: Optional[Dict[str, Any]] = None,
+    _librosa_np=None,
+) -> Optional[Dict[str, Any]]:
+    """参考音声の発話区間から話者の f0 中央値・話速を推定し narrator_voice を返す。
+
+    ナレーション有り（ASR 成功で segments 非空）のときだけ意味を持つ。声カタログの
+    自動選択（voice_mode="auto"）が gender_guess/pitch を突き合わせて似た声を選ぶ。
+
+    Returns:
+      {"gender_guess": "male"|"female"|"unknown", "pitch": "low"|"mid"|"high",
+       "f0_median_hz": float, "speech_rate_cps": float|None, "confidence": float}
+      または None（librosa 不在 / 発話区間なし / 有声フレーム不足 / 失敗時）。
+      例外は投げない（本編解析を止めない）。
+    """
+    librosa, np = _librosa_np if _librosa_np is not None else _try_import_librosa_np()
+    if librosa is None or np is None:
+        return None
+    segs = [s for s in (segments or []) if isinstance(s, dict)]
+    if not segs:
+        return None
+    try:
+        sr = 16000
+        y, _sr = librosa.load(audio_path, sr=sr, mono=True)
+        if y is None or len(y) == 0:
+            return None
+        total = len(y)
+        # 発話区間だけを連結（音楽/無音を除外＝簡易な「分離」）。上限尺まで。
+        pieces = []
+        collected = 0.0
+        text_chars = 0
+        speech_dur = 0.0
+        for s in segs:
+            st = s.get("start")
+            en = s.get("end")
+            if not isinstance(st, (int, float)) or not isinstance(en, (int, float)):
+                continue
+            st = max(0.0, float(st))
+            en = max(st, float(en))
+            i0 = int(st * sr)
+            i1 = min(total, int(en * sr))
+            if i1 <= i0:
+                continue
+            pieces.append(y[i0:i1])
+            seg_len = (i1 - i0) / float(sr)
+            speech_dur += seg_len
+            txt = s.get("text")
+            if isinstance(txt, str):
+                text_chars += len(txt.strip())
+            collected += seg_len
+            if collected >= _NARRATOR_MAX_ANALYZE_SEC:
+                break
+        if not pieces:
+            return None
+        speech = np.concatenate(pieces)
+        if len(speech) < sr // 2:  # 0.5秒未満は信頼できない
+            return None
+
+        # pyin で基本周波数（有声区間のみ）。fmin/fmax は人声帯に限定。
+        f0, voiced_flag, _vp = librosa.pyin(
+            speech, fmin=70.0, fmax=400.0, sr=sr,
+        )
+        f0_voiced = f0[~np.isnan(f0)] if f0 is not None else np.array([])
+        if f0_voiced.size < 10:
+            return None
+        f0_median = float(np.median(f0_voiced))
+        voiced_ratio = float(f0_voiced.size) / float(f0.size) if f0.size else 0.0
+
+        gender, base_conf = _classify_narrator_gender(f0_median)
+        pitch = _classify_pitch(f0_median)
+        # 有声率が低いと信頼を割り引く（0.5未満で減衰）。
+        confidence = round(max(0.1, min(0.95, base_conf * min(1.0, voiced_ratio / 0.5))), 3)
+        speech_rate_cps = round(text_chars / speech_dur, 2) if speech_dur > 0 and text_chars > 0 else None
+
+        return {
+            "gender_guess": gender,
+            "pitch": pitch,
+            "f0_median_hz": round(f0_median, 1),
+            "speech_rate_cps": speech_rate_cps,
+            "confidence": confidence,
+        }
+    except Exception:
+        return None
+
+
 def _resolve_storyboard_enabled(cfg: Optional[Dict[str, Any]]) -> bool:
     """storyboard 解析を有効化するか決める。
 
@@ -1128,6 +1258,22 @@ def validate_reference_spec_v2(spec: Any) -> Tuple[bool, List[str], Optional[Dic
             conf = music.get("confidence")
             if conf is not None and not _is_number(conf):
                 errors.append("music.confidence は数値である必要があります(got: {!r})".format(conf))
+
+    # narrator_voice は任意フィールド（ナレ有り+ASR成功時のみ付く）。dict なら列挙値/型のみ確認。
+    nv = spec.get("narrator_voice")
+    if nv is not None:
+        if not isinstance(nv, dict):
+            errors.append("narrator_voice はオブジェクトである必要があります")
+        else:
+            g = nv.get("gender_guess")
+            if g is not None and g not in ("male", "female", "unknown"):
+                errors.append("narrator_voice.gender_guess が不正です(got: {!r})".format(g))
+            p = nv.get("pitch")
+            if p is not None and p not in ("low", "mid", "high"):
+                errors.append("narrator_voice.pitch が不正です(got: {!r})".format(p))
+            c = nv.get("confidence")
+            if c is not None and not _is_number(c):
+                errors.append("narrator_voice.confidence は数値である必要があります(got: {!r})".format(c))
 
     # storyboard は任意フィールド。list なら各要素の t / 必須キーの型のみゆるく確認する。
     storyboard = spec.get("storyboard")
@@ -1656,6 +1802,25 @@ def analyze_reference_v2(
             }
         except Exception as exc:
             warnings.append("narration_rhythm 失敗: {}".format(str(exc)[:200]))
+
+        # 声TTP: 発話区間から話者の f0 中央値・話速を推定し narrator_voice を付与する。
+        # ASR 成功（=セリフ実在）かつ segments 非空のときだけ意味を持つ。voice_mode="auto"
+        # のとき pipeline.voice_catalog がこれを見て似た声を選ぶ。ナレ無し/ASR失敗では付けない。
+        narrator_voice_enabled = bool(ref_cfg.get("narrator_voice_enabled", True))
+        if narrator_voice_enabled and asr_ok and speech_segments:
+            try:
+                nv = estimate_narrator_voice(
+                    audio_path, speech_segments, duration_sec, cfg=cfg,
+                )
+                if nv is not None:
+                    normalized_spec["narrator_voice"] = nv
+                    meta["narrator_voice"] = {
+                        "gender_guess": nv.get("gender_guess"),
+                        "pitch": nv.get("pitch"),
+                        "confidence": nv.get("confidence"),
+                    }
+            except Exception as exc:
+                warnings.append("narrator_voice 推定 失敗: {}".format(str(exc)[:200]))
 
         # F6: SE 音色 MFCC（参考音色を sfx_events に付与。以後 sfx_planner で参照）
         sfx_matcher_enabled = bool(ref_cfg.get("sfx_matcher_enabled", True))

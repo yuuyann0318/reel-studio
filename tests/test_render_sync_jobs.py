@@ -73,7 +73,7 @@ def test_render_project_sync_mode_pads_short_trim_and_truncates_long_trim(monkey
         {"path": "/tmp/seg1.wav", "duration_sec": 1.0},  # display = 1.25 < trim(5.0) -> truncate
     ]
 
-    def fake_synthesize_segments(texts, out_dir, cfg, voice="Kyoko"):
+    def fake_synthesize_segments(texts, out_dir, cfg, voice="Kyoko", **_kw):
         assert texts == ["断片1のテキストです。", "断片2のテキストです。"]
         return {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None}
 
@@ -120,7 +120,7 @@ def test_render_project_sync_mode_ignores_missing_narration_jp_on_disabled_shots
     ]
     monkeypatch.setattr(
         jobs_mod.tts_mod, "synthesize_segments",
-        lambda texts, out_dir, cfg, voice="Kyoko": {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
+        lambda texts, out_dir, cfg, voice="Kyoko", **_kw: {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
     )
     calls = _capture_ffmpeg(monkeypatch)
     cfg = {"ffmpeg_bin": "/bin/ffmpeg"}
@@ -139,7 +139,7 @@ def test_render_project_without_narration_segments_falls_back_to_full_mode(monke
         jobs_mod.tts_mod, "synthesize_segments",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("full modeではsynthesize_segmentsは呼ばれてはいけない")),
     )
-    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
 
     calls = _capture_ffmpeg(monkeypatch)
     cfg = {"ffmpeg_bin": "/bin/ffmpeg", "voice": "Kyoko"}
@@ -163,7 +163,7 @@ def test_render_project_partial_narration_segments_falls_back_to_full_mode(monke
         jobs_mod.tts_mod, "synthesize_segments",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("欠けがあるのに呼ばれてはいけない")),
     )
-    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
 
     calls = _capture_ffmpeg(monkeypatch)
     cfg = {"ffmpeg_bin": "/bin/ffmpeg"}
@@ -183,7 +183,7 @@ def test_render_project_segment_tts_failure_falls_back_to_full_mode(monkeypatch)
         jobs_mod.tts_mod, "synthesize_segments",
         lambda *a, **kw: {"ok": False, "segments": [], "backend": None, "fallback_reason": "segment_1_exception:boom"},
     )
-    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
 
     calls = _capture_ffmpeg(monkeypatch)
     cfg = {"ffmpeg_bin": "/bin/ffmpeg"}

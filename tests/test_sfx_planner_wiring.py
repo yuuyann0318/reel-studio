@@ -59,7 +59,7 @@ def test_run_pipeline_passes_plan_to_compute_edit_enhancement_kwargs(monkeypatch
         {"path": "/tmp/seg1.wav", "duration_sec": 2.5},
     ]
 
-    def _fake_synthesize_segments(texts, out_dir, cfg_, voice="Kyoko"):
+    def _fake_synthesize_segments(texts, out_dir, cfg_, voice="Kyoko", **_kw):
         return {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None}
 
     monkeypatch.setattr(run.tts_mod, "synthesize_segments", _fake_synthesize_segments)
@@ -153,7 +153,7 @@ def test_render_project_passes_plan_to_compute_edit_enhancement_kwargs(monkeypat
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("full modeで呼ばれてはいけない")),
     )
     monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend",
-                         lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+                         lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
     monkeypatch.setattr(jobs_mod.render, "run_ffmpeg",
                          lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
 
@@ -174,3 +174,42 @@ def test_render_project_passes_plan_to_compute_edit_enhancement_kwargs(monkeypat
     assert captured["plan"].get("sfx_plan"), "plan.sfx_plan がそのまま届いている必要がある"
     assert captured["plan"].get("hook_end_shot_id") == "s1"
     assert captured["plan"].get("cta_start_shot_id") == "s2"
+
+
+def test_render_project_passes_gate_reference_when_sfx_absent(monkeypatch):
+    """R4 SFXゲート配線: project.reference.sfx_absent=True のとき、_render_project は
+    compute_edit_enhancement_kwargs へ「SE無し」を示す reference_spec を渡し、出力SEがゼロになる。
+    （codex-review P1: Studio 経路でゲートが発火していなかった不具合の回帰テスト）。"""
+    project = _make_studio_project_with_plan_v2_extras()
+    # 参考にSEが無いと生成時に判定された状態を再現
+    project["reference"] = {"url": "u", "ok": True, "sfx_absent": True}
+    projects.save_project(project)
+
+    monkeypatch.setattr(
+        jobs_mod.tts_mod, "synthesize_segments",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("full modeで呼ばれてはいけない")),
+    )
+    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend",
+                         lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
+    monkeypatch.setattr(jobs_mod.render, "run_ffmpeg",
+                         lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
+
+    captured = {}
+    real_fn = jobs_mod.render.compute_edit_enhancement_kwargs
+
+    def _spy(durations, edit_profile, **kwargs):
+        result = real_fn(durations, edit_profile, **kwargs)
+        captured["reference_spec"] = kwargs.get("reference_spec")
+        captured["sfx_extra"] = result["sfx_extra"]
+        captured["first_shot_impact_sec"] = result["first_shot_impact_sec"]
+        return result
+
+    monkeypatch.setattr(jobs_mod.render, "compute_edit_enhancement_kwargs", _spy)
+
+    cfg = {"ffmpeg_bin": "/bin/ffmpeg"}
+    jobs_mod._render_project(project["id"], project["plan"], cfg)
+
+    # ゲート用 reference_spec（sfx_events 空）が渡り、出力SEがゼロになっていること
+    assert captured.get("reference_spec") == {"sfx_events": []}
+    assert captured.get("sfx_extra") == []
+    assert captured.get("first_shot_impact_sec") is None

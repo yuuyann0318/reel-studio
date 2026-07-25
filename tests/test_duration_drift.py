@@ -88,7 +88,7 @@ def test_run_pipeline_records_small_drift_without_warning(monkeypatch):
     ]
     monkeypatch.setattr(
         run.tts_mod, "synthesize_segments",
-        lambda texts, out_dir, cfg_, voice="Kyoko": {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
+        lambda texts, out_dir, cfg_, voice="Kyoko", **_kw: {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
     )
     monkeypatch.setattr(run.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
 
@@ -112,7 +112,7 @@ def test_run_pipeline_records_large_drift_with_warning(monkeypatch):
     ]
     monkeypatch.setattr(
         run.tts_mod, "synthesize_segments",
-        lambda texts, out_dir, cfg_, voice="Kyoko": {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
+        lambda texts, out_dir, cfg_, voice="Kyoko", **_kw: {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
     )
     monkeypatch.setattr(run.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
 
@@ -144,7 +144,7 @@ def test_run_pipeline_warns_on_raw_drift_just_above_threshold_even_if_rounded_va
     ]
     monkeypatch.setattr(
         run.tts_mod, "synthesize_segments",
-        lambda texts, out_dir, cfg_, voice="Kyoko": {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
+        lambda texts, out_dir, cfg_, voice="Kyoko", **_kw: {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None},
     )
     monkeypatch.setattr(run.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
 
@@ -213,7 +213,7 @@ def _drain(q):
 def test_run_render_records_drift_and_emits_warning_once_when_large(monkeypatch):
     project = _make_project_for_render("尺乖離テスト:jobs大きく超過", target_duration_sec=5.0, trim_end=12.0)
     monkeypatch.setattr(jobs_mod.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
-    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
 
     manager = _job_manager_without_worker(monkeypatch)
     job_id = "job_drift_test_large"
@@ -233,7 +233,7 @@ def test_run_render_records_drift_and_emits_warning_once_when_large(monkeypatch)
 def test_run_render_records_drift_without_warning_when_small(monkeypatch):
     project = _make_project_for_render("尺乖離テスト:jobs誤差範囲", target_duration_sec=5.0, trim_end=6.0)
     monkeypatch.setattr(jobs_mod.render, "run_ffmpeg", lambda cmd, timeout_sec=None: {"returncode": 0, "stderr": ""})
-    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
 
     manager = _job_manager_without_worker(monkeypatch)
     job_id = "job_drift_test_small"

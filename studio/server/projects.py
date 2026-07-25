@@ -116,7 +116,7 @@ def _now_iso():
 
 
 def create_project(theme, target_duration_sec, backend_name, status="generating", style="default", product_url=None,
-                    reference_url=None, plan_tier=None, billing=None):
+                    reference_url=None, plan_tier=None, billing=None, voice=None):
     """新規プロジェクトの雛形を作成し保存する。plan/shotsは生成ジョブが後で埋める。
 
     style: "default" | "vertical_hook"（縦書きテロップ・高速カットのTTPスタイル）。
@@ -164,6 +164,11 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
         "product": None,
         "reference": None,
         "tts": None,
+        # 声TTP: 使う声の指定。"auto"（既定=参考の話者に近い声を自動選択）またはカタログ key
+        # （例 "say_kyoko" / "fish_xxxxxxxx"）。None は "auto" 相当。UI は次パスで露出する。
+        "voice": voice or "auto",
+        # 実際に使われた声（解決後）。render 時に voice_catalog.resolve_voice() の結果を記録する。
+        "voice_used": None,
     }
     save_project(project)
     return project

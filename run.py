@@ -32,6 +32,7 @@ from pipeline import reference_v2
 from pipeline import subtitles
 from pipeline import render
 from pipeline import tts as tts_mod
+from pipeline import voice_catalog
 from pipeline.visual import get_backend
 from qa import qa_check
 
@@ -612,6 +613,16 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     narration_wav_path = run_dir / "narration.wav"
     tts_mode = "full"
     shot_display_durations = {}
+    # 声TTP: 使う声を確定する。voice_mode="auto" なら参考の narrator_voice（話者推定）に
+    # 最も近い声を現在の tier（free=say / paid=fish）から選ぶ。手動 key 指定ならその声。
+    # narration_mode=absent（ナレ無し）のときは声は使われないが、記録のため解決だけしておく。
+    _narrator_voice = (reference_spec or {}).get("narrator_voice") if isinstance(reference_spec, dict) else None
+    voice_used = voice_catalog.resolve_voice(cfg, _narrator_voice)
+    _tts_engine = voice_used.get("engine")
+    _tts_evid = voice_used.get("engine_voice_id")
+    _say_voice = _tts_evid if _tts_engine == "say" else cfg.get("voice", "Kyoko")
+    _fish_ref = _tts_evid if _tts_engine == "fish" else None
+    report["voice_used"] = {"key": voice_used.get("key"), "label": voice_used.get("label")}
     # P0-2: narration_mode="absent"（参考にナレーション無し）は TTS を丸ごとスキップし、
     # 尺ぴったりの無音トラックだけ用意する（BGM+テロップで成立・尺 drift 0）。
     narration_absent = (plan.get("narration_mode") == "absent") or (
@@ -642,7 +653,8 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             if sync_eligible:
                 seg_dir = run_dir / "narration_segments"
                 sync_result = tts_mod.synthesize_segments(
-                    [s["narration_jp"].strip() for s in shots], str(seg_dir), cfg, voice=cfg.get("voice", "Kyoko")
+                    [s["narration_jp"].strip() for s in shots], str(seg_dir), cfg,
+                    voice=_say_voice, engine=_tts_engine, fish_reference_id=_fish_ref,
                 )
 
             if sync_result and sync_result.get("ok"):
@@ -679,7 +691,9 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             else:
                 for shot in shots:
                     shot_display_durations[shot["id"]] = shot["duration_sec"]
-                tts_backend = tts_mod.get_tts_backend(voice=cfg.get("voice", "Kyoko"), cfg=cfg)
+                tts_backend = tts_mod.get_tts_backend(
+                    voice=_say_voice, cfg=cfg, engine=_tts_engine, fish_reference_id=_fish_ref,
+                )
                 tts_meta = dict(tts_backend.synthesize(plan.get("narration_script", ""), str(narration_wav_path), cfg))
                 tts_meta["mode"] = "full"
 

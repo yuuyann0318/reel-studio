@@ -66,7 +66,7 @@ def _setup_full_mode(monkeypatch):
         jobs_mod.tts_mod, "synthesize_segments",
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("full modeではsynthesize_segmentsは呼ばれてはいけない")),
     )
-    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+    monkeypatch.setattr(jobs_mod.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
 
 
 def test_render_project_records_edit_profile_applied_true_on_success(monkeypatch):

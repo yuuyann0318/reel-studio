@@ -203,8 +203,11 @@ class FishAudioTTSBackend(TTSBackend):
 
     name = "fish_audio"
 
-    def __init__(self, voice="Kyoko", _http_post=None, _sleep=None):
+    def __init__(self, voice="Kyoko", _http_post=None, _sleep=None, reference_id=None):
         self.voice = voice
+        # reference_id: 声カタログで選ばれた Fish の声ID。指定時は cfg.tts.fish_audio.reference_id を
+        # 上書きする（=声を選べる）。None なら従来どおり cfg 側の reference_id を使う。
+        self.reference_id = reference_id
         self._http_post = _http_post or _default_fish_audio_http_post
         self._sleep = _sleep or time.sleep
 
@@ -224,7 +227,8 @@ class FishAudioTTSBackend(TTSBackend):
 
         model = fish_cfg.get("model") or _FISH_AUDIO_DEFAULT_MODEL
         audio_format = fish_cfg.get("format") or _FISH_AUDIO_DEFAULT_FORMAT
-        reference_id = fish_cfg.get("reference_id")
+        # 声カタログで選ばれた reference_id を最優先（声の切替）。未指定なら cfg 側を使う。
+        reference_id = self.reference_id or fish_cfg.get("reference_id")
         # デッドコンフィグ対策: fish_cfg["timeout_sec"](config.json product_images... ではなく
         # tts.fish_audio.timeout_sec)を実際のHTTPタイムアウトへ配線する。従来はこの値を読まず、
         # _default_fish_audio_http_post の既定値(60秒)が常に使われていた。
@@ -310,19 +314,26 @@ def _safe_remove(path):
         pass
 
 
-def get_tts_backend(voice="Kyoko", cfg=None):
+def get_tts_backend(voice="Kyoko", cfg=None, engine=None, fish_reference_id=None):
     """TTSバックエンドを選択する。
 
-    cfg["tts"]["engine"] == "fish_audio" のときのみ FishAudioTTSBackend
-    （内部にsay/silentフォールバックを内蔵）を返す。cfg未指定・それ以外は
-    従来どおり SayTTSBackend を返す（後方互換）。
+    engine 明示指定（"say" | "fish"）があればそれを最優先で使う（声カタログ経路）。
+    engine=None のときは従来どおり cfg["tts"]["engine"] == "fish_audio" で判定する。
+      - fish: FishAudioTTSBackend（内部に say/silent フォールバックを内蔵）。
+              fish_reference_id を渡すと選ばれた声IDで合成する。
+      - say : SayTTSBackend（voice=声名）。
+    cfg未指定・それ以外は従来どおり SayTTSBackend を返す（後方互換）。
     """
+    if engine == "fish":
+        return FishAudioTTSBackend(voice=voice, reference_id=fish_reference_id)
+    if engine == "say":
+        return SayTTSBackend(voice=voice)
     if cfg is not None and (cfg.get("tts") or {}).get("engine") == "fish_audio":
-        return FishAudioTTSBackend(voice=voice)
+        return FishAudioTTSBackend(voice=voice, reference_id=fish_reference_id)
     return SayTTSBackend(voice=voice)
 
 
-def synthesize_segments(texts, out_dir, cfg=None, voice="Kyoko"):
+def synthesize_segments(texts, out_dir, cfg=None, voice="Kyoko", engine=None, fish_reference_id=None):
     """ナレーションをショット単位の断片ごとに合成する（音声主導タイミング同期モード用）。
 
     get_tts_backend()が選ぶバックエンド（fish_audio -> say -> silent の既存フォールバック
@@ -347,7 +358,7 @@ def synthesize_segments(texts, out_dir, cfg=None, voice="Kyoko"):
     cfg = cfg or load_config()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    backend = get_tts_backend(voice=voice, cfg=cfg)
+    backend = get_tts_backend(voice=voice, cfg=cfg, engine=engine, fish_reference_id=fish_reference_id)
 
     segments = []
     used_backend = None

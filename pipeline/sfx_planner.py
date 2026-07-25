@@ -25,6 +25,35 @@ I/O 禁止（manifest は呼び出し側が渡す）。Python 3.9 互換構文�
 from __future__ import annotations
 
 
+def reference_sfx_is_absent(reference_spec):
+    """R4 SFX厳格ゲート判定: 「TTPモードで参考にSEが無い」かを返す純関数。
+
+    「音声/効果音もTTP。効果音は元動画が無ければ無しで良い」というユーザー要件の実装。
+    参考にSE（顕著オンセット）が1つも無いなら、生成側でもデフォルト演出音（cut SFX /
+    first_shot_impact 等）を一切鳴らさないための門番。
+
+    判定:
+      - reference_spec が dict でない（=参考無し/TTPモードでない）→ False（従来動作。ゲートしない）
+      - sfx_events が空 → True（SE無し）
+      - director.select_salient_onsets が顕著オンセット0件を返す → True（RMSノイズだけでSEは無い）
+      - それ以外（顕著オンセット>=1）→ False（参考にSE有り＝既存の音色マッチング経路を使う）
+
+    director を import できない環境では、sfx_events 非空を「SE有り」とみなして False を返す
+    （安全側=従来動作を壊さない）。
+    """
+    if not isinstance(reference_spec, dict):
+        return False
+    events = reference_spec.get("sfx_events") or []
+    if not events:
+        return True
+    try:
+        from pipeline.director import select_salient_onsets
+    except Exception:
+        return False
+    salient = select_salient_onsets(events, max_count=max(1, len(events)))
+    return not salient
+
+
 DEFAULT_MIN_INTERVAL_SEC = 1.5
 # BUG-53: 従来 -18dB は最終ミックス後のRMSベースラインとの差分が +1dB 未満に埋もれていた。
 # ミックス経路変更(loudnorm後段でSFXオーバーレイ) + BGMダッキング(SE時刻±0.3sで-4dB) と

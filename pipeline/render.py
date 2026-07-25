@@ -810,6 +810,17 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
     edit_profile = edit_profile or {}
     durations = [float(d) for d in (shot_durations_sec or [])]
 
+    # R4 SFX厳格ゲート: TTPモードで参考にSEが無い（顕著オンセット0件）なら、全SE経路
+    # （plan v2 sfx_planner / plan v1 cut SFX / first_shot_impact のデフォルト演出音）を
+    # 一切発火させない。「効果音は元動画が無ければ無し」というユーザー要件をコードで保証する。
+    # reference_spec が None（参考無し=テーマのみ生成）のときは False＝従来どおり演出音を許可。
+    _suppress_all_sfx = False
+    try:
+        from pipeline import sfx_planner as _sp_gate
+        _suppress_all_sfx = _sp_gate.reference_sfx_is_absent(reference_spec)
+    except Exception:
+        _suppress_all_sfx = False
+
     boundaries = []
     cursor = 0.0
     for d in durations:
@@ -834,7 +845,10 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
         boundaries[-1] if durations else None
     )
 
-    if plan_has_sfx_plan and durations:
+    if _suppress_all_sfx:
+        # R4 厳格ゲート: 参考にSE無し → plan v2/v1 の両経路とも一切SEを出さない。
+        sfx_extra = []
+    elif plan_has_sfx_plan and durations:
         # plan v2 経路: sfx_planner で解決
         from pipeline import sfx_planner as _sp
         cut_cfg = edit_profile.get("cut_sfx") or {}
@@ -905,7 +919,8 @@ def compute_edit_enhancement_kwargs(shot_durations_sec, edit_profile, project_se
 
     first_shot_impact_sec = None
     impact_cfg = edit_profile.get("first_shot_impact") or {}
-    if durations and impact_cfg.get("enabled", True) and impact_cfg.get("scale_pop", True):
+    # R4 厳格ゲート: 参考にSE無しなら first_shot_impact（冒頭の演出インパクト音/演出）も出さない。
+    if not _suppress_all_sfx and durations and impact_cfg.get("enabled", True) and impact_cfg.get("scale_pop", True):
         first_shot_impact_sec = min(0.3, durations[0])
 
     # BUG-53: main mix のダッキング窓時刻 = SE の at_sec 列。build_final_cmd の

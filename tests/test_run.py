@@ -188,7 +188,7 @@ def test_run_pipeline_segment_sync_mode_computes_display_durations_and_pads_or_t
         {"path": "/tmp/seg1.wav", "duration_sec": 1.0},  # display=1.25 < shot2 duration(5.0) -> truncate
     ]
 
-    def _fake_synthesize_segments(texts, out_dir, cfg_, voice="Kyoko"):
+    def _fake_synthesize_segments(texts, out_dir, cfg_, voice="Kyoko", **_kw):
         assert texts == ["断片1です。", "断片2です。"]
         return {"ok": True, "segments": fake_segments, "backend": "fake_seg", "fallback_reason": None}
 
@@ -247,7 +247,7 @@ def test_run_pipeline_missing_narration_jp_on_some_shots_falls_back_to_full_mode
             Path(out_wav_path).write_bytes(b"RIFF....WAVEfmt ")
             return {"backend": "fake_full", "duration_sec": 4.0, "is_silent": False}
 
-    monkeypatch.setattr(run.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None: _FakeFullBackend())
+    monkeypatch.setattr(run.tts_mod, "get_tts_backend", lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend())
 
     report = run.run_pipeline("フォールバックCLIテスト", 4.0, "mock", True, cfg, quality="single", style="default")
 

@@ -172,9 +172,16 @@ async def create_project(request: Request):
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         _bad_request("invalid_reference_url", "reference_url は http/https の有効なURLである必要があります")
 
+    # voice（任意）: 声の指定。"auto"（既定=参考の話者に近い声を自動選択）またはカタログ key
+    # （例 "say_kyoko" / "fish_xxxxxxxx"）。UI は次パスで露出するため、未指定は "auto" 扱い。
+    voice = (body or {}).get("voice")
+    if voice is not None and (not isinstance(voice, str) or not voice.strip()):
+        _bad_request("invalid_voice", "voice は非空文字列（\"auto\" またはカタログ key）である必要があります")
+    voice = voice.strip() if isinstance(voice, str) else None
+
     project = projects.create_project(
         theme.strip(), target_duration_sec, backend_name, status="generating", style=style, product_url=product_url,
-        reference_url=reference_url, plan_tier=plan_tier, billing=billing,
+        reference_url=reference_url, plan_tier=plan_tier, billing=billing, voice=voice,
     )
     job_manager.start_generate(
         project["id"], theme.strip(), target_duration_sec, backend_name, style=style, product_url=product_url,

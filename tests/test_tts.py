@@ -260,7 +260,7 @@ class _RaisesOnSecondCallBackend(tts.TTSBackend):
 
 def test_synthesize_segments_fails_fast_when_one_segment_raises(tmp_path, monkeypatch):
     fake_backend = _RaisesOnSecondCallBackend()
-    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None: fake_backend)
+    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None, **_kw: fake_backend)
 
     result = tts.synthesize_segments(["ok", "boom", "never reached"], tmp_path / "segs", {}, voice="Kyoko")
 
@@ -279,7 +279,7 @@ class _EmptyOutputBackend(tts.TTSBackend):
 
 
 def test_synthesize_segments_fails_when_output_file_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None: _EmptyOutputBackend())
+    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None, **_kw: _EmptyOutputBackend())
     result = tts.synthesize_segments(["text"], tmp_path / "segs", {}, voice="Kyoko")
     assert result["ok"] is False
     assert "empty_output" in result["fallback_reason"]
@@ -294,7 +294,7 @@ class _ZeroDurationBackend(tts.TTSBackend):
 
 
 def test_synthesize_segments_fails_when_duration_is_zero(tmp_path, monkeypatch):
-    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None: _ZeroDurationBackend())
+    monkeypatch.setattr(tts, "get_tts_backend", lambda voice=None, cfg=None, **_kw: _ZeroDurationBackend())
     result = tts.synthesize_segments(["text"], tmp_path / "segs", {}, voice="Kyoko")
     assert result["ok"] is False
     assert "invalid_duration" in result["fallback_reason"]

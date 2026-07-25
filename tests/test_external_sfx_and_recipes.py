@@ -673,7 +673,7 @@ def test_render_project_records_edit_recipe_on_project(_isolated_projects, monke
     )
     monkeypatch.setattr(
         jobs_mod.tts_mod, "get_tts_backend",
-        lambda voice="Kyoko", cfg=None: _FakeFullBackend(),
+        lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend(),
     )
 
     jobs_mod._render_project(project["id"], project["plan"], {"ffmpeg_bin": "/bin/ffmpeg"})
@@ -720,7 +720,7 @@ def test_render_project_without_bgm_mood_uses_default_weights(_isolated_projects
     )
     monkeypatch.setattr(
         jobs_mod.tts_mod, "get_tts_backend",
-        lambda voice="Kyoko", cfg=None: _FakeFullBackend(),
+        lambda voice="Kyoko", cfg=None, **_kw: _FakeFullBackend(),
     )
 
     jobs_mod._render_project(project["id"], project["plan"], {"ffmpeg_bin": "/bin/ffmpeg"})
