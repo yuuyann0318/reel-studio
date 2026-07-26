@@ -57,7 +57,6 @@ FONTS_DIR = ASSETS_DIR / "fonts"
 BGM_MANIFEST = ASSETS_DIR / "bgm" / "manifest.json"
 
 _FFMPEG_TIMEOUT_SEC = 1800
-_LOUDNORM_JSON_RE = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.DOTALL)
 
 # シーングループ（クリップ再利用）関連の定数。
 # 1回の生成リクエストで作るシーンマスターの合計尺の上限（超えたらショット境界で分割生成する）。
@@ -123,20 +122,9 @@ def _scaled_credit_limit(backend, factor):
 
 
 def _parse_loudnorm_json(stderr_text):
-    m = _LOUDNORM_JSON_RE.search(stderr_text or "")
-    if not m:
-        return None
-    try:
-        data = json.loads(m.group(0))
-        return {
-            "measured_I": data["input_i"],
-            "measured_TP": data["input_tp"],
-            "measured_LRA": data["input_lra"],
-            "measured_thresh": data["input_thresh"],
-            "offset": data.get("target_offset", "0.0"),
-        }
-    except Exception:
-        return None
+    # 実体は pipeline.render.parse_loudnorm_json（無音入力の -inf/範囲外を弾いて
+    # None を返す共通実装）。run.py と studio/server/jobs.py で挙動を一致させる。
+    return render.parse_loudnorm_json(stderr_text)
 
 
 def _default_analyze_reference(url, cfg, progress_cb=None):
@@ -1960,7 +1948,8 @@ def _render_project(project_id, plan, cfg):
         )
     res2 = render.run_ffmpeg(cmd2, timeout_sec=_FFMPEG_TIMEOUT_SEC)
     if res2["returncode"] != 0:
-        raise RuntimeError("最終レンダリングに失敗しました: {}".format(res2["stderr"][-800:]))
+        raise RuntimeError("最終レンダリングに失敗しました: {}".format(
+            render.summarize_ffmpeg_error(res2["stderr"])))
 
     try:
         proj_for_flag = projects.get_project(project_id)

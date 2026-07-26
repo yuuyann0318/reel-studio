@@ -12,8 +12,65 @@ Python 3.9 互換構文のみ。
 """
 from __future__ import annotations
 
+import json
+import math
+import re
 import subprocess
 from pathlib import Path
+
+# loudnorm 1パス目(print_format=json)の計測ブロックを stderr から拾う正規表現。
+_LOUDNORM_JSON_RE = re.compile(r"\{[^{}]*\"input_i\"[^{}]*\}", re.DOTALL)
+
+# ffmpeg loudnorm の measured_* / offset が受け付ける有効範囲。範囲外や
+# 非有限(-inf/inf/nan)値を2パス目へ渡すと
+# 「Value -inf for parameter 'measured_I' out of range [-99 - 0]」で即死する。
+# 無音入力では 1パス目が input_i=-inf を返すため、この表で弾いて単パスへ落とす。
+_LOUDNORM_MEASURED_RANGES = {
+    "measured_I": (-99.0, 0.0),
+    "measured_TP": (-99.0, 99.0),
+    "measured_LRA": (0.0, 99.0),
+    "measured_thresh": (-99.0, 0.0),
+    "offset": (-99.0, 99.0),
+}
+
+
+def _loudnorm_value_valid(value, lo, hi):
+    """measured 値が float 化でき、有限かつ [lo, hi] に収まるかを判定する。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(f):
+        return False
+    return lo <= f <= hi
+
+
+def parse_loudnorm_json(stderr_text):
+    """loudnorm 1パス目 stderr(print_format=json) から計測値 dict を返す。
+
+    無音入力では ffmpeg が input_i / input_tp 等に "-inf" を返す。これをそのまま
+    2パス目の measured_I に渡すと範囲外エラーで ffmpeg が即死するため、5値の
+    いずれかが非有限(-inf/inf/nan)または loudnorm の有効範囲外なら None を返す。
+    呼び出し側は measured=None のとき単パス loudnorm へフォールバックする契約。
+    """
+    m = _LOUDNORM_JSON_RE.search(stderr_text or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+        measured = {
+            "measured_I": data["input_i"],
+            "measured_TP": data["input_tp"],
+            "measured_LRA": data["input_lra"],
+            "measured_thresh": data["input_thresh"],
+            "offset": data.get("target_offset", "0.0"),
+        }
+    except Exception:
+        return None
+    for key, (lo, hi) in _LOUDNORM_MEASURED_RANGES.items():
+        if not _loudnorm_value_valid(measured[key], lo, hi):
+            return None
+    return measured
 
 
 def escape_ffmpeg_filter_path(path):
@@ -1046,6 +1103,30 @@ def build_final_cmd(ffmpeg_bin, concat_video_path, narration_wav_path, output_pa
         output_path,
     ]
     return cmd
+
+
+_FFMPEG_ERROR_LINE_RE = re.compile(r"error|invalid|failed", re.IGNORECASE)
+
+
+def summarize_ffmpeg_error(stderr_text, tail_chars=800, max_error_lines=6):
+    """ffmpeg の stderr から失敗要因を読みやすく要約する。
+
+    ffmpeg は起動バナー(ビルド構成・入力ストリーム情報)で stderr が埋まりがちで、
+    末尾 tail_chars だけ切り出すと肝心の "Error/Invalid/failed" 行が押し出される。
+    そこで stderr 全体から該当行を優先抽出し、末尾テールの前に付けて返す。
+    """
+    text = stderr_text or ""
+    err_lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s and _FFMPEG_ERROR_LINE_RE.search(s):
+            err_lines.append(s)
+    tail = text[-tail_chars:]
+    if not err_lines:
+        return tail
+    # 重複を保ちつつ末尾側の代表的な行を優先（直近の失敗理由が最下部に出るため）。
+    picked = err_lines[-max_error_lines:]
+    return "[ffmpeg error] " + " / ".join(picked) + "\n---\n" + tail
 
 
 def run_ffmpeg(cmd, timeout_sec=None):
