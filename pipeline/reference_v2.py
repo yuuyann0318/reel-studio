@@ -471,6 +471,40 @@ _ALLOWED_FRAMING_TOKENS = {
 }
 
 
+def _normalize_skin_texture(raw: Any) -> str:
+    """vision 応答の skin_texture を raw|smooth|unknown へ正規化する（不明/未知は unknown）。"""
+    s = (str(raw).strip().lower() if raw is not None else "")
+    return s if s in ("raw", "smooth") else "unknown"
+
+
+def _detect_transformation_arc(shots_ref: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    """shots_ref の skin_texture 時系列から Before/After アークを検出する（純関数）。
+
+    raw（実素肌）の区間の後に smooth（美肌）の区間が現れる場合だけ
+    {"before_end_sec": <最後の raw 区間の終端>, "after_start_sec": <最初の after-smooth 区間の開始>}
+    を返す。raw→smooth の遷移が無ければ None（＝アーク無し。この参考のように全編 raw のとき）。
+    """
+    seq = []
+    for s in shots_ref or []:
+        if not isinstance(s, dict):
+            continue
+        st = s.get("start")
+        en = s.get("end")
+        tex = s.get("skin_texture") or "unknown"
+        if _is_number(st) and _is_number(en) and tex in ("raw", "smooth"):
+            seq.append((float(st), float(en), tex))
+    if not seq:
+        return None
+    seq.sort(key=lambda x: x[0])
+    raw_end = None
+    for st, en, tex in seq:
+        if tex == "raw":
+            raw_end = en
+        elif tex == "smooth" and raw_end is not None and st >= raw_end - 1e-6:
+            return {"before_end_sec": round(raw_end, 3), "after_start_sec": round(st, 3)}
+    return None
+
+
 def _normalize_palette_hex(raw: Any) -> List[str]:
     """vision 応答の color_palette_hex を "#rrggbb" のリストに正規化する。
 
@@ -795,6 +829,8 @@ def analyze_frames_with_vision(
                     "location": (item.get("location") or "").strip(),
                     "lighting": (item.get("lighting") or "").strip(),
                     "color_palette_hex": _normalize_palette_hex(item.get("color_palette_hex")),
+                    # KR2(#5): 肌の質感 raw|smooth|unknown。higgsfield backend の素肌リアル化の根拠。
+                    "skin_texture": _normalize_skin_texture(item.get("skin_texture")),
                 }
                 # F-STYLE: テロップ見た目の高解像度モデル。vision が telop_style_detail を返し、
                 # かつテロップ文言があるときだけ載せる（ハルシネーション回避）。正規化して格納。
@@ -1790,6 +1826,14 @@ def analyze_reference_v2(
                     } for s in of_shots
                 ]
 
+        # KR2(#5): Before/After アーク検出。shots_ref の skin_texture が raw→smooth と
+        # 変化する場合だけ transformation_arc を spec に載せる（検出できない＝この参考のように
+        # 全編 raw のときは付与しない）。skeleton が per-shot に before|after|neutral を写像する。
+        _arc = _detect_transformation_arc(normalized_spec.get("shots_ref") or [])
+        if _arc:
+            normalized_spec["transformation_arc"] = _arc
+            meta["transformation_arc"] = _arc
+
         # F8: テロップ帯変化検出で telops の start/end を秒精度補正
         telop_refine_enabled = bool(ref_cfg.get("telop_refine_enabled", True))
         if telop_refine_enabled and normalized_spec.get("telops"):
@@ -2039,6 +2083,24 @@ def _enrich_shots_ref_from_vision(
             lighting = _pick_mode([v.get("lighting") for v in in_shot])
             if lighting:
                 shot["lighting"] = lighting
+                enriched_here = True
+        # KR2(#5・codex P2): skin_texture を vision フレームから最頻値で補完。
+        # skin は raw/smooth の二値で「隣接shotへの誤伝播」が false-transformation_arc の
+        # 直接原因になるため、境界一致フレームは含めない厳密な半開区間 [s_f, e_f) で拾う
+        # （既存の in_shot は ±1e-3 の緩い含有で他の enrich 用に流用しているが、ここは
+        #  strict にする）。unknown は候補から除外。
+        if (shot.get("skin_texture") or "unknown") == "unknown":
+            skin_frames = [
+                v for v in (vision_results or [])
+                if isinstance(v, dict) and isinstance(v.get("time"), (int, float))
+                and s_f <= float(v["time"]) < e_f
+            ]
+            skin = _pick_mode([
+                v.get("skin_texture") for v in skin_frames
+                if (v.get("skin_texture") or "unknown") != "unknown"
+            ])
+            if skin:
+                shot["skin_texture"] = skin
                 enriched_here = True
         # codex-review 指摘(P2): LLM が返した palette が非空でも malformed(大文字/0x/無効値)
         # だと下流(mock gradients / higgsfield prompt)が拾えない。まず既存 palette を

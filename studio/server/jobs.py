@@ -874,6 +874,13 @@ class JobManager:
             }
             if shot.get("image_path"):
                 base["image_path"] = shot["image_path"]
+            # 商品1本ロック: --image-references 用の商品参照画像を studio plan へ持ち越す。
+            if shot.get("reference_images"):
+                base["reference_images"] = list(shot["reference_images"])
+            # KR2(#5・codex P2): backend が読む reference_visual（skin_texture/has_person 等）を
+            # studio plan にも持ち越す（resume で backend_shot が復元できるように）。
+            if isinstance(shot.get("reference_visual"), dict):
+                base["reference_visual"] = dict(shot["reference_visual"])
             return base
 
         planned_shots = [_planned_shot(i, shot) for i, shot in enumerate(shots)]
@@ -1014,6 +1021,16 @@ class JobManager:
             }
             if members[0].get("image_path"):
                 scene_shot["image_path"] = members[0]["image_path"]
+            # 商品1本ロック: シーンマスター生成にも商品参照画像を渡す。
+            if members[0].get("reference_images"):
+                scene_shot["reference_images"] = list(members[0]["reference_images"])
+            # KR2(#5・codex P2): backend の素肌リアル化 / persona_anchor が読む
+            # reference_visual (has_person / skin_texture 等) と motion_intensity を
+            # scene_shot に持ち越す（複数メンバーでも先頭 shot の視覚メタを継承）。
+            if isinstance(members[0].get("reference_visual"), dict):
+                scene_shot["reference_visual"] = dict(members[0]["reference_visual"])
+            if members[0].get("motion_intensity"):
+                scene_shot["motion_intensity"] = members[0]["motion_intensity"]
 
             safe_key = _safe_scene_key(scene_key)
             scene_fname = "scene__{}.mp4".format(safe_key)
@@ -1355,6 +1372,16 @@ class JobManager:
                 }
                 if member_shots[0].get("image_path"):
                     scene_shot["image_path"] = member_shots[0]["image_path"]
+                if member_shots[0].get("reference_images"):
+                    scene_shot["reference_images"] = list(member_shots[0]["reference_images"])
+                # KR2(#5・codex P2): resume 経路でも reference_visual を持ち越す。
+                # ただし resume 側は studio plan（validate_plan で正規化済み）から復元するため
+                # reference_visual を保持していない可能性が高い。sc（project.scenes）に
+                # reference_visual があれば採用（今後 project.scenes に載せる拡張を見越した保険）。
+                if isinstance(sc.get("reference_visual"), dict):
+                    scene_shot["reference_visual"] = dict(sc["reference_visual"])
+                elif isinstance(member_shots[0].get("reference_visual"), dict):
+                    scene_shot["reference_visual"] = dict(member_shots[0]["reference_visual"])
                 safe_key = _safe_scene_key(sc.get("scene_key") or member_ids[0])
                 raw_path = clips_dir / "scene__{}.raw.mp4".format(safe_key)
                 master_path = str(clips_dir / "scene__{}.mp4".format(safe_key))
@@ -1426,6 +1453,11 @@ class JobManager:
             }
             if shot.get("image_path"):
                 backend_shot["image_path"] = shot.get("image_path")
+            if shot.get("reference_images"):
+                backend_shot["reference_images"] = list(shot.get("reference_images"))
+            # KR2(#5・codex P2): resume 経路の standalone shot でも reference_visual を持ち越す。
+            if isinstance(shot.get("reference_visual"), dict):
+                backend_shot["reference_visual"] = dict(shot["reference_visual"])
             raw_path = clips_dir / "{}.raw.mp4".format(shot_id)
             norm_path = clips_dir / "{}.mp4".format(shot_id)
             try:

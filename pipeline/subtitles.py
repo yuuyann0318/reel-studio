@@ -38,8 +38,12 @@ except Exception:  # pragma: no cover
 PLAY_RES_X = 1080
 PLAY_RES_Y = 1920
 
-STYLE_BASE_FONTSIZE = 76
-STYLE_BIG_FONTSIZE = 92
+# ★実測較正（2026-07-26・実ペア第2弾診断 #2/#4）: 参考テロップは 5.8-6.1%H あるのに
+# 生成側は 2.2-2.8%H（≒旧既定 76px）まで縮んでいた。既定テロップ font を参考の体感サイズ
+# （NotoSansJP-Black で 120px ≈ 5.83%H bbox）へ引き上げる。BIG は従来どおり +16 の差分を維持
+# （build_ass_header_with_style の big=base+(BIG-BASE)=base+16 契約を壊さないため）。
+STYLE_BASE_FONTSIZE = 120
+STYLE_BIG_FONTSIZE = 136
 MARGIN_L = 60
 MARGIN_R = 60
 MARGIN_V = 420
@@ -223,7 +227,7 @@ def build_ass_header(telop_style=None):
 # Studio: plan.subtitle_style（font_size/accent_color/position）を反映したASS再生成
 # ---------------------------------------------------------------------------
 
-DEFAULT_SUBTITLE_STYLE = {"font_size": 76, "accent_color": "#FFD84D", "position": "lower", "preset": "default"}
+DEFAULT_SUBTITLE_STYLE = {"font_size": 120, "accent_color": "#FFD84D", "position": "lower", "preset": "default"}
 
 SUBTITLE_STYLE_PRESETS = ("default", "vertical_hook")
 

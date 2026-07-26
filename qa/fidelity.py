@@ -1014,8 +1014,78 @@ def _beat_alignment(reference_spec: Dict[str, Any], plan: Dict[str, Any], tol_se
 # 総合スコア
 # ---------------------------------------------------------------------------
 
+def _union_length(intervals: List[Tuple[float, float]]) -> float:
+    """区間リストの和集合の総尺（重なりを1回だけ数える）。"""
+    if not intervals:
+        return 0.0
+    ivs = sorted((min(a, b), max(a, b)) for a, b in intervals)
+    total = 0.0
+    cs, ce = ivs[0]
+    for s, e in ivs[1:]:
+        if s <= ce:
+            ce = max(ce, e)
+        else:
+            total += ce - cs
+            cs, ce = s, e
+    total += ce - cs
+    return total
+
+
+def _telop_coverage(spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+    """R5(実ペア第2弾#3): telop_coverage 指標。
+
+    参考テロップの「フレーム出現率」（テロップが表示されている時間 / 全尺）に対して
+    生成側の出現率を並記し、さらに **生成側の caption 空 shot** を検出する。
+    主指標 `score` = shot_caption_rate（1.0 = caption 空 shot が 0 件）。参考にテロップが
+    無い動画では被覆対象が無いため score=1.0（満点）とする。
+    """
+    ref_intervals = _telop_intervals_from_reference(spec)
+    ref_total = float((spec or {}).get("duration_sec") or 0.0)
+    gen_intervals = _telop_intervals_from_plan(plan)
+    gen_total = sum(float(s.get("duration_sec") or 0.0) for s in (plan or {}).get("shots") or [])
+    ref_cov = (_union_length(ref_intervals) / ref_total) if ref_total > 0 else 0.0
+    gen_cov = (_union_length(gen_intervals) / gen_total) if gen_total > 0 else 0.0
+    if ref_cov > 0:
+        coverage_ratio = min(1.0, gen_cov / ref_cov)
+    else:
+        coverage_ratio = 1.0
+
+    # shot-level: caption 空 shot 検出（continuation 断片は親に統合して数える）。
+    logical = _merge_continuation_shots_to_parents(plan)
+    total_shots = 0
+    with_caption = 0
+    empty_ids: List[Any] = []
+    for s in logical:
+        total_shots += 1
+        caps = s.get("captions") if isinstance(s.get("captions"), list) else None
+        has = False
+        if caps:
+            has = any((c.get("text") or c.get("caption_jp") or "").strip() for c in caps)
+        if not has and (s.get("caption_jp") or "").strip():
+            has = True
+        if has:
+            with_caption += 1
+        else:
+            empty_ids.append(s.get("id"))
+    shot_caption_rate = (with_caption / total_shots) if total_shots else 1.0
+
+    # 参考にテロップが無ければ被覆対象が無い（満点）。有ればテロップの空 shot を減点。
+    score = shot_caption_rate if ref_intervals else 1.0
+    return {
+        "score": score,
+        "shot_caption_rate": shot_caption_rate,
+        "ref_frame_coverage": round(ref_cov, 4),
+        "gen_frame_coverage": round(gen_cov, 4),
+        "coverage_ratio": round(coverage_ratio, 4),
+        "gen_shots_total": total_shots,
+        "gen_shots_with_caption": with_caption,
+        "empty_caption_shot_ids": empty_ids,
+        "ref_has_telops": bool(ref_intervals),
+    }
+
+
 def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
-    """5指標を計算して1つの dict にまとめる。"""
+    """指標を計算して1つの dict にまとめる。"""
     ref_total = float((reference_spec or {}).get("duration_sec") or 0.0)
     gen_total = sum(float(s.get("duration_sec") or 0.0) for s in (plan or {}).get("shots") or [])
     ref_cuts = _cut_times_from_reference(reference_spec)
@@ -1037,6 +1107,7 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
     telop_iou = _telop_iou_avg(ref_telops, gen_telops)
 
     telop_style = _telop_style_match(reference_spec, plan)
+    telop_cov = _telop_coverage(reference_spec, plan)
     sfx = _sfx_placement(reference_spec, plan)
     cam = _camera_move_match(reference_spec, plan)
     beat = _beat_alignment(reference_spec, plan)
@@ -1045,6 +1116,8 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
         "cut_match": cut_res["f1"],
         "telop_iou": telop_iou["iou_avg"],
         "telop_style": telop_style["score"],
+        # R5(#3): テロップ出現率＋生成側 caption 空 shot 検出（1.0 = 空 shot 0）。
+        "telop_coverage": telop_cov["score"],
         # R3: 新基準 = 参考の顕著オンセット × ±0.3s × F1（denom を plan と揃えて公正化）
         "sfx_placement": sfx["score"],
         # R3: 旧基準（参考全オンセット × ±0.15s × family一致）— 誠実性のため並記
@@ -1058,6 +1131,7 @@ def compute_fidelity(reference_spec: Dict[str, Any], plan: Dict[str, Any]) -> Di
             "cut_match": cut_res,
             "telop_iou": telop_iou,
             "telop_style": telop_style,
+            "telop_coverage": telop_cov,
             "sfx_placement": sfx,
             "camera_move": cam,
             "beat_alignment": beat,

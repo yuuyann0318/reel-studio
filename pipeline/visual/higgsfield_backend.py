@@ -392,6 +392,68 @@ def _append_no_text_directive(prompt, enabled=True):
     return "{}. {}".format(stripped, _NO_TEXT_IN_VIDEO_PHRASE)
 
 
+# ---------------------------------------------------------------------------
+# skin_realism: 素肌リアル化（診断#5・美化禁止）
+# ---------------------------------------------------------------------------
+#
+# 参考(@ami_biyou_ KINUI)は毛穴・産毛・ほくろ・美容液の筋が見える「実素肌」だが、生成は
+# プラスチック肌に美化されていた。参考が実素肌のとき（skin_texture=="raw" もしくは人物記述に
+# 毛穴/赤み/シミ/産毛等の語がある）だけ、非美化指示＋negative を注入する。参考が綺麗肌
+# （skin_texture=="smooth"）のときは注入しない＝あくまで参考準拠を貫く。
+# config visual.raw_skin_injection（既定 True）で無効化可能。
+_SKIN_KEYWORDS = (
+    "pore", "pores", "rough skin", "redness", "blemish", "blemishe", "bare skin",
+    "peach fuzz", "skin texture", "wrinkle", "freckle", "acne", "unretouched", "mole",
+)
+_SKIN_REALISM_PHRASE = (
+    "real bare skin with visible pores and natural texture, peach fuzz, "
+    "unretouched smartphone footage"
+)
+_SKIN_REALISM_NEGATIVE = (
+    "no airbrushed skin, no plastic smooth skin, no beauty filter, no CGI-perfect skin"
+)
+# idempotent 追記のための一意マーカー（小文字比較）。
+_SKIN_REALISM_MARKER = "real bare skin with visible pores"
+
+
+def _shot_wants_raw_skin(shot):
+    """shot が「実素肌の再現」を必要とするか判定する（純関数・テスト対象）。
+
+    - reference_visual.skin_texture=="smooth" → False（参考が綺麗肌なので美化禁止指示は不要）。
+    - skin_texture=="raw" → True。
+    - skin_texture 不明 → 人物 shot かつ desc/person_desc/scene_desc に肌の状態語がある場合のみ True。
+    """
+    if not isinstance(shot, dict):
+        return False
+    rv = shot.get("reference_visual") if isinstance(shot.get("reference_visual"), dict) else {}
+    st = (rv.get("skin_texture") or shot.get("skin_texture") or "").strip().lower()
+    if st == "smooth":
+        return False
+    if st == "raw":
+        return True
+    if not _shot_has_person(shot):
+        return False
+    text = " ".join(str(rv.get(k) or "") for k in ("desc_en", "person_desc", "scene_desc_ja"))
+    low = text.lower()
+    return any(kw in low for kw in _SKIN_KEYWORDS)
+
+
+def _append_skin_realism_directive(prompt, shot, enabled=True):
+    """visual_prompt 末尾へ「実素肌・非美化」の指示＋negative を idempotent に追記する（純関数）。"""
+    if not enabled or not _shot_wants_raw_skin(shot):
+        return prompt
+    base = prompt if isinstance(prompt, str) else ""
+    if _SKIN_REALISM_MARKER in base.lower():
+        return base
+    phrase = "{}. Negative: {}.".format(_SKIN_REALISM_PHRASE, _SKIN_REALISM_NEGATIVE)
+    stripped = base.strip()
+    if not stripped:
+        return phrase
+    if stripped.endswith("."):
+        return "{} {}".format(stripped, phrase)
+    return "{}. {}".format(stripped, phrase)
+
+
 def _build_extract_frame_cmd(ffmpeg_bin, video_path, out_image_path, at_sec):
     """生成済みクリップから代表フレーム1枚を抽出する ffmpeg コマンドを構築する（副作用なし・テスト対象）。"""
     return [
@@ -400,7 +462,7 @@ def _build_extract_frame_cmd(ffmpeg_bin, video_path, out_image_path, at_sec):
     ]
 
 
-def _build_create_cmd(cli_bin, model, shot, resolution, no_text_in_video=True):
+def _build_create_cmd(cli_bin, model, shot, resolution, no_text_in_video=True, raw_skin_injection=True):
     """ジョブ投入コマンドを構築する（副作用なし・テスト対象）。
 
     ★generate_audio 等の任意パラメータはCLI側デフォルト（generate_audio=true）に
@@ -417,6 +479,8 @@ def _build_create_cmd(cli_bin, model, shot, resolution, no_text_in_video=True):
     """
     duration_sec = _resolve_request_duration_sec(shot)
     prompt = _augment_prompt_with_reference_visual(shot.get("visual_prompt", ""), shot)
+    # 素肌リアル化: 参考が実素肌のときだけ非美化指示を注入（no_text より前・末尾に載る）。
+    prompt = _append_skin_realism_directive(prompt, shot, raw_skin_injection)
     prompt = _append_no_text_directive(prompt, no_text_in_video)
     return [
         cli_bin, "generate", "create", model,
@@ -427,7 +491,7 @@ def _build_create_cmd(cli_bin, model, shot, resolution, no_text_in_video=True):
     ] + _build_image_args(shot) + ["--json"]
 
 
-def _build_cost_cmd(cli_bin, model, shot, resolution, no_text_in_video=True):
+def _build_cost_cmd(cli_bin, model, shot, resolution, no_text_in_video=True, raw_skin_injection=True):
     """コスト見積コマンドを構築する（副作用なし・テスト対象）。
 
     課金額の見積とジョブ投入(_build_create_cmd)は、画像フラグを含め同じ入力条件で
@@ -436,6 +500,7 @@ def _build_cost_cmd(cli_bin, model, shot, resolution, no_text_in_video=True):
     """
     duration_sec = _resolve_request_duration_sec(shot)
     prompt = _augment_prompt_with_reference_visual(shot.get("visual_prompt", ""), shot)
+    prompt = _append_skin_realism_directive(prompt, shot, raw_skin_injection)
     prompt = _append_no_text_directive(prompt, no_text_in_video)
     return [
         cli_bin, "generate", "cost", model,
@@ -711,13 +776,16 @@ class HiggsfieldBackend(VisualBackend):
         self.persona_consistency = bool((full_cfg.get("visual") or {}).get("persona_consistency", True))
         # ①予防: 映像内文字の禁止指示を生成プロンプトへ常時注入するか（既定 on）。
         self.no_text_in_video = bool((full_cfg.get("visual") or {}).get("no_text_in_video", True))
+        # 素肌リアル化: 参考が実素肌のとき非美化指示を注入するか（既定 on）。
+        self.raw_skin_injection = bool((full_cfg.get("visual") or {}).get("raw_skin_injection", True))
         self.ffmpeg_bin = full_cfg.get("ffmpeg_bin") or str(project_root() / "bin" / "ffmpeg")
         self._persona_ref_path = None
 
     # -- 個別ステップ（テスト容易性のため分割） -----------------------------
 
     def estimate_cost(self, shot: dict) -> int:
-        cmd = _build_cost_cmd(self.cli_bin, self.model, shot, self.resolution, self.no_text_in_video)
+        cmd = _build_cost_cmd(self.cli_bin, self.model, shot, self.resolution, self.no_text_in_video,
+                              self.raw_skin_injection)
         stdout = _run_cli(cmd, timeout_sec=60)
         return _parse_cost(stdout)
 
@@ -726,7 +794,8 @@ class HiggsfieldBackend(VisualBackend):
         # 一時的エラーのみをここでリトライする。二重課金防止のため、job_id取得後は
         # このメソッドを呼び直さない（wait側の再試行は wait_for_result 内で完結させる）。
         def _do():
-            cmd = _build_create_cmd(self.cli_bin, self.model, shot, self.resolution, self.no_text_in_video)
+            cmd = _build_create_cmd(self.cli_bin, self.model, shot, self.resolution, self.no_text_in_video,
+                                    self.raw_skin_injection)
             stdout = _run_cli(cmd, timeout_sec=60)
             return _parse_job_id(stdout)
 

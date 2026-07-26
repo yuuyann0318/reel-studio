@@ -59,8 +59,9 @@ def test_fidelity_returns_all_5_metrics(real_spec):
     keys = set(result["summary"].keys())
     # R2a: beat_alignment を追加。music が無い spec では None（未測定）で返る。
     # R3: sfx_placement_raw（旧基準）を並記。
-    assert keys == {"cut_match", "telop_iou", "telop_style", "sfx_placement",
-                    "sfx_placement_raw", "camera_move", "beat_alignment"}
+    # R5: telop_coverage（テロップ出現率＋caption空shot検出）を追加。
+    assert keys == {"cut_match", "telop_iou", "telop_style", "telop_coverage",
+                    "sfx_placement", "sfx_placement_raw", "camera_move", "beat_alignment"}
     for k, v in result["summary"].items():
         if v is None:
             continue  # beat_alignment は music 未検出時 None

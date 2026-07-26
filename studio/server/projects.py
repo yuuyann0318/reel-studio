@@ -44,7 +44,9 @@ SFX_MANIFEST = SFX_DIR / "manifest.json"
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-DEFAULT_SUBTITLE_STYLE = {"font_size": 76, "accent_color": "#FFD84D", "position": "lower", "preset": "default"}
+# font_size 既定は pipeline.subtitles.STYLE_BASE_FONTSIZE と一致させる（実測較正 120px・
+# 実ペア第2弾#4）。旧 76px のまま Studio plan に焼き込むと、Studio 経路だけ較正が無効化される。
+DEFAULT_SUBTITLE_STYLE = {"font_size": 120, "accent_color": "#FFD84D", "position": "lower", "preset": "default"}
 VALID_POSITIONS = ("lower", "center", "upper")  # studio/web/components/inspector.js のselect値と一致させる
 VALID_SUBTITLE_PRESETS = ("default", "vertical_hook")  # pipeline/subtitles.py SUBTITLE_STYLE_PRESETSと一致させる
 STATUSES = ("draft", "generating", "ready", "rendering", "failed")
@@ -503,6 +505,18 @@ def validate_plan(project_id, plan, ng_words=None, ng_patterns=None):
         image_path = shot.get("image_path")
         if isinstance(image_path, str) and image_path:
             normalized_shot["image_path"] = image_path
+        # reference_images（商品1本ロック用の --image-references 画像）も任意パススルー。
+        # resume 時に商品参照が失われないよう project.json へ保持する。
+        reference_images = shot.get("reference_images")
+        if isinstance(reference_images, list):
+            ref_clean = [p for p in reference_images if isinstance(p, str) and p]
+            if ref_clean:
+                normalized_shot["reference_images"] = ref_clean
+        # KR2(#5・codex P2): reference_visual を studio plan に持ち越す（backend の
+        # 素肌リアル化 / persona_anchor が resume 経路でも発火するように）。
+        rv = shot.get("reference_visual")
+        if isinstance(rv, dict) and rv:
+            normalized_shot["reference_visual"] = dict(rv)
         normalized_shots.append(normalized_shot)
 
     narration_text = plan.get("narration_text", "")

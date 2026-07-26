@@ -253,6 +253,17 @@ class MockBackend(VisualBackend):
                 )
             )
         meta = {"backend": self.name, "shot_id": shot.get("id"), "out_path": out_path}
+        # 商品1本ロック検証用のメタ記録（mockは実映像を作らないためプロンプト/参照の証跡のみ）。
+        ref_imgs = shot.get("reference_images") or []
+        if isinstance(ref_imgs, list) and ref_imgs:
+            meta["reference_images"] = list(ref_imgs)
+        if shot.get("image_path"):
+            meta["image_path"] = shot.get("image_path")
+        _vp_low = (shot.get("visual_prompt") or "").lower() if isinstance(shot.get("visual_prompt"), str) else ""
+        if "the exact product shown in the reference image" in _vp_low:
+            meta["product_locked"] = True
+        elif "do not show any product bottle" in _vp_low:
+            meta["no_product_directive"] = True
         person_shot = bool(self.persona_consistency) and _mock_shot_has_person(shot)
         if person_shot:
             if self._persona_seen:

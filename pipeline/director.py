@@ -522,7 +522,12 @@ def _map_reference_visual_to_shots(shots_ref, boundaries, shot_ids):
             "color_palette_hex": head.get("color_palette_hex") or [],
             # R2b F2/F4: 光学フロー由来の強度（weak/strong）を skeleton まで運ぶ
             "intensity": _mode("intensity", ""),
+            # KR2(#5): 肌の質感 raw|smooth を skeleton→backend へ運ぶ（素肌リアル化の根拠）。
+            # unknown は落として skeleton_json を小さく保つ（下の空値フィルタで除去）。
+            "skin_texture": _mode("skin_texture", ""),
         }
+        if rv.get("skin_texture") == "unknown":
+            rv["skin_texture"] = ""
         # 空/None の値は落として skeleton_json を小さく保つ
         rv = {k: v for k, v in rv.items() if v not in (None, "", [], {})}
         if rv:
@@ -1491,6 +1496,25 @@ def build_shot_skeleton(reference_spec, target_duration_sec, max_shot_sec=None, 
         for i in range(len(shot_ids)):
             ref_ranges.append((boundaries[i], boundaries[i + 1]))
 
+    # KR2(#5): Before/After アークが spec にあれば、各 shot に transformation_phase
+    # (before|after|neutral) を写像する（アーク無しのときは一切付与しない）。
+    _arc = reference_spec.get("transformation_arc")
+    if (isinstance(_arc, dict)
+            and isinstance(_arc.get("before_end_sec"), (int, float))
+            and isinstance(_arc.get("after_start_sec"), (int, float))):
+        _b_end = float(_arc["before_end_sec"])
+        _a_start = float(_arc["after_start_sec"])
+        for i, sh in enumerate(shots):
+            if i >= len(ref_ranges):
+                break
+            r_lo, r_hi = ref_ranges[i]
+            if r_hi <= _b_end + 1e-6:
+                sh["transformation_phase"] = "before"
+            elif r_lo >= _a_start - 1e-6:
+                sh["transformation_phase"] = "after"
+            else:
+                sh["transformation_phase"] = "neutral"
+
     # P0-2: 参考動画の narration 有無を skeleton に載せる（絶対厳守の骨情報）。
     # 統合配線: reference_v2 が spec.narration_mode を生成していればそれを優先する
     # （ASR 成功/失敗を直接知る解析側の判定の方が確度が高い）。無効値/欠落なら
@@ -2135,6 +2159,145 @@ def build_critique_prompt(theme, target_duration_sec, target_tolerance_sec, styl
 # run_director（TTP モードへ全面移行）
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# R5(実ペア第2弾#3): caption 空 shot の根絶（TTPモード・post-plan 決定論バックフィル）
+# ---------------------------------------------------------------------------
+
+# narration 断片としてテロップに載せる最大文字数（2行×13字のセーフゾーン上限に合わせる）。
+_TELOP_NARRATION_FRAGMENT_MAX = 24
+
+
+def _first_narration_fragment(narration_jp, max_chars=_TELOP_NARRATION_FRAGMENT_MAX):
+    """narration_jp の先頭の意味のまとまり（句読点区切り）を最大 max_chars 文字で返す。"""
+    if not isinstance(narration_jp, str):
+        return ""
+    text = narration_jp.strip()
+    if not text:
+        return ""
+    for sep in ("。", "！", "？", "、", "\n"):
+        idx = text.find(sep)
+        if 0 < idx <= max_chars:
+            return text[:idx]
+    return text[:max_chars]
+
+
+def _ref_telop_crosses_boundary(reference_spec, ref_range):
+    """参考テロップが shot の参考尺範囲 [rs, re) の**開始境界**を跨いでいるか（純関数）。
+
+    codex P1: 「PERSIST（前 shot の caption 継続）」は、参考動画側で「前 shot の間から
+    続いているテロップが今の shot にもまだ表示されている」ときだけ発火すべき。単純に
+    「今の shot と重なる参考テロップがある」だけだと、境界で切り替わったテロップも
+    stale な前 caption で埋めてしまう。テロップが `start < ref_range.start < end` を
+    満たすときだけ True（＝境界跨ぎ = 継続表示中）。
+    """
+    if not isinstance(reference_spec, dict) or not ref_range:
+        return False
+    lo = float(ref_range[0])
+    for tel in reference_spec.get("telops") or []:
+        if not isinstance(tel, dict):
+            continue
+        s = tel.get("start")
+        e = tel.get("end")
+        if not isinstance(s, (int, float)) or not isinstance(e, (int, float)):
+            continue
+        if float(s) < lo - 1e-6 and float(e) > lo + 1e-6:
+            return True
+    return False
+
+
+def _ensure_plan_telop_coverage(plan, skeleton, reference_spec):
+    """plan.shots の caption 空 shot を決定論的に埋める（post-plan・TTPモード）。
+
+    優先順（診断#3の指定）:
+      (a) PERSIST: 参考テロップがこの shot の参考尺範囲に時間的に跨っている場合、前 shot の
+          caption（LLM が書いた文言）を継続表示する。caption_in=0..duration の全尺表示にする。
+      (b) storyboard: skeleton の reference_visual.on_screen_text（実観測の画面文字）の先頭行。
+      (c) narration 断片: shot の narration_jp の先頭のまとまり。
+      (d) 最終手段: 直前の非空 caption を継続。
+    caption offset / telop_style_hint が無ければ全尺・前 shot ヒントで補う。副作用: plan を更新。
+    """
+    if not isinstance(plan, dict):
+        return plan
+    shots = plan.get("shots") or []
+    sk_by_id = {}
+    for ss in (skeleton or {}).get("shots") or []:
+        if isinstance(ss, dict) and ss.get("id") is not None:
+            sk_by_id[ss.get("id")] = ss
+    ref_ranges = (skeleton or {}).get("shot_ref_ranges") or []
+    sk_order = [ss.get("id") for ss in (skeleton or {}).get("shots") or [] if isinstance(ss, dict)]
+    range_by_id = {}
+    for idx, sid in enumerate(sk_order):
+        if idx < len(ref_ranges):
+            range_by_id[sid] = ref_ranges[idx]
+
+    prev_caption = ""
+    prev_hint = None
+    filled_count = 0
+    for sh in shots:
+        if not isinstance(sh, dict):
+            continue
+        sid = sh.get("id")
+        # 既に caption を持つ shot（captions[] または caption_jp）は素通り。
+        caps = sh.get("captions") if isinstance(sh.get("captions"), list) else None
+        has_cap = False
+        if caps:
+            has_cap = any((c.get("text") or c.get("caption_jp") or "").strip() for c in caps)
+        if not has_cap and (sh.get("caption_jp") or "").strip():
+            has_cap = True
+        if has_cap:
+            # caption_jp が空でも captions[] に文言があれば、それを PERSIST 継続元にする。
+            cur_text = (sh.get("caption_jp") or "").strip()
+            cur_hint = sh.get("telop_style_hint") if isinstance(sh.get("telop_style_hint"), dict) else None
+            if not cur_text and caps:
+                for c in caps:
+                    t = (c.get("text") or c.get("caption_jp") or "").strip()
+                    if t:
+                        cur_text = t
+                        if not cur_hint and isinstance(c.get("telop_style_hint"), dict):
+                            cur_hint = c.get("telop_style_hint")
+                        break
+            if cur_text:
+                prev_caption = cur_text
+            if cur_hint:
+                prev_hint = cur_hint
+            continue
+
+        sk = sk_by_id.get(sid) or {}
+        rv = sk.get("reference_visual") if isinstance(sk.get("reference_visual"), dict) else {}
+        ost = (rv.get("on_screen_text") or "").strip() if isinstance(rv, dict) else ""
+        filled = ""
+        # (a) PERSIST: 参考テロップが shot 開始境界を跨いでいる = 表示継続中
+        if prev_caption and _ref_telop_crosses_boundary(reference_spec, range_by_id.get(sid)):
+            filled = prev_caption
+        # (b) storyboard on_screen_text
+        elif ost:
+            filled = ost.split("\n")[0][:_TELOP_NARRATION_FRAGMENT_MAX]
+        # (c) narration 断片
+        elif (sh.get("narration_jp") or "").strip():
+            filled = _first_narration_fragment(sh.get("narration_jp"))
+        # (d) 最終手段: 前 caption を継続
+        elif prev_caption:
+            filled = prev_caption
+
+        if not filled:
+            continue
+        sh["caption_jp"] = filled
+        if not isinstance(sh.get("caption_in_offset_sec"), (int, float)):
+            sh["caption_in_offset_sec"] = 0.0
+        dur = float(sh.get("duration_sec") or 0.0)
+        if not isinstance(sh.get("caption_out_offset_sec"), (int, float)):
+            sh["caption_out_offset_sec"] = dur
+        if not isinstance(sh.get("telop_style_hint"), dict) and isinstance(prev_hint, dict):
+            sh["telop_style_hint"] = dict(prev_hint)
+        sh["caption_backfilled"] = True
+        prev_caption = filled
+        filled_count += 1
+
+    if filled_count:
+        plan.setdefault("meta", {})["telop_backfilled_count"] = filled_count
+    return plan
+
+
 def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
                   target_tolerance_sec=DEFAULT_TARGET_TOLERANCE_SEC, style="default", quality=None,
                   product=None, reference=None, checkpoint_dir=None, backend=None):
@@ -2404,6 +2567,13 @@ def run_director(theme, config=None, target_duration_sec=None, no_llm=False,
     # クレジット意識分割の provenance（QA が同じスケルトンを再現できるように）
     plan["meta"]["skeleton_max_shot_sec"] = max_shot_sec
     plan["meta"]["target_duration_sec"] = float(target_duration_sec)
+
+    # R5(実ペア第2弾#3): caption 空 shot の根絶。参考にテロップがある TTP 動画では、LLM が
+    # 埋め残した shot を (a)PERSIST(前caption継続) (b)storyboard文字 (c)narration断片 で必ず
+    # 埋める（検証は post-plan・validate_plan_matches_skeleton の後なので骨検査に干渉しない）。
+    _ref_telops = (reference or {}).get("telops") if isinstance(reference, dict) else None
+    if _ref_telops:
+        _ensure_plan_telop_coverage(plan, skeleton, reference)
     return plan
 
 

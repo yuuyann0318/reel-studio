@@ -252,17 +252,34 @@ def is_effective(sd: Any) -> bool:
 # 幾何変換（ASS/Premiere 共通で使う）
 # ---------------------------------------------------------------------------
 
-def size_pct_to_font_px(size_pct: Any, play_res_y: int, fallback_px: int = 76) -> int:
+# ★実測較正（2026-07-26・PIL計測 NotoSansJP-Black @ play_res_y=1920）:
+#   旧実装は「グリフ高 ≈ 0.68 * fontsize」の Latin 向け経験則で逆算していたが、実際に
+#   使用する日本語フォント(NotoSansJP-Black)の漢字グリフ bbox 高は fontsize の約 0.93 倍
+#   （例: fontsize=120 → 単漢字bbox ≈ 112px ≈ 5.83%H）。0.68 のままだと size_pct を渡した
+#   ときにフォントが約37%過大になり、size_pct が欠落した shot は既定 76px(=約3.7%H bbox・
+#   実レンダ 2.2-2.8%H) まで縮み、参考(5.8-6.1%H)の半分以下のテロップになっていた
+#   （実ペア第2弾診断 #2/#4）。実測比 0.90（headroom込み）で逆算し直し、size_pct 欠落時の
+#   既定も参考の体感サイズ(≈5.8%H)に一致する 120px へ引き上げる。
+_GLYPH_HEIGHT_RATIO = 0.90
+# size_pct 欠落時の既定 font px（≈5.83%H bbox。参考テロップの実測 5.8-6.1%H に一致）。
+DEFAULT_TELOP_FONT_PX = 120
+# 上限クランプ（≈8.0%H bbox）。参考が特大フックでも2行×13字がセーフゾーンに収まるよう
+# 過大化を止める。長文は subtitles 側の幅ラップ(wrap_caption_by_width)がさらに縮める。
+_MAX_TELOP_FONT_PX = 160
+_MIN_TELOP_FONT_PX = 44
+
+
+def size_pct_to_font_px(size_pct: Any, play_res_y: int, fallback_px: int = DEFAULT_TELOP_FONT_PX) -> int:
     """size_pct(文字高%) -> ASS \\fs 相当の font px。
 
-    グリフ高 ≈ 0.68 * fontsize の経験則で fontsize を逆算し、可読域へクランプ。
-    size_pct が None のときは fallback_px。
+    グリフ bbox 高 ≈ _GLYPH_HEIGHT_RATIO * fontsize（NotoSansJP-Black 実測 0.93 に headroom
+    を見て 0.90）で fontsize を逆算し、可読域へクランプ。size_pct が None のときは fallback_px。
     """
     if size_pct is None or not isinstance(size_pct, (int, float)) or isinstance(size_pct, bool):
         return int(fallback_px)
     glyph_px = float(size_pct) / 100.0 * float(play_res_y)
-    fs = glyph_px / 0.68
-    return int(max(44, min(220, round(fs))))
+    fs = glyph_px / _GLYPH_HEIGHT_RATIO
+    return int(max(_MIN_TELOP_FONT_PX, min(_MAX_TELOP_FONT_PX, round(fs))))
 
 
 def pos_y_pct_to_y(pos_y_pct: Any, play_res_y: int, margin_pct: float = 8.0) -> Optional[int]:

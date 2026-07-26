@@ -1061,6 +1061,63 @@ def product_shot_indices(shots, reference_spec=None):
 
 
 # ---------------------------------------------------------------------------
+# 商品1本ロック（診断#1・最大破綻対策）: 商品が映る全 shot で採用済み商品画像を
+# --image-references に必ず渡し、プロンプトで「参考画像とまったく同じ商品を出せ・別の
+# ボトルを発明するな」を機械追記する。逆に商品が映らない shot には「ボトルを出すな」を
+# 注記して、AI が余計なボトルを発明するのを抑止する。
+# ---------------------------------------------------------------------------
+
+# 商品shotに機械追記する「参考画像の商品を厳守」句。
+_PRODUCT_LOCK_PHRASE = (
+    "Show the exact product shown in the reference image, "
+    "same bottle shape, same color, same label; do not invent a different bottle."
+)
+# 追記済み判定用の一意マーカー（小文字比較。二重追記防止）。
+_PRODUCT_LOCK_MARKER = "the exact product shown in the reference image"
+# 非商品shotに機械追記する「ボトルを出すな」句。
+_NO_PRODUCT_PHRASE = "Do not show any product bottle or package in this shot."
+_NO_PRODUCT_MARKER = "do not show any product bottle"
+
+# reference_images に渡す商品画像の上限（higgsfield backend の _MAX_REFERENCE_IMAGES と整合）。
+_MAX_PRODUCT_REFERENCE_IMAGES = 9
+
+
+def _augment_prompt(shot, phrase, marker):
+    """shot['visual_prompt'] へ phrase を idempotent に追記する（副作用: shot を破壊的更新）。
+
+    既に marker（または商品ロックマーカー）を含む場合は追記しない。
+    """
+    vp = shot.get("visual_prompt")
+    vp = vp if isinstance(vp, str) else ""
+    low = vp.lower()
+    if marker in low:
+        return
+    stripped = vp.strip()
+    if not stripped:
+        shot["visual_prompt"] = phrase
+    else:
+        shot["visual_prompt"] = stripped.rstrip(". ") + ". " + phrase
+
+
+def _apply_product_lock(shot, product_ref):
+    """商品shotに product 参照画像を --image-references 用に前置し、ロック句を追記する。"""
+    if product_ref:
+        existing = list(shot.get("reference_images") or [])
+        if product_ref not in existing:
+            merged = [product_ref] + [p for p in existing if p and p != product_ref]
+            shot["reference_images"] = merged[:_MAX_PRODUCT_REFERENCE_IMAGES]
+    _augment_prompt(shot, _PRODUCT_LOCK_PHRASE, _PRODUCT_LOCK_MARKER)
+
+
+def _apply_no_product(shot):
+    """非商品shotに「ボトルを出すな」句を追記する（既に商品ロック済みなら何もしない）。"""
+    low = (shot.get("visual_prompt") or "").lower() if isinstance(shot.get("visual_prompt"), str) else ""
+    if _PRODUCT_LOCK_MARKER in low:
+        return
+    _augment_prompt(shot, _NO_PRODUCT_PHRASE, _NO_PRODUCT_MARKER)
+
+
+# ---------------------------------------------------------------------------
 # ショットへの決定論的割り当て
 # ---------------------------------------------------------------------------
 
@@ -1140,18 +1197,37 @@ def assign_images_to_shots(shots, image_paths, reference_spec=None):
         return result
 
     product_indices = product_shot_indices(shots, reference_spec=reference_spec)
+    # 商品1本ロックの参照画像 = 採用済み商品画像の先頭（product_manifest の adopted 先頭）。
+    # 全ての商品shotで同一の1枚を --image-references に渡し、商品の同一性を担保する。
+    product_ref = paths[0]
 
     if not product_indices:
-        # 縮退: フック(0) と CTA(n-1) の2点のみ
+        # 縮退: フック(0) と CTA(n-1) の2点のみ image-to-video 起点にする
         if n == 1:
             result[0]["image_path"] = paths[0]
+            product_set = {0}
         else:
             result[0]["image_path"] = paths[0]
             result[n - 1]["image_path"] = paths[1] if len(paths) >= 2 else paths[0]
+            product_set = {0, n - 1}
+        # 縮退時も「フック/CTA=商品shot」にロック、それ以外は「ボトルを出すな」。
+        for i in range(n):
+            if i in product_set:
+                _apply_product_lock(result[i], product_ref)
+            else:
+                _apply_no_product(result[i])
         return result
 
     # 商品shotのみに image_path を配分（枯渇したら image_path キー無し）
     for j, idx in enumerate(product_indices):
         if j < len(paths):
             result[idx]["image_path"] = paths[j]
+    # 商品1本ロック: 全ての商品shotに product 参照画像とロック句を付与し、
+    # 非商品shotには「ボトルを出すな」句を付与する。
+    product_set = set(product_indices)
+    for i in range(n):
+        if i in product_set:
+            _apply_product_lock(result[i], product_ref)
+        else:
+            _apply_no_product(result[i])
     return result
