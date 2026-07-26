@@ -42,7 +42,7 @@ export function renderProjectList(container, state, actions) {
       <div class="state-block">
         <div class="state-block__icon">${iconFolder()}</div>
         <div class="state-block__title">プロジェクトがありません</div>
-        <div class="state-block__desc">「新規作成」からテーマを入力して最初のリールを作りましょう</div>
+        <div class="state-block__desc">「新規作成」からテーマを入力して最初のショート動画を作りましょう</div>
       </div>
     `;
   } else {

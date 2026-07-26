@@ -357,7 +357,7 @@ function renderHeader() {
   const renderDisabled = !project || !state.draftPlan || project.status === "generating" || project.status === "rendering";
 
   el.innerHTML = `
-    <div class="app-header__brand"><span class="logo-dot" aria-hidden="true"></span><span>Reel Studio</span></div>
+    <div class="app-header__brand"><span class="logo-dot" aria-hidden="true"></span><span>Short Studio</span></div>
     <a class="btn btn--sm btn--ghost" href="${simpleModeHref()}" data-action="to-simple-mode">← かんたん画面へ</a>
     <div class="app-header__project">
       ${project ? `

@@ -322,7 +322,7 @@ class JobManager:
     # --- 公開API -----------------------------------------------------
 
     def start_generate(self, project_id, theme, target_duration_sec, backend_name, style="default", product_url=None,
-                        reference_url=None, plan_tier=None):
+                        reference_url=None, plan_tier=None, bgm_mode=None):
         job_id = project_id  # POST /api/projects はプロジェクトIDそのものをjob_idとして使う（設計判断）
         with self._lock:
             self._jobs[job_id] = {"job_id": job_id, "kind": "generate", "status": "queued"}
@@ -330,7 +330,7 @@ class JobManager:
             "project_id": project_id, "theme": theme,
             "target_duration_sec": target_duration_sec, "backend_name": backend_name,
             "style": style, "product_url": product_url, "reference_url": reference_url,
-            "plan_tier": plan_tier,
+            "plan_tier": plan_tier, "bgm_mode": bgm_mode,
         }))
         return job_id
 
@@ -539,6 +539,13 @@ class JobManager:
         plan_tier = payload.get("plan_tier")
         backend_name = plan_tier_mod.resolve_backend(plan_tier, payload["backend_name"])
         cfg = self._cfg_for_tier(plan_tier)
+        # BGM モード（"auto" | "none"）: none = 一切選定しない（後付け派向け）。
+        # 未指定は cfg.audio.bgm_mode（config.json 既定）へフォールバック。
+        _raw_bgm_mode = payload.get("bgm_mode")
+        if _raw_bgm_mode in ("auto", "none"):
+            bgm_mode = _raw_bgm_mode
+        else:
+            bgm_mode = (cfg.get("audio") or {}).get("bgm_mode") or "auto"
 
         def fail(message):
             project = projects.get_project(project_id)
@@ -844,11 +851,15 @@ class JobManager:
         # 残るようにする。以前は生成ループを抜けた後にまとめて project["plan"] を書いていた
         # ため、途中失敗時は create_project() 時点の空のplan（shots:[]）のままになっていた。
         # 後方互換: plan に既に bgm.file が明示指定済みならそれを尊重（Studioで手動指定した場合等）
-        _explicit_bgm = plan.get("bgm") if isinstance(plan.get("bgm"), dict) else None
-        if _explicit_bgm and _explicit_bgm.get("file"):
-            bgm_file = _explicit_bgm.get("file")
+        # ただし bgm_mode="none" のときは一切選定しない（後付け派向けの権威スイッチ）。
+        if bgm_mode == "none":
+            bgm_file = None
         else:
-            bgm_file = _resolve_bgm_by_mood(plan.get("bgm_mood"), project_id=project_id)
+            _explicit_bgm = plan.get("bgm") if isinstance(plan.get("bgm"), dict) else None
+            if _explicit_bgm and _explicit_bgm.get("file"):
+                bgm_file = _explicit_bgm.get("file")
+            else:
+                bgm_file = _resolve_bgm_by_mood(plan.get("bgm_mood"), project_id=project_id)
 
         def _planned_shot(i, shot):
             base = {
@@ -901,6 +912,10 @@ class JobManager:
             _mood = plan.get("bgm_mood")
             if _mood:
                 project["bgm_mood"] = _mood
+            # BGM モードを project 直下に保存する（app.create_project でも初期化済みだが、
+            # 後方互換で bgm_mode を持たない旧 project.json や、旧 API 経由の Import では
+            # ここで確実に持ち直す）。_render_project の権威スイッチはここを参照する。
+            project["bgm_mode"] = bgm_mode
             projects.save_project(project)
 
         # --- シーングループ（クリップ再利用）で生成する ---------------------------------
@@ -1818,7 +1833,16 @@ def _render_project(project_id, plan, cfg):
     bgm_path = None
     bgm_gain_db = None
     bgm_ducking = True
-    if bgm_cfg and bgm_cfg.get("file"):
+    # BGM モード権威スイッチ: project.bgm_mode="none" のときは plan.bgm や過去に
+    # bgm_selected として保存された曲があっても、最終段で BGM を一切入力しない。
+    # （診断で判明した例: p_20260726112338_e175fe43 は bgm_selected=upbeat_house_02 が
+    #  乗ったが、bgm_mode=none なら render はそれを無視して BGM 無しで書き出す）
+    _bgm_mode_authority = (project_snapshot or {}).get("bgm_mode") or "auto"
+    if _bgm_mode_authority == "none":
+        # bgm_cfg/plan.bgm は触らない（Studio編集画面の視覚状態を壊さないため）。
+        # render 呼び出しへは bgm_path=None を渡すことでビルドコマンドから BGM 入力を落とす。
+        pass
+    elif bgm_cfg and bgm_cfg.get("file"):
         resolved = projects.resolve_bgm_path(bgm_cfg["file"])
         bgm_path = str(resolved) if resolved else None
         bgm_gain_db = bgm_cfg.get("gain_db")
@@ -1854,6 +1878,13 @@ def _render_project(project_id, plan, cfg):
             bgm_curve = enhancement["bgm_curve"]
             first_shot_impact_sec = enhancement["first_shot_impact_sec"]
             main_dip_events = enhancement.get("main_dip_events")
+            # BGM モード "none" のときは bgm_curve / main_dip_events を無効化する。
+            # bgm_curve は BGM 音量の時間関数なので BGM 無しで残しても無意味、main_dip_events は
+            # BGM ダッキングにぶら下がる narration/main の追加 -6dB 窓なので、BGM 無しで残すと
+            # ナレーションだけが局所的に凹む副作用になる（BUG-53 の派生副作用）。
+            if _bgm_mode_authority == "none":
+                bgm_curve = None
+                main_dip_events = None
             edit_profile_applied = True
         except Exception:
             bgm_curve = None

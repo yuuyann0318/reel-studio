@@ -121,7 +121,7 @@ function seed() {
   });
 }
 
-function startGenerateJob(projectId, theme, durationSec, style, voice) {
+function startGenerateJob(projectId, theme, durationSec, style, voice, bgmMode) {
   const stages = [
     { stage: "queued", message: "キューに登録しました", pct: 0 },
     { stage: "script", message: "台本を生成しています…", pct: 18 },
@@ -146,10 +146,12 @@ function startGenerateJob(projectId, theme, durationSec, style, voice) {
     const project = DB.projects.get(projectId);
     if (!project) return;
     project.status = "ready";
+    // BGM モード権威スイッチ: bgm_mode="none" のときは plan.bgm=null（BGMを一切選ばない）。
+    const _bgmMode = bgmMode || project.bgm_mode || "none";
     project.plan = {
       shots: buildShots(theme, shotCount),
       narration_text: `${theme}についての台本です。`,
-      bgm: { file: "calm_01.mp3", gain_db: -14, ducking: true },
+      bgm: _bgmMode === "none" ? null : { file: "calm_01.mp3", gain_db: -14, ducking: true },
       sfx: [{ file: "whoosh_01.wav", at_sec: 2.0, gain_db: -8 }],
       subtitle_style: defaultSubtitleStyle(style),
     };
@@ -221,7 +223,7 @@ function backendForPlanTier(planTier, backend) {
   return backend || "mock";
 }
 
-export async function createProject({ theme, duration, backend, style, planTier, voice }) {
+export async function createProject({ theme, duration, backend, style, planTier, voice, bgmMode }) {
   await delay(150);
   if (!theme || !theme.trim()) {
     throw new ApiError("VALIDATION_ERROR", "テーマを入力してください", 422);
@@ -230,6 +232,8 @@ export async function createProject({ theme, duration, backend, style, planTier,
   const resolvedBackend = backendForPlanTier(planTier, backend);
   const tier = planTier || (resolvedBackend === "mock" ? "free" : "paid");
   const est = estimateCoins(tier, duration || 30);
+  // bgm_mode（"auto" | "none"）。未指定/不明値は既定 "none"（config.json のユーザー既定に合わせる）。
+  const bgm = (bgmMode === "auto" || bgmMode === "none") ? bgmMode : "none";
   DB.projects.set(id, {
     id,
     theme: theme.trim(),
@@ -243,8 +247,9 @@ export async function createProject({ theme, duration, backend, style, planTier,
     style: style || "default",
     voice: voice || "auto",
     voice_used: null,
+    bgm_mode: bgm,
   });
-  startGenerateJob(id, theme.trim(), duration || 30, style || "default", voice || "auto");
+  startGenerateJob(id, theme.trim(), duration || 30, style || "default", voice || "auto", bgm);
   return { id };
 }
 

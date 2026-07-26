@@ -59,8 +59,8 @@ export const api = {
     return request(`/api/projects/${encodeURIComponent(id)}`);
   },
 
-  async createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier, voice }) {
-    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier, voice });
+  async createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier, voice, bgmMode }) {
+    if (MOCK) return mock.createProject({ theme, duration, backend, style, productUrl, referenceUrl, planTier, voice, bgmMode });
     const body = { theme, duration, style };
     // plan_tier（"free"|"paid"）を1変数で送る。指定時はサーバ側で backend を強制解決するため、
     // backend は送らない（後方互換のため未指定時のみ backend を尊重）。
@@ -70,6 +70,9 @@ export const api = {
     if (referenceUrl) body.reference_url = referenceUrl; // 空/未指定なら送らない（通常の台本生成のまま）
     // voice（"auto" | カタログkey）。未指定/"auto" は送らず、サーバ既定(auto)に任せる。
     if (voice && voice !== "auto") body.voice = voice;
+    // bgm_mode（"auto" | "none"）。none = BGM を一切付けない（後付け派向け）。
+    // 明示送信することでサーバ既定と食い違ってもフォームの選択を必ず反映させる。
+    if (bgmMode === "auto" || bgmMode === "none") body.bgm_mode = bgmMode;
     return request("/api/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

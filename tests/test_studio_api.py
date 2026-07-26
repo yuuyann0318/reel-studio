@@ -126,7 +126,7 @@ def test_create_project_omits_product_url_when_not_provided(monkeypatch):
     captured = {}
 
     def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
-                              product_url=None, reference_url=None, plan_tier=None):
+                              product_url=None, reference_url=None, plan_tier=None, **_kwargs):
         captured["product_url"] = product_url
         captured["reference_url"] = reference_url
         return project_id
@@ -157,7 +157,7 @@ def test_create_project_threads_style_into_start_generate(monkeypatch):
     captured = {}
 
     def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
-                              product_url=None, reference_url=None, plan_tier=None):
+                              product_url=None, reference_url=None, plan_tier=None, **_kwargs):
         captured["project_id"] = project_id
         captured["style"] = style
         captured["product_url"] = product_url
@@ -188,7 +188,7 @@ def test_create_project_threads_product_url_into_start_generate_and_persists_non
     captured = {}
 
     def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
-                              product_url=None, reference_url=None, plan_tier=None):
+                              product_url=None, reference_url=None, plan_tier=None, **_kwargs):
         captured["project_id"] = project_id
         captured["product_url"] = product_url
         captured["reference_url"] = reference_url
@@ -221,7 +221,7 @@ def test_create_project_threads_reference_url_into_start_generate_and_persists_n
     captured = {}
 
     def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
-                              product_url=None, reference_url=None, plan_tier=None):
+                              product_url=None, reference_url=None, plan_tier=None, **_kwargs):
         captured["project_id"] = project_id
         captured["reference_url"] = reference_url
         return project_id

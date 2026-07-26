@@ -109,7 +109,12 @@ def _track_contract_section():
         "A2 の BGM クリップには、Studio 側の編集レシピが決めた音量カーブ（フック区間は強め・本編は"
         "抑えめ・CTA 区間で戻す・SFX 時刻の前後で自動ダッキング）が Audio Levels のキーフレームとして"
         "書き込まれています。Premiere で「エフェクトコントロール > レベル」を開くと具体的な"
-        "キーフレーム位置が確認できます。\n"
+        "キーフレーム位置が確認できます。\n\n"
+        "### BGM を「なし」で作成した場合\n\n"
+        "作成時に「BGM: なし（あとで自分で付ける）」を選んだ動画は、BGM 音声を一切含まずに"
+        "書き出されます。A2 トラック自体は**空トラックとして維持**されるため、Premiere 上で "
+        "A2 に自分の BGM 素材をドラッグして後付けするだけで済みます（キーフレーム音量カーブは"
+        "書き込まれません）。\n"
     )
 
 
@@ -191,6 +196,13 @@ def build_package(project_id, progress_cb=None):
     if bgm_rel:
         resolved = projects.resolve_bgm_path(bgm_rel)
         bgm_path = str(resolved) if resolved else None
+    # BGM モード権威スイッチ: project.bgm_mode="none" のときは plan.bgm/bgm_selected の内容に
+    # 関わらず bgm_path=None（A2 空トラックを維持し、Premiere でユーザーが自分で BGM を後付け
+    # する運用に合わせる）。ffmpeg レンダ経路 (_render_project) と時刻源・BGM扱いを一致させる。
+    _pkg_project = projects.get_project(project_id)
+    _pkg_bgm_mode = (_pkg_project or {}).get("bgm_mode") or "auto"
+    if _pkg_bgm_mode == "none":
+        bgm_path = None
 
     # Phase B: plan v2 の sfx_plan / caption offset / hook-cta を Premiere タイムラインへ
     # 忠実に反映するため、shot_display_durations と sfx_events / bgm_curve を先に解決する。
@@ -209,6 +221,9 @@ def build_package(project_id, progress_cb=None):
         )
         sfx_events = sfx_events + (_enh.get("sfx_extra") or [])
         enhancement_bgm_curve = _enh.get("bgm_curve")
+        # BGM モード "none" のときは音量カーブを書き込まない（BGM 無しなので無意味）。
+        if _pkg_bgm_mode == "none":
+            enhancement_bgm_curve = None
     except Exception:
         # 編集プロファイルの読み込み失敗 → v1 経路（plan["sfx"] のみ・BGMカーブなし）へ縮退
         _edit_prof = None

@@ -12,6 +12,9 @@
   "voice": "Kyoko",
   "default_subtitle_style": "default",
   "director_quality": "supreme",
+  "audio": {
+    "bgm_mode": "none"
+  },
   "brand_rules": {
     "ng_words": [
       "絶対稼げる",

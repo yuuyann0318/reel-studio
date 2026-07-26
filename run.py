@@ -377,7 +377,14 @@ def _emit_premiere_package_from_cli(run_dir, plan, shot_display_durations, edit_
 
 def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=None, style="default",
                   reference_url=None, reference_file=None, premiere_export=False,
-                  match_reference_duration=False, plan_tier=None):
+                  match_reference_duration=False, plan_tier=None, bgm_mode=None):
+    # BGM モード（"auto" | "none"）: 呼び出し元(main)が渡さない場合は cfg.audio.bgm_mode（既定 "auto"）。
+    # "none" のとき本関数は BGM 入力を一切生成せず、bgm_curve / main_dip_events も無効化する
+    # （render.build_final_cmd は bgm_path=None で BGM 工程を丸ごとスキップする既存契約）。
+    if not bgm_mode:
+        bgm_mode = (cfg.get("audio") or {}).get("bgm_mode") or "auto"
+    if bgm_mode not in ("auto", "none"):
+        bgm_mode = "auto"
     from pipeline import plan_tier as _plan_tier_mod
     _tier = _plan_tier_mod.infer_tier(plan_tier, backend_name)
     report = {
@@ -829,7 +836,13 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                 _bpm_v = _ref_music.get("bpm")
                 if isinstance(_bpm_v, (int, float)) and _bpm_v > 0:
                     _ref_bpm = float(_bpm_v)
-            bgm_path = _resolve_bgm(plan.get("bgm_mood"), project_id=run_id, target_bpm=_ref_bpm)
+            # BGM モード権威スイッチ: "none" のときは plan.bgm_mood が何であっても BGM を
+            # 一切選定・入力しない（後付け派の意思を最終段で必ず尊重する）。
+            if bgm_mode == "none":
+                bgm_path = None
+            else:
+                bgm_path = _resolve_bgm(plan.get("bgm_mood"), project_id=run_id, target_bpm=_ref_bpm)
+            report["stages"]["render"]["bgm_mode"] = bgm_mode
             report["stages"]["render"]["bgm_mood"] = plan.get("bgm_mood")
             report["stages"]["render"]["bgm_reference_bpm"] = _ref_bpm
             report["stages"]["render"]["bgm_path"] = bgm_path
@@ -895,6 +908,13 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
                     bgm_curve = enhancement["bgm_curve"]
                     first_shot_impact_sec = enhancement["first_shot_impact_sec"]
                     main_dip_events = enhancement.get("main_dip_events")
+                    # BGM モード "none" のとき: bgm_curve は BGM トラックの音量を
+                    # 動かすカーブなので無意味、main_dip_events は BGM ダッキングに
+                    # ぶら下がる narration/main の追加 -6dB 窓なので、BGM 無しでは
+                    # 再生時にナレーションが局所的に凹むだけの副作用になる。両方 None に落とす。
+                    if bgm_mode == "none":
+                        bgm_curve = None
+                        main_dip_events = None
                     edit_profile_applied = True
                 except Exception:
                     edit_sfx = []
@@ -1014,7 +1034,7 @@ def _write_report(report):
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="higgsfield-auto-reel: テーマ→9:16完成リール全自動パイプライン")
+    parser = argparse.ArgumentParser(description="higgsfield-auto-reel (Short Studio): テーマ→9:16完成ショート動画 全自動パイプライン")
     parser.add_argument("--theme", required=True, help="動画のテーマ（例: 'AIで副業を始める最初の一歩'）")
     parser.add_argument("--duration", type=float, default=None, help="目標尺(秒)。未指定はconfig.jsonのtarget_duration_sec")
     parser.add_argument("--backend", default=None, choices=["mock", "higgsfield", "cloudapi"], help="ビジュアル生成バックエンド（上級者向け。--plan 指定時は --plan が優先）")
@@ -1035,6 +1055,12 @@ def main(argv=None) -> int:
         "--match-reference-duration", action="store_true",
         help="F11: target_duration_sec を参考動画の実尺(reference.duration_sec)に強制一致させる。"
              "指定時は --duration より優先。参考のリズム(高速カット/長回し)をそのまま保つのに使う",
+    )
+    parser.add_argument(
+        "--bgm", default=None, choices=["none", "auto"],
+        help="BGM の付け方。none=BGM を一切付けない（後付け派向け・編集ソフトで自分で足す） / "
+             "auto=参考動画のムード/テンポに合わせて自前ライブラリから選曲（TTP準拠）。"
+             "未指定は config.json の audio.bgm_mode（既定 auto）",
     )
     parser.add_argument(
         "--style", default="default", choices=["default", "vertical_hook"],
@@ -1081,6 +1107,8 @@ def main(argv=None) -> int:
     else:
         backend_name = args.backend or cfg.get("backend", "mock")
     quality = args.quality or cfg.get("director_quality", "supreme")
+    # BGM モード（none|auto）: --bgm が最優先、無ければ config.json の audio.bgm_mode（既定 auto）。
+    bgm_mode = args.bgm or ((cfg.get("audio") or {}).get("bgm_mode") or "auto")
 
     # TTP v2 モード必須ガード: reference_url/file が無く --no-llm でもない場合は
     # 分かりやすい日本語エラー+使用例を表示して exit 2。
@@ -1094,7 +1122,7 @@ def main(argv=None) -> int:
             reference_url=args.reference_url, reference_file=args.reference_file,
             premiere_export=args.premiere_export,
             match_reference_duration=args.match_reference_duration,
-            plan_tier=plan_tier,
+            plan_tier=plan_tier, bgm_mode=bgm_mode,
         )
     except director.TTPReferenceRequiredError:
         _emit_reference_required_error(args.theme)

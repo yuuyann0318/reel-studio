@@ -29,6 +29,10 @@ const state = {
   referenceUrl: "", // 参考動画リンク（任意）。貼るとその動画の構成・テンポを再現した台本になる
   style: "default", // 'default' | 'vertical_hook'
   planTier: "free", // 'free'（無料コース） | 'paid'（有料コース）。映像/声/文字起こしの課金をまとめて切替
+  // BGM の付け方。'none' = BGM を一切付けない（後付け派向け・編集ソフトで自分で足す・既定）／
+  // 'auto' = 参考動画のムード/テンポに合わせて自前ライブラリから選曲（TTP準拠）。
+  // ユーザー既定は "none"（config.json audio.bgm_mode と同期）。
+  bgmMode: "none",
   voice: "auto",   // 'auto'（お手本に合わせる）| カタログkey（"say_kyoko" / "fish_xxxx"）
   voices: [],      // GET /api/voices のカタログ（全tier）。planTierで表示を絞る
   voicesLoaded: false,
@@ -263,6 +267,7 @@ async function submitCreate() {
       productUrl: productUrl || undefined, // 空なら送らない（通常モードのまま）
       referenceUrl, // TTP v2: 必須
       voice: state.voice, // "auto" | カタログkey（api.js側で auto は送らない）
+      bgmMode: state.bgmMode, // "none"（既定・BGM後付け派）| "auto"（おまかせ選曲）
     });
     setState({ submitting: false });
     await beginGenerate(id);
@@ -573,7 +578,7 @@ function saveLink() {
 
 // ---------- 共通パーツ ----------
 function topbarHtml() {
-  return `<div class="s-topbar"><span class="logo-dot" aria-hidden="true"></span><span>Reel Studio かんたんモード</span></div>`;
+  return `<div class="s-topbar"><span class="logo-dot" aria-hidden="true"></span><span>Short Studio かんたんモード</span></div>`;
 }
 // AI未接続などの致命的な環境NGを画面上部に赤バナーで知らせる（専門用語ゼロ）。
 // health.checks.claude.ok===false のときは「AIに接続できていません」を最優先で表示する。
@@ -822,6 +827,42 @@ function planCardHtml(tier, iconSvg, badge, title, sub, features) {
     </button>`;
 }
 
+// ---------- BGM トグル（🎵 なし ／ おまかせ） ----------
+// plan-card と同じ作法（枠 + aria-pressed）で 2 択カードを並べる。既存 s-plan-card トークンを
+// 流用し、追加 CSS を極力足さない（style="max-width" だけ 2 択に合わせて縮める）。
+// 既定は "なし（あとで自分で付ける）" ＝ 後付け派の要望に忠実。
+const ICON_MUTE = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 9v6h4l5 4V5l-5 4H9z"/><path d="M17 8l5 8M22 8l-5 8"/></svg>`;
+const ICON_NOTE = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`;
+
+function bgmCardHtml(mode, iconSvg, badge, title, sub, features) {
+  const pressed = state.bgmMode === mode;
+  return `
+    <button type="button" class="s-plan-card s-plan-card--${mode === "none" ? "free" : "paid"}" data-bgm-mode="${mode}" aria-pressed="${pressed}" aria-label="BGM: ${escapeHtml(title)}">
+      <span class="s-plan-card__sel" aria-hidden="true">${ICON_CHECK}選択中</span>
+      <div class="s-plan-card__head">
+        <span class="s-plan-card__icon" aria-hidden="true">${iconSvg}</span>
+        <span class="s-plan-card__badge">${escapeHtml(badge)}</span>
+      </div>
+      <div class="s-plan-card__title">${escapeHtml(title)}</div>
+      <div class="s-plan-card__sub">${escapeHtml(sub)}</div>
+      <ul class="s-plan-card__features">
+        ${features.map((f) => `<li><span class="s-plan-card__check" aria-hidden="true">${ICON_CHECK}</span>${escapeHtml(f)}</li>`).join("")}
+      </ul>
+    </button>`;
+}
+
+function bgmCardsHtml() {
+  return `
+    <div class="s-plan-grid" role="group" aria-label="BGMの付け方を選ぶ">
+      ${bgmCardHtml("none", ICON_MUTE, "既定", "なし（あとで自分で付ける）",
+        "BGM無しで書き出し。編集ソフトで好きな音楽を後付けできます",
+        ["BGM: なし（後付け用のA2空トラックを維持）", "ナレーション・効果音はそのまま", "0コイン増"])}
+      ${bgmCardHtml("auto", ICON_NOTE, "おまかせ", "おまかせ",
+        "参考動画のムード/テンポに合わせて自前ライブラリから自動選曲",
+        ["BGM: 自動選曲＋音量カーブ", "SFX時刻でBGMを自動ダッキング", "0コイン増"])}
+    </div>`;
+}
+
 function planCardsHtml() {
   return `
     <div class="s-plan-grid" role="group" aria-label="プランを選ぶ">
@@ -935,6 +976,10 @@ function renderHome() {
       ${planCardsHtml()}
       <div class="s-hint">「無料」はずっと0円でお試しできます。「有料」はAIが本物の映像と声を作り、コインを消費します（かかるコイン数は上に表示されます）。</div>
 
+      <div class="s-section-title" style="margin-top:16px;">🎵 BGM</div>
+      ${bgmCardsHtml()}
+      <div class="s-hint">「なし」を選ぶと動画にはBGMを一切入れません（後付け派向け・A2トラックは空のまま維持）。編集ソフトで好きな音楽を後から付けられます。</div>
+
       ${voiceSectionHtml()}
 
       ${state.submitError ? `<div class="s-error-banner" role="alert">${escapeHtml(state.submitError.message)}</div>` : ""}
@@ -972,6 +1017,10 @@ function renderHome() {
     if (tier === "paid") ensurePaidEstimate(); // 選んだ瞬間に見積を取得して費用を動的表示
   }));
   el.querySelectorAll("[data-voice]").forEach((btn) => btn.addEventListener("click", () => setState({ voice: btn.dataset.voice })));
+  el.querySelectorAll("[data-bgm-mode]").forEach((btn) => btn.addEventListener("click", () => {
+    const mode = btn.dataset.bgmMode;
+    if (mode === "none" || mode === "auto") setState({ bgmMode: mode });
+  }));
   el.querySelector("#s-submit").addEventListener("click", submitCreate);
   el.querySelectorAll("[data-open-project]").forEach((c) => c.addEventListener("click", () => openPast(c.dataset.openProject)));
   ensureVoices(); // 声カタログを取得（未取得のときだけ・読み取り専用）
@@ -1144,6 +1193,9 @@ function renderResult() {
       ${project && project.telop_style && project.telop_style.display_name
         ? `<div class="s-section-sub">テロップ: ${escapeHtml(project.telop_style.display_name)}</div>`
         : ""}
+      ${project && project.bgm_mode === "none"
+        ? `<div class="s-section-sub">🎵 BGM: なし（後付け用）</div>`
+        : ""}
       <div class="s-video-wrap">
         <div class="preview-frame">
           ${link
@@ -1257,6 +1309,9 @@ function renderEdit() {
 
     <div class="s-card">
       <div class="s-section-title">③ 音楽</div>
+      ${(state.current && state.current.bgm_mode === "none")
+        ? `<div class="s-hint" style="margin:6px 0 10px;">🎵 この動画は「BGM なし（後付け用）」で作成されました。編集ソフトで自分で音楽を後付けする前提のため、下の設定は最終書き出しに反映されません。</div>`
+        : ""}
       <div class="s-music-grid" role="group" aria-label="音楽の雰囲気">
         ${musicMoodBtn("upbeat", "アップビート", mood)}
         ${musicMoodBtn("calm", "落ち着いた", mood)}

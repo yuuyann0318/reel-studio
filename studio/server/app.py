@@ -180,13 +180,25 @@ async def create_project(request: Request):
         _bad_request("invalid_voice", "voice は非空文字列（\"auto\" またはカタログ key）である必要があります")
     voice = voice.strip() if isinstance(voice, str) else None
 
+    # bgm_mode（"auto" | "none"）: none = BGM を一切付けない（後付け派向け）。
+    # 未指定は cfg.audio.bgm_mode（config.json の既定）にフォールバック。
+    # サーバ側で正規化しておくことで、以降の generate ジョブ + _render_project 権威スイッチが
+    # project.bgm_mode を単一の真実として参照できる。
+    raw_bgm_mode = (body or {}).get("bgm_mode")
+    if raw_bgm_mode is None or raw_bgm_mode == "":
+        bgm_mode = (cfg.get("audio") or {}).get("bgm_mode") or "auto"
+    elif raw_bgm_mode in ("auto", "none"):
+        bgm_mode = raw_bgm_mode
+    else:
+        _bad_request("invalid_bgm_mode", "bgm_mode は auto/none のいずれかである必要があります")
+
     project = projects.create_project(
         theme.strip(), target_duration_sec, backend_name, status="generating", style=style, product_url=product_url,
-        reference_url=reference_url, plan_tier=plan_tier, billing=billing, voice=voice,
+        reference_url=reference_url, plan_tier=plan_tier, billing=billing, voice=voice, bgm_mode=bgm_mode,
     )
     job_manager.start_generate(
         project["id"], theme.strip(), target_duration_sec, backend_name, style=style, product_url=product_url,
-        reference_url=reference_url, plan_tier=plan_tier,
+        reference_url=reference_url, plan_tier=plan_tier, bgm_mode=bgm_mode,
     )
     return {"id": project["id"]}
 

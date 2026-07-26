@@ -15,7 +15,7 @@ if [ "${OS_KERNEL}" != "Darwin" ]; then
   echo "============================================================"
   echo "  現在のOS: ${OS_KERNEL}"
   echo
-  echo "  Reel Studio は macOS (Apple Silicon / Intel Mac) でのみ動作します。"
+  echo "  Short Studio は macOS (Apple Silicon / Intel Mac) でのみ動作します。"
   echo "  Windows / Linux では現時点でサポートしていません。"
   echo
   echo "  Mac をお持ちであれば、その Mac 上でこのファイルを"
@@ -394,19 +394,25 @@ add_report "✅ Studio サーバ"
 open "http://127.0.0.1:8787/" 2>/dev/null || true
 
 # ============================================================
-# 追加: デスクトップに「Reel Studio 起動.command」を自動生成
+# 追加: デスクトップに「Short Studio 起動.command」を自動生成
 # 何度実行しても同名で上書き（起動先パスは REPO_ROOT を埋め込み）。
+# 旧名「Reel Studio 起動.command」がある場合は本セットアップ再実行時に自動削除する。
 # ============================================================
 header "追加 - デスクトップに起動ボタンを設置"
 DESKTOP_DIR="$HOME/Desktop"
-LAUNCHER="${DESKTOP_DIR}/Reel Studio 起動.command"
+LAUNCHER="${DESKTOP_DIR}/Short Studio 起動.command"
+# 旧名のランチャがあれば破棄する（表示名リブランドの後始末）。
+OLD_LAUNCHER="${DESKTOP_DIR}/Reel Studio 起動.command"
+if [ -f "$OLD_LAUNCHER" ] && [ "$OLD_LAUNCHER" != "$LAUNCHER" ]; then
+  rm -f "$OLD_LAUNCHER" 2>/dev/null || true
+fi
 if [ -d "$DESKTOP_DIR" ]; then
   # ヒアドキュメントは変数展開する。埋め込む REPO_ROOT のパスは
   # 空白含みでもダブルクォートで固定される。
   cat > "$LAUNCHER" <<LAUNCHER_EOF
 #!/bin/bash
 # ============================================================
-#  Reel Studio 起動ボタン (自動生成)
+#  Short Studio 起動ボタン (自動生成)
 #  かんたんセットアップ.command が作成しました。
 #  ダブルクリックで Studio が起動し、ブラウザが開きます。
 # ============================================================
@@ -426,27 +432,27 @@ if lsof -iTCP:8787 -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Studio は既に起動しています。ブラウザを開きます..."
 else
   echo "Studio を起動しています..."
-  nohup bash "\${REPO_ROOT}/studio/start_server.sh" >/tmp/reel_studio_launcher.log 2>&1 &
+  nohup bash "\${REPO_ROOT}/studio/start_server.sh" >/tmp/short_studio_launcher.log 2>&1 &
   disown 2>/dev/null || true
   for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
     if curl -s -o /dev/null http://127.0.0.1:8787/ 2>/dev/null; then break; fi
     sleep 1
   done
   if ! curl -s -o /dev/null http://127.0.0.1:8787/ 2>/dev/null; then
-    echo "起動確認ができませんでした。ログ: /tmp/reel_studio_launcher.log"
+    echo "起動確認ができませんでした。ログ: /tmp/short_studio_launcher.log"
     echo "「かんたんセットアップ.command」をもう一度実行してみてください。"
     read -r -n 1 _ 2>/dev/null || true
     exit 1
   fi
 fi
 open "http://127.0.0.1:8787/" 2>/dev/null || true
-echo "Reel Studio: http://127.0.0.1:8787/"
+echo "Short Studio: http://127.0.0.1:8787/"
 LAUNCHER_EOF
   chmod +x "$LAUNCHER" 2>/dev/null || true
   # 自作スクリプトなので通常は quarantine は付かないが念のため外す
   xattr -d com.apple.quarantine "$LAUNCHER" 2>/dev/null || true
   if [ -x "$LAUNCHER" ]; then
-    ok "デスクトップにボタンを作りました: 「Reel Studio 起動.command」"
+    ok "デスクトップにボタンを作りました: 「Short Studio 起動.command」"
     info "次回からは、このアイコンをダブルクリックするだけで Studio が開きます。"
     info "※ 初回のみ macOS の「開発元を確認できません」警告が出る場合は、"
     info "  右クリック → 開く → 開く で1回だけ許可してください。"
@@ -470,7 +476,8 @@ done
 echo
 info "ブラウザで http://127.0.0.1:8787/ を開きました。"
 info "アプリ内でテーマを入力すれば動画が作れます。"
-info "デスクトップに「Reel Studio 起動.command」を作りました。"
+info "デスクトップに「Short Studio 起動.command」を作りました。"
+info "（旧名「Reel Studio 起動.command」がデスクトップにあった場合は自動で削除しました）"
 info "  → 次回からはそのアイコンをダブルクリックするだけで開きます。"
 info "困った時は  ${LOG_FILE}  を送ってください。"
 info "もう一度実行しても安全（済んだ段はスキップされます）。"

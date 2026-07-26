@@ -21,7 +21,7 @@ fi
 
 # 起動前ヘルスチェック（AI=claude 実疎通 / ffmpeg / ffprobe / yt-dlp の3点+）を標準出力へ。
 # NG でも起動は続行する（UI 側の赤バナーでも通知するため）。claude 疎通は極小の課金が発生する。
-echo "--- Reel Studio 起動前チェック ---"
+echo "--- Short Studio 起動前チェック ---"
 "${REPO_ROOT}/.venv/bin/python3" - <<'PYCHECK' || echo "（ヘルスチェックの実行に失敗しました。サーバ起動は続行します）"
 import sys
 sys.path.insert(0, ".")

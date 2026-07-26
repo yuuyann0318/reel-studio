@@ -116,7 +116,7 @@ def _now_iso():
 
 
 def create_project(theme, target_duration_sec, backend_name, status="generating", style="default", product_url=None,
-                    reference_url=None, plan_tier=None, billing=None, voice=None):
+                    reference_url=None, plan_tier=None, billing=None, voice=None, bgm_mode=None):
     """新規プロジェクトの雛形を作成し保存する。plan/shotsは生成ジョブが後で埋める。
 
     style: "default" | "vertical_hook"（縦書きテロップ・高速カットのTTPスタイル）。
@@ -169,6 +169,10 @@ def create_project(theme, target_duration_sec, backend_name, status="generating"
         "voice": voice or "auto",
         # 実際に使われた声（解決後）。render 時に voice_catalog.resolve_voice() の結果を記録する。
         "voice_used": None,
+        # BGM モード: "auto"（従来どおり自前ライブラリから選曲） / "none"（BGMを一切付けない）。
+        # _render_project は plan.bgm に何が入っていても project.bgm_mode="none" なら
+        # bgm_path=None・bgm_curve=None・main_dip_events=None に強制する（権威スイッチ）。
+        "bgm_mode": bgm_mode if bgm_mode in ("auto", "none") else "auto",
     }
     save_project(project)
     return project

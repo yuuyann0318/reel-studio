@@ -95,7 +95,7 @@ def _patch_start_generate(monkeypatch):
     captured = {}
 
     def _fake_start_generate(project_id, theme, target_duration_sec, backend_name, style="default",
-                              product_url=None, reference_url=None, plan_tier=None):
+                              product_url=None, reference_url=None, plan_tier=None, **_kwargs):
         captured["backend_name"] = backend_name
         captured["plan_tier"] = plan_tier
         return project_id

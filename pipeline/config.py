@@ -25,6 +25,11 @@ _DEFAULTS = {
     "voice": "Kyoko",
     "default_subtitle_style": "default",  # "default" | "vertical_hook"（Studio新規作成時の既定スタイル）
     "director_quality": "supreme",  # "supreme"（3段多段生成） | "single"（従来の一発出し） | "supreme_plus"（品質最優先）
+    # BGM の付け方。"auto" = 従来どおり参考動画のムード/テンポに合わせて自前ライブラリから
+    # 選曲する（TTP準拠）。"none" = BGM を一切付けない（後付け派向け。編集ソフトで自分で
+    # BGM を足す前提）。none のとき render/jobs は BGM 入力・音量カーブ・ダッキング/ディップ計算を
+    # 完全にスキップする。CLI は --bgm none|auto で1回だけ上書きできる。
+    "audio": {"bgm_mode": "auto"},
     "brand_rules": {"ng_words": []},
     # F12: director 側の細部プリセット（supreme_plus で上書きされる）。既存挙動と互換の
     # ため空 dict を既定にし、build_shot_skeleton は config.director.min_shot_sec が
