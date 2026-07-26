@@ -59,11 +59,68 @@
   "voices": {
     "fish": [
       {
+        "id": "5161d41404314212af1254556477c17d",
+        "label": "明るく元気な女性",
+        "gender": "female",
+        "style": "bright",
+        "pitch": "mid",
+        "f0_hz": 231.4
+      },
+      {
         "id": "0089dce5fefb4c6ba9b9f2f0debe1ddc",
-        "label": "既定の女性ナレーター",
+        "label": "落ち着いた女性ナレーター",
         "gender": "female",
         "style": "ugc",
-        "pitch": "mid"
+        "pitch": "high",
+        "f0_hz": 284.9
+      },
+      {
+        "id": "825c9e9870494118ad93b6853a22d5e7",
+        "label": "明瞭な女性ナレーション",
+        "gender": "female",
+        "style": "narration",
+        "pitch": "high",
+        "f0_hz": 307.1
+      },
+      {
+        "id": "46745543e52548238593a3962be77e3a",
+        "label": "やわらかい女性（ふうか）",
+        "gender": "female",
+        "style": "soft",
+        "pitch": "high",
+        "f0_hz": 267.4
+      },
+      {
+        "id": "45c5d3723c9c42f598e4776dcfd5f02d",
+        "label": "落ち着いた男性",
+        "gender": "male",
+        "style": "calm",
+        "pitch": "low",
+        "f0_hz": 140.0
+      },
+      {
+        "id": "bb3bf6a073cb48c1a5b6c436053ce243",
+        "label": "低音の男性ナレーター",
+        "gender": "male",
+        "style": "narration",
+        "pitch": "low",
+        "f0_hz": 103.7
+      },
+      {
+        "id": "9600581739c44a9c8bd1401faae802ae",
+        "label": "渋い低音の男性",
+        "gender": "male",
+        "style": "deep",
+        "pitch": "low",
+        "f0_hz": 123.7
+      },
+      {
+        "id": "e9d4ad05ac7a4baf8f979e4c389bf11d",
+        "label": "30代男性ビジネスパーソン",
+        "gender": "male",
+        "style": "business",
+        "pitch": "mid",
+        "f0_hz": 149.2
       }
     ]
   },

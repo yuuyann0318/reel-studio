@@ -20,7 +20,11 @@ Python 3.9 互換構文のみ。外部依存ゼロ（subprocess の `say` のみ
 """
 from __future__ import annotations
 
+import json
 import subprocess
+import time
+import urllib.parse
+import urllib.request
 from typing import Any, Dict, List, Optional
 
 
@@ -137,6 +141,9 @@ def _fish_voices_from_cfg(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             "gender": v.get("gender") or "unknown",
             "style": v.get("style"),
             "pitch": v.get("pitch"),
+            # f0_hz: 実試聴（Fish TTSで1文合成→librosa pyin中央値）で実測した基本周波数[Hz]。
+            # gender/pitch メタの根拠であり、再現・監査用に保持する（自動選択には pitch を使う）。
+            "f0_hz": v.get("f0_hz"),
         })
     return out
 
@@ -171,6 +178,7 @@ def build_catalog(cfg: Optional[Dict[str, Any]] = None, _say_run=None) -> List[D
             "engine_voice_id": v["id"],
             "pitch": v.get("pitch"),
             "style": v.get("style"),
+            "f0_hz": v.get("f0_hz"),
         })
 
     return catalog
@@ -223,6 +231,14 @@ def select_voice_auto(narrator_voice: Optional[Dict[str, Any]],
     nv = narrator_voice if isinstance(narrator_voice, dict) else None
     gender = (nv or {}).get("gender_guess")
     pitch = (nv or {}).get("pitch")
+    # 参考の実測 f0[Hz]（reference_v2.estimate_narrator_voice が付ける値）。
+    # ある場合は「同じ pitch ラベル内での近さ」までここで判定できる
+    # （female/high が3声あるなら参考 300Hz に一番近い声を選ぶ、等）。
+    f0_ref = nv.get("f0_median_hz") if nv else None
+    try:
+        f0_ref = float(f0_ref) if f0_ref is not None else None
+    except (TypeError, ValueError):
+        f0_ref = None
 
     if gender not in ("male", "female"):
         return tier_default_entry(catalog, tier, cfg=cfg)
@@ -232,12 +248,26 @@ def select_voice_auto(narrator_voice: Optional[Dict[str, Any]],
         # 性別一致が無い（例: paid に male しか登録されていない）→ tier 既定へ
         return tier_default_entry(catalog, tier, cfg=cfg)
 
-    # pitch 距離 → 定番優先 → 登場順 で決定論的に1つ選ぶ
-    # （pitch が同点なら Kyoko/Otoya のような定番の自然な声をノベルティ声より優先する）
+    # 決定論的1件: pitchラベル距離 → f0[Hz]距離 → 定番優先 → 登場順。
+    # 参考 f0[Hz] を渡された場合は voice の f0_hz を実距離で突き合わせる
+    # （同じ pitch ラベル内の複数女性/男性でも「参考により近い声」に寄せられる）。
+    def _f0_gap(entry_f0):
+        try:
+            if entry_f0 is None or f0_ref is None:
+                return 10_000.0  # 情報無しは同点扱い（pitch とは別軸なので大きめの共通値）
+            return abs(float(entry_f0) - f0_ref)
+        except (TypeError, ValueError):
+            return 10_000.0
+
     def _sort_key(kv):
         i, e = kv
         preferred = 0 if e.get("engine_voice_id") in _SAY_PREFERRED else 1
-        return (_pitch_distance(e.get("pitch"), pitch), preferred, i)
+        return (
+            _pitch_distance(e.get("pitch"), pitch),
+            _f0_gap(e.get("f0_hz")),
+            preferred,
+            i,
+        )
     indexed = list(enumerate(gender_matches))
     indexed.sort(key=_sort_key)
     return indexed[0][1]
@@ -307,3 +337,152 @@ def resolve_voice(cfg: Optional[Dict[str, Any]],
         return _as_result(picked, "auto")
     default = tier_default_entry(catalog, tier, cfg=cfg)
     return _as_result(default, "fallback") if default else _synth_default()
+
+
+# ---------------------------------------------------------------------------
+# Fish Audio 公式APIからの声モデル動的取得（声の調達＝config.voices.fish 拡充の補助ツール）
+#
+# 公式 List Models: GET https://api.fish.audio/model
+#   Query: language, sort_by(score|task_count|created_at), page_size, page_number,
+#          title, tag ...  Auth: `Authorization: Bearer <API_KEY>`。
+#   Response: {"total": int, "items": [{"_id","title","type","languages",
+#              "like_count","task_count", ...}], "has_more": bool}
+# 実APIで実在確認済み（2026-07-26, language=ja&sort_by=task_count）。
+#
+# 注意:
+#   - API は gender/pitch を返さない。ここで得るのは「実在する候補ID一覧」まで。
+#     gender/pitch は実試聴（Fish TTSで1文合成→f0中央値）で確定し、config.voices.fish
+#     に登録する（＝運用者/検証工程の責務。ここで捏造しない）。
+#   - build_catalog はオフライン決定論・課金ゼロを保つため、この動的取得を既定では呼ばない。
+#     声の棚卸し/補充のときだけ明示的に使う discovery ヘルパである。
+# ---------------------------------------------------------------------------
+
+_FISH_MODEL_LIST_URL = "https://api.fish.audio/model"
+_FISH_API_KEY_ENV_DEFAULT = "FISH_AUDIO_API_KEY"
+
+
+def _default_fish_model_get(url: str, api_key: str, timeout_sec: int = 30) -> Dict[str, Any]:
+    """GET /model を叩き JSON dict を返す（stdlib urllib のみ・依存追加ゼロ）。テストは _http_get で差替える。"""
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", "Bearer {}".format(api_key))
+    resp = urllib.request.urlopen(req, timeout=timeout_sec)
+    try:
+        raw = resp.read()
+    finally:
+        resp.close()
+    return json.loads(raw.decode("utf-8", "replace"))
+
+
+def fetch_fish_voices(api_key: Optional[str] = None, language: str = "ja",
+                      sort_by: str = "task_count", limit: int = 8,
+                      api_key_env: str = _FISH_API_KEY_ENV_DEFAULT,
+                      _http_get=None, timeout_sec: int = 30,
+                      max_pages: int = 5) -> List[Dict[str, Any]]:
+    """Fish Audio 公式APIから language 指定の TTS 声モデルを人気順で上位 limit 件取得する。
+
+    Returns: [{"id","title","languages","task_count","like_count"}, ...]（人気順）。
+    API キーが無い / HTTP・パースエラー / 応答が不正のときは **空リスト** を返す
+    （呼び出し側は登録済み config.voices.fish にフォールバックすればよい・例外は出さない）。
+    gender/pitch は API に無いため含めない（実試聴で確定して登録すること）。
+
+    ページング: /model は tts + svc（歌声変換）混在で返るため、tts だけで limit 件を
+    確実に得るには複数ページを追う必要がある（1ページ内で全部 svc の可能性もある）。
+    limit まで埋まるか has_more=False か max_pages に達したら止める（安全弁）。
+    """
+    import os
+    key = api_key if api_key is not None else os.environ.get(api_key_env)
+    if not key:
+        return []
+    try:
+        n = max(1, int(limit))
+    except (TypeError, ValueError):
+        n = 8
+    getter = _http_get or _default_fish_model_get
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    # svc 混入で欠ける分を吸収するため 1 ページ 20 件（or n×2）で複数ページを追う。
+    page_size = max(n * 2, 20)
+    for page in range(1, max(1, int(max_pages)) + 1):
+        params = urllib.parse.urlencode({
+            "language": language, "sort_by": sort_by,
+            "page_size": page_size, "page_number": page,
+        })
+        url = "{}?{}".format(_FISH_MODEL_LIST_URL, params)
+        try:
+            data = getter(url, key, timeout_sec)
+        except Exception:
+            break
+        if not isinstance(data, dict):
+            break
+        items = data.get("items")
+        if not isinstance(items, list) or not items:
+            break
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            # svc（歌声変換）等は除外し tts のみ。type 欠落は許容（後方互換）。
+            if it.get("type") not in (None, "tts"):
+                continue
+            vid = it.get("_id") or it.get("id")
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            out.append({
+                "id": str(vid),
+                "title": it.get("title") or "",
+                "languages": it.get("languages") or [],
+                "task_count": it.get("task_count"),
+                "like_count": it.get("like_count"),
+            })
+            if len(out) >= n:
+                return out
+        if data.get("has_more") is False:
+            break
+    return out
+
+
+def refresh_fish_catalog_cache(cache_path: str, api_key: Optional[str] = None,
+                               language: str = "ja", sort_by: str = "task_count",
+                               limit: int = 8, api_key_env: str = _FISH_API_KEY_ENV_DEFAULT,
+                               _http_get=None, _now=None) -> List[Dict[str, Any]]:
+    """fetch_fish_voices の結果を cache_path(JSON) に保存して返す（棚卸し補助）。
+
+    保存形式: {"fetched_at": epoch_sec, "language": str, "voices": [...]}。
+    取得0件（キー無し/エラー）なら書き込みはせず [] を返す（古いキャッシュを壊さない）。
+    """
+    voices = fetch_fish_voices(api_key=api_key, language=language, sort_by=sort_by,
+                               limit=limit, api_key_env=api_key_env, _http_get=_http_get)
+    if not voices:
+        return []
+    now = (_now or time.time)()
+    payload = {"fetched_at": float(now), "language": language, "voices": voices}
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return voices
+
+
+def load_cached_fish_voices(cache_path: str, max_age_sec: Optional[float] = None,
+                            _now=None) -> List[Dict[str, Any]]:
+    """refresh_fish_catalog_cache が書いた JSON を読む。無効/期限切れなら []。
+
+    max_age_sec 指定時は fetched_at からの経過がそれを超えていたら [] を返す（要再取得）。
+    """
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    voices = data.get("voices")
+    if not isinstance(voices, list):
+        return []
+    if max_age_sec is not None:
+        fetched_at = data.get("fetched_at")
+        try:
+            age = (_now or time.time)() - float(fetched_at)
+        except (TypeError, ValueError):
+            return []
+        if age > float(max_age_sec):
+            return []
+    return voices
