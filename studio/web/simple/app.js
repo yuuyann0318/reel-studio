@@ -726,6 +726,35 @@ function referenceInfoHtml(project) {
   </div>`;
 }
 
+// Fish Audio 残高不足バナー（診断A）。参考動画のASR（文字起こし）や高品質音声(Fish)は
+// Fish Audio のクレジットを消費する。残高が尽きると ASR が失敗して台本が空になり、音声も
+// 高品質版が使えない。原因が分かるよう、残高不足のサインを検知したら平易な文言で知らせ、
+// チャージ先を案内する（専門用語ゼロ）。
+// 検知元:
+//   - project.reference.warnings に「残高」を含む文言（ASR残高不足。実データで確認済み）。
+//   - project.tts.fallback_reason === "http_error_402"（TTSが残高不足でmacOS標準へ切替）。
+function fishBalanceWarningHtml(project) {
+  if (!project) return "";
+  const refWarnings = (project.reference && project.reference.warnings) || [];
+  // ASR（参考動画の文字起こし）が残高不足で失敗 → ナレーションが空になり、動画は音声なし
+  // （テロップ中心）になる。
+  const asrBalance = refWarnings.some((w) => typeof w === "string" && w.indexOf("残高") !== -1);
+  // TTS（高品質音声）が残高不足(HTTP402) → Fish から macOS 標準の声へ自動フォールバックする
+  // ので、音声そのものは付く（無音ではない）。この2つは結果が違うので文言を分ける。
+  const ttsBalance = !!(project.tts && project.tts.fallback_reason === "http_error_402");
+  if (!asrBalance && !ttsBalance) return "";
+  // 影響の説明: ASR失敗は「音声なし」、TTSのみ失敗は「標準の声に切替」。両方該当なら音声なしを優先。
+  const impact = asrBalance
+    ? "参考動画の文字起こしができないため、この動画は音声なし（テロップ中心）で作成されます。"
+    : "高品質な音声（Fish Audio）が使えないため、パソコン標準の声に切り替えて作成されます。";
+  return `<div class="s-director-note s-director-note--warn" role="alert">
+    <strong>⚠️ 音声AI（Fish Audio）の残高が不足しています。</strong>
+    ${escapeHtml(impact)}
+    続けて使うにはチャージしてください：
+    <br>https://fish.audio/
+  </div>`;
+}
+
 // 失敗の原因履歴（最新2件）。project["error"]は最新の失敗理由で上書きされるが、
 // error_historyはこれまでの失敗をすべて追記で残しているため、経緯を確認できる。
 function errorHistoryHtml(project) {
@@ -1122,6 +1151,7 @@ function renderCreating() {
       <h2>作成しています</h2>
       <div class="s-creating__theme">「${escapeHtml(theme || "")}」</div>
       ${state.current ? courseChipForProject(state.current) : courseChipHtml(state.planTier, null, state.planTier === "paid" && state.estimate.paid ? state.estimate.paid.coins : (state.planTier === "free" ? 0 : null))}
+      ${state.current ? fishBalanceWarningHtml(state.current) : ""}
       ${state.current && state.current.narration_mode === "absent" ? voiceUsedMetaHtml(state.current) : ""}
       <div class="s-steps">
         ${steps.map((s, i) => `
@@ -1182,6 +1212,7 @@ function renderResult() {
   el.innerHTML = `
     ${topbarHtml()}
     ${directorMetaHtml(project)}
+    ${fishBalanceWarningHtml(project)}
     ${ttsMetaHtml(project)}
     ${voiceUsedMetaHtml(project)}
     ${referenceInfoHtml(project)}

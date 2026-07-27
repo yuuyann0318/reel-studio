@@ -552,10 +552,11 @@ def test_generate_wires_reference_spec_to_assign_images_to_shots(monkeypatch):
                                                 "adopted": True, "reason": None} for p in paths])
 
     original_assign = jobs_mod.product_images.assign_images_to_shots
-    def _wrap_assign(shots, image_paths, reference_spec=None):
+    def _wrap_assign(shots, image_paths, reference_spec=None, image_meta=None):
         captured["reference_spec"] = reference_spec
         captured["shots_len"] = len(shots)
-        return original_assign(shots, image_paths, reference_spec=reference_spec)
+        captured["image_meta"] = image_meta
+        return original_assign(shots, image_paths, reference_spec=reference_spec, image_meta=image_meta)
     monkeypatch.setattr(jobs_mod.product_images, "assign_images_to_shots", _wrap_assign)
 
     backend = _RecordingBackend()

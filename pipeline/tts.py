@@ -175,6 +175,48 @@ def synthesize_silent_track(out_wav_path, duration_sec, cfg=None):
     return {"backend": "none", "duration_sec": dur, "is_silent": True, "mode": "none"}
 
 
+# ---------------------------------------------------------------------------
+# ナレーション有無・残高エラー判定（診断A: 空台本フル合成バグの根絶）
+# ---------------------------------------------------------------------------
+
+def _is_blank(text):
+    """text が None / 非str / 空白のみ なら True（＝実質ナレーション無し）。"""
+    return not (isinstance(text, str) and text.strip())
+
+
+def is_narration_absent(narration_mode=None, script_text=None, shot_texts=None):
+    """ナレーションが「無い」＝TTSを呼ばず無音トラックにすべきかを判定する純関数。
+
+    診断A: run.py / jobs.py の双方で「narration_mode=absent」または「台本が空」のとき
+    TTS を丸ごとスキップして尺ぴったりの無音にするための共通ヘルパ。参照する
+    narration_mode の格納位置（plan 直下 / project.json ルート直下）の食い違いで
+    absent ガードが不発 → 空台本のフル合成（壊れた音声）が混入するバグを二重で塞ぐ。
+
+    判定:
+      - narration_mode == "absent" → 常に True。
+      - shot_texts=None（studio 再レンダの script-only 経路）: script_text が空 → True。
+      - shot_texts 指定（run.py 経路。各 shot の narration_jp）:
+        script_text が空 かつ shot_texts が全て空 → True（従来 run.py の条件と同値）。
+    """
+    if narration_mode == "absent":
+        return True
+    script_empty = _is_blank(script_text)
+    if shot_texts is None:
+        return script_empty
+    all_shot_empty = bool(shot_texts) and all(_is_blank(t) for t in shot_texts)
+    return script_empty and all_shot_empty
+
+
+# Fish Audio が残高不足（クレジット切れ）で返す HTTP ステータス（Payment Required）由来の
+# fallback_reason。UI で「残高チャージのお願い」バナーを出す条件に使う。
+_BALANCE_FALLBACK_REASONS = ("http_error_402",)
+
+
+def is_balance_error(fallback_reason):
+    """TTS の fallback_reason が Fish Audio 残高不足由来かを判定する。"""
+    return fallback_reason in _BALANCE_FALLBACK_REASONS
+
+
 def _default_fish_audio_http_post(url, payload, api_key, model, timeout_sec=60):
     """Fish Audio TTS APIへPOSTし、音声バイト列を返す(stdlib urllib.requestのみ・依存追加ゼロ)。
 

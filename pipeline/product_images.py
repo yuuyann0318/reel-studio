@@ -1099,14 +1099,82 @@ def _augment_prompt(shot, phrase, marker):
         shot["visual_prompt"] = stripped.rstrip(". ") + ". " + phrase
 
 
-def _apply_product_lock(shot, product_ref):
-    """商品shotに product 参照画像を --image-references 用に前置し、ロック句を追記する。"""
-    if product_ref:
+# ロック参照として --image-references に渡す商品画像の枚数上限（B3: solo 2枚等・別角度で
+# 認識が安定する。多すぎると参照が薄まるため先頭+2枚目までに絞る）。
+_MAX_LOCK_REFERENCE_IMAGES = 2
+
+
+def _apply_product_lock(shot, product_refs):
+    """商品shotに product 参照画像を --image-references 用に前置し、ロック句を追記する。
+
+    product_refs は「商品が単体で写った」参照画像パスの優先順リスト（str 単体も許容・
+    後方互換）。先頭+2枚目まで（_MAX_LOCK_REFERENCE_IMAGES）を前置し、同一商品の別角度で
+    認識を安定させる。既存 reference_images はその後ろに温存する。
+    """
+    if isinstance(product_refs, str):
+        product_refs = [product_refs]
+    refs = [p for p in (product_refs or []) if p][:_MAX_LOCK_REFERENCE_IMAGES]
+    if refs:
         existing = list(shot.get("reference_images") or [])
-        if product_ref not in existing:
-            merged = [product_ref] + [p for p in existing if p and p != product_ref]
-            shot["reference_images"] = merged[:_MAX_PRODUCT_REFERENCE_IMAGES]
+        merged = list(refs) + [p for p in existing if p and p not in refs]
+        # 重複除去（順序保持）。
+        seen = set()
+        deduped = []
+        for p in merged:
+            if p in seen:
+                continue
+            seen.add(p)
+            deduped.append(p)
+        shot["reference_images"] = deduped[:_MAX_PRODUCT_REFERENCE_IMAGES]
     _augment_prompt(shot, _PRODUCT_LOCK_PHRASE, _PRODUCT_LOCK_MARKER)
+
+
+def _select_product_refs(paths, image_meta=None):
+    """商品1本ロックの参照画像を「商品が単体で写っている物撮り(product_solo)」優先で選ぶ。
+
+    診断B: 従来は `paths[0]`（採用リスト先頭）を全商品shotのロック参照にしていたが、
+    先頭が product_in_use（商品が写っていない使用シーンのストック写真）だと、参照に
+    ボトルが無いため AI がボトルを捏造し「渡した画像と別物」になっていた。ここでは
+    product_solo を最優先（sharpness=high をさらに優先）し、solo が無いときだけ
+    product_in_use へ縮退する。
+
+    Args:
+        paths: 採用済み商品画像の絶対パス配列（採用順）。
+        image_meta: {path: {"category":..., "sharpness":...}} の分類メタ。None または
+            該当パス無しのときは後方互換で採用順（paths）をそのまま優先度に使う。
+
+    Returns: 参照優先順に並べた path のリスト（solo→in_use→その他）。
+    """
+    paths = [p for p in (paths or []) if p]
+    if not paths:
+        return []
+    if not image_meta:
+        return list(paths)
+
+    def _cat(p):
+        return (image_meta.get(p) or {}).get("category")
+
+    def _sharp(p):
+        return (image_meta.get(p) or {}).get("sharpness")
+
+    solo_high = [p for p in paths if _cat(p) == "product_solo" and _sharp(p) == "high"]
+    solo_rest = [p for p in paths if _cat(p) == "product_solo" and p not in solo_high]
+    solo = solo_high + solo_rest
+    # solo が1枚でもあれば solo だけをロック参照候補にする（in_use は「商品が写らない」ため
+    # 混ぜると別商品を捏造する原因になる。codex-review P2: solo が1枚+in_useのとき in_use が
+    # 2枚目参照に混入するのを防ぐ。in_use はあくまで solo 皆無時の縮退フォールバック）。
+    if solo:
+        return solo
+    in_use = [p for p in paths if _cat(p) == "product_in_use"]
+    if in_use:
+        return in_use
+    others = [p for p in paths if _cat(p) not in ("product_solo", "product_in_use")]
+    ordered = others
+    # 分類メタが欠けたパスも末尾に温存（最終フォールバック）。
+    for p in paths:
+        if p not in ordered:
+            ordered.append(p)
+    return ordered
 
 
 def _apply_no_product(shot):
@@ -1158,7 +1226,7 @@ def _assign_legacy(shots, image_paths):
     return result
 
 
-def assign_images_to_shots(shots, image_paths, reference_spec=None):
+def assign_images_to_shots(shots, image_paths, reference_spec=None, image_meta=None):
     """shots(ショットリスト)へimage_pathsを決定論的に割り当てる（非破壊）。
 
     ★2026-07-25 変更（設計原則）:
@@ -1173,6 +1241,9 @@ def assign_images_to_shots(shots, image_paths, reference_spec=None):
         image_paths: 商品画像のローカル絶対パス配列。
         reference_spec: 参考動画 v2 spec（dict）。None のときは従来経路（フック+CTA+中間）で
             割当てる（後方互換。旧テスト・reference無しモード用）。
+        image_meta: {path: {"category","sharpness"}} の商品画像分類メタ（product_manifest 由来）。
+            指定すると商品1本ロックの参照画像を product_solo 優先で選ぶ（診断B）。None のときは
+            従来どおり採用順先頭を参照にする（後方互換）。
 
     ロジック（reference_spec 有り）:
         - 商品shot（product_shot_indices）を抽出。
@@ -1197,9 +1268,11 @@ def assign_images_to_shots(shots, image_paths, reference_spec=None):
         return result
 
     product_indices = product_shot_indices(shots, reference_spec=reference_spec)
-    # 商品1本ロックの参照画像 = 採用済み商品画像の先頭（product_manifest の adopted 先頭）。
-    # 全ての商品shotで同一の1枚を --image-references に渡し、商品の同一性を担保する。
-    product_ref = paths[0]
+    # 商品1本ロックの参照画像 = 「商品が単体で写った物撮り(product_solo)」を最優先で選ぶ。
+    # 診断B: 従来は paths[0]（採用順先頭）を無条件参照にしていたが、先頭が
+    # product_in_use（商品が写らない使用シーン写真）だと AI がボトルを捏造して別物になった。
+    # solo が無いときだけ in_use へ縮退する（image_meta 未指定なら従来どおり採用順）。
+    product_refs = _select_product_refs(paths, image_meta=image_meta)
 
     if not product_indices:
         # 縮退: フック(0) と CTA(n-1) の2点のみ image-to-video 起点にする
@@ -1213,7 +1286,7 @@ def assign_images_to_shots(shots, image_paths, reference_spec=None):
         # 縮退時も「フック/CTA=商品shot」にロック、それ以外は「ボトルを出すな」。
         for i in range(n):
             if i in product_set:
-                _apply_product_lock(result[i], product_ref)
+                _apply_product_lock(result[i], product_refs)
             else:
                 _apply_no_product(result[i])
         return result
@@ -1227,7 +1300,7 @@ def assign_images_to_shots(shots, image_paths, reference_spec=None):
     product_set = set(product_indices)
     for i in range(n):
         if i in product_set:
-            _apply_product_lock(result[i], product_ref)
+            _apply_product_lock(result[i], product_refs)
         else:
             _apply_no_product(result[i])
     return result

@@ -552,6 +552,7 @@ class JobManager:
         # （TTS同様「パイプライン全体が必ず完成すること」を優先する既存設計を踏襲）。
         product_info = None
         product_image_paths = []
+        entry_by_path = {}
         if product_url:
             self._emit(job_id, "product", 3, "商品画像を取得中…")
             pcfg = cfg.get("product_images") or {}
@@ -639,6 +640,18 @@ class JobManager:
                     adopted=bool(info.get("adopted")) if info else True,
                     reason=info.get("reason"),
                 ))
+            # 診断B: 採用画像が product_in_use（使用シーン）のみで product_solo（商品単体の
+            # 物撮り）が1枚も無いと、商品1本ロックの参照が「商品の写らない写真」になり同一性が
+            # 下がる。ユーザーに「商品単体の写真があると精度が上がる」ことを一言で知らせる。
+            if product_image_paths:
+                adopted_cats = {
+                    (entry_by_path.get(p) or {}).get("category") for p in product_image_paths
+                }
+                if "product_solo" not in adopted_cats and "product_in_use" in adopted_cats:
+                    classify_warnings.append(
+                        "商品単体の写真が無いため使用シーンの画像で代用します"
+                        "（商品ページに商品だけを写した画像があると精度が上がります）"
+                    )
             combined_warnings = list(result.get("warnings") or []) + classify_warnings
             product_info = {
                 "name": result.get("name") or "",
@@ -828,6 +841,8 @@ class JobManager:
             # 全shot散布 → 商品shotのみ に絞り込まれる（該当0件のときはフック+CTAへ縮退）。
             shots = product_images.assign_images_to_shots(
                 shots, product_image_paths, reference_spec=reference_spec,
+                # 診断B: 商品1本ロックの参照画像を product_solo 優先で選ぶための分類メタ。
+                image_meta=entry_by_path,
             )
         pdir = projects.project_dir(project_id)
         clips_dir = projects.clips_dir(project_id)
@@ -1668,8 +1683,15 @@ def _render_project(project_id, plan, cfg):
         if _proj_v is not None:
             _proj_v["voice_used"] = {"key": _voice_used.get("key"), "label": _voice_used.get("label")}
             projects.save_project(_proj_v)
+    # 診断A（絶対無音化・最優先ガード）: narration_mode="absent"（project ルート直下）または
+    # 台本(narration_text)が空/空白なら、たとえ narration_segments が残っていても音声を一切
+    # 合成しない。segment 経路（sync）は絶対無音化ガードより手前で合成してしまうため、ここで
+    # 先に absent を確定させて sync を無効化し、下流の else 分岐（無音トラック）へ必ず落とす。
+    _proj_nmode = (project_snapshot or {}).get("narration_mode")
+    _plan_script = plan.get("narration_text", "")
+    narration_absent = tts_mod.is_narration_absent(_proj_nmode, _plan_script)
     narration_segments_map = (project_snapshot or {}).get("narration_segments") or {}
-    sync_enabled = bool(narration_segments_map) and all(
+    sync_enabled = (not narration_absent) and bool(narration_segments_map) and all(
         isinstance(narration_segments_map.get(s["id"]), str) and narration_segments_map.get(s["id"]).strip()
         for s in enabled_shots
     )
@@ -1788,11 +1810,19 @@ def _render_project(project_id, plan, cfg):
                 "max_tempo": render.TEMPO_GUARD_MAX_TEMPO,
             }
     else:
-        tts_backend = tts_mod.get_tts_backend(
-            voice=_say_voice, cfg=cfg, engine=_tts_engine, fish_reference_id=_fish_ref,
-        )
-        tts_meta = dict(tts_backend.synthesize(plan.get("narration_text", ""), str(narration_path), cfg))
-        tts_meta["mode"] = "full"
+        # 診断A（絶対無音化）: narration_mode="absent"（project.json ルート直下）または
+        # 台本(narration_text)が空/空白のときは TTS を丸ごと呼ばず、尺ぴったりの無音トラックに
+        # する（narration_absent は sync 判定の手前で確定済み）。従来はこの分岐で空台本を
+        # Fish/say にフル合成させ、壊れた音声（例: 8.5秒）が無音であるべき動画に混入していた。
+        if narration_absent:
+            tts_meta = tts_mod.synthesize_silent_track(str(narration_path), out_duration, cfg)
+            tts_meta["mode"] = "none"
+        else:
+            tts_backend = tts_mod.get_tts_backend(
+                voice=_say_voice, cfg=cfg, engine=_tts_engine, fish_reference_id=_fish_ref,
+            )
+            tts_meta = dict(tts_backend.synthesize(_plan_script, str(narration_path), cfg))
+            tts_meta["mode"] = "full"
 
     telop_pieces = subtitles.build_telop_pieces_from_shots(telop_shots, hook_shot_id=telop_shots[0]["id"] if telop_shots else None)
     product_name = ((projects.get_project(project_id) or {}).get("product") or {}).get("name")

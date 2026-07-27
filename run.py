@@ -619,10 +619,12 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
     report["voice_used"] = {"key": voice_used.get("key"), "label": voice_used.get("label")}
     # P0-2: narration_mode="absent"（参考にナレーション無し）は TTS を丸ごとスキップし、
     # 尺ぴったりの無音トラックだけ用意する（BGM+テロップで成立・尺 drift 0）。
-    narration_absent = (plan.get("narration_mode") == "absent") or (
-        bool(shots)
-        and all(not (isinstance(s.get("narration_jp"), str) and s.get("narration_jp").strip()) for s in shots)
-        and not (isinstance(plan.get("narration_script"), str) and plan.get("narration_script").strip())
+    # 診断A: narration_mode / 台本の空判定を共通ヘルパへ集約（run/jobs 両経路で同一挙動）。
+    # narration_mode の格納位置差（plan 直下 / project ルート）による絶対無音化の不発を塞ぐ。
+    narration_absent = tts_mod.is_narration_absent(
+        plan.get("narration_mode"),
+        script_text=plan.get("narration_script"),
+        shot_texts=[s.get("narration_jp") for s in shots],
     )
     try:
         with _timed_stage(report, "tts"):
@@ -685,11 +687,22 @@ def run_pipeline(theme, target_duration_sec, backend_name, no_llm, cfg, quality=
             else:
                 for shot in shots:
                     shot_display_durations[shot["id"]] = shot["duration_sec"]
-                tts_backend = tts_mod.get_tts_backend(
-                    voice=_say_voice, cfg=cfg, engine=_tts_engine, fish_reference_id=_fish_ref,
-                )
-                tts_meta = dict(tts_backend.synthesize(plan.get("narration_script", ""), str(narration_wav_path), cfg))
-                tts_meta["mode"] = "full"
+                # 診断A（絶対無音化・二重防御）: sync 非対象で全文モードに落ちたときも、
+                # 台本が空/空白なら TTS を呼ばず尺ぴったりの無音にする。absent ガードを
+                # すり抜けても壊れた音声（空台本のフル合成）を絶対に混入させない。
+                _script = plan.get("narration_script", "")
+                if tts_mod.is_narration_absent(None, script_text=_script):
+                    _full_total = sum(shot["duration_sec"] for shot in shots) if shots else 0.0
+                    tts_meta = tts_mod.synthesize_silent_track(
+                        str(narration_wav_path), _full_total, cfg
+                    )
+                    tts_meta["mode"] = "none"
+                else:
+                    tts_backend = tts_mod.get_tts_backend(
+                        voice=_say_voice, cfg=cfg, engine=_tts_engine, fish_reference_id=_fish_ref,
+                    )
+                    tts_meta = dict(tts_backend.synthesize(_script, str(narration_wav_path), cfg))
+                    tts_meta["mode"] = "full"
 
             report["stages"]["tts"]["backend"] = tts_meta.get("backend")
             report["stages"]["tts"]["duration_sec"] = tts_meta.get("duration_sec")
